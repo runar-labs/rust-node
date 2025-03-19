@@ -16,6 +16,10 @@ use crate::vmap_opt;
 use crate::db::SqliteDatabase;
 use crate::node::NodeConfig;
 
+// Import ValueType and SerializableStruct from runar_common
+use runar_common::types::ValueType;
+use runar_common::types::SerializableStruct;
+
 // Export the abstract service module
 pub mod abstract_service;
 // Export the sqlite service module
@@ -44,6 +48,10 @@ pub use node_info::NodeInfoService;
 pub use remote::{P2PTransport, RemoteService};
 pub use sqlite::SqliteService;
 pub use manager::*;
+
+// Re-export ValueType and SerializableStruct from runar_common
+pub use runar_common::types::ValueType;
+pub use runar_common::types::SerializableStruct;
 
 // Re-export distributed registry types (for macros)
 pub use distributed_registry::{
@@ -169,339 +177,12 @@ pub enum ResponseStatus {
     Error,
 }
 
-/// A generic value type that can represent different kinds of data
-/// This allows us to pass native data structures through the Node API
-/// and only serialize to JSON when needed at transport boundaries
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum ValueType {
-    /// JSON value (for compatibility with external services)
-    Json(Value),
-    /// HashMap of string keys to ValueType values
-    Map(HashMap<String, ValueType>),
-    /// Vector of ValueType values
-    Array(Vec<ValueType>),
-    /// String value
-    String(String),
-    /// Numeric value
-    Number(f64),
-    /// Boolean value
-    Bool(bool),
-    /// Null/None value
-    Null,
-    /// Binary data
-    #[serde(with = "serde_bytes")]
-    Bytes(Vec<u8>),
-    /// Raw struct data (serialized on demand)
-    #[serde(skip)]
-    Struct(Arc<dyn SerializableStruct + Send + Sync + 'static>),
-}
-
-/// Trait for types that can be stored in a ValueType::Struct
-pub trait SerializableStruct: std::fmt::Debug {
-    /// Convert to a HashMap representation
-    fn to_map(&self) -> Result<HashMap<String, ValueType>>;
-
-    /// Convert to JSON Value
-    fn to_json_value(&self) -> Result<Value>;
-
-    /// Get the type name (for debugging)
-    fn type_name(&self) -> &'static str;
-
-    /// Clone the struct (required since we can't directly clone a dyn trait)
-    fn clone_box(&self) -> Box<dyn SerializableStruct + Send + Sync + 'static>;
-}
-
-// We need to create our own Clone impl for Box<dyn SerializableStruct>
-// to avoid orphan rule violations
-impl Clone for Box<dyn SerializableStruct + Send + Sync + 'static> {
-    fn clone(&self) -> Self {
-        self.clone_box()
-    }
-}
-
-// Define our own wrapper to avoid the orphan rule violation for Arc cloning
+/// Define our own wrapper to avoid the orphan rule violation for Arc cloning
 pub struct StructArc(pub Box<dyn SerializableStruct + Send + Sync + 'static>);
 
 impl Clone for StructArc {
     fn clone(&self) -> Self {
         StructArc(self.0.clone())
-    }
-}
-
-/// Implementation for any type that implements Serialize and Debug
-impl<T> SerializableStruct for T
-where
-    T: std::fmt::Debug + serde::Serialize + Clone + Send + Sync + 'static,
-{
-    fn to_map(&self) -> Result<HashMap<String, ValueType>> {
-        // Convert to JSON first
-        let json = serde_json::to_value(self)?;
-
-        // Then convert JSON to map
-        match json {
-            Value::Object(map) => {
-                let mut value_map = HashMap::new();
-                for (key, value) in map {
-                    value_map.insert(key, ValueType::from_json(value));
-                }
-                Ok(value_map)
-            }
-            _ => Err(anyhow!("Expected a JSON object, got: {:?}", json)),
-        }
-    }
-
-    fn to_json_value(&self) -> Result<Value> {
-        serde_json::to_value(self).map_err(|e| anyhow!("Serialization error: {}", e))
-    }
-
-    fn type_name(&self) -> &'static str {
-        std::any::type_name::<T>()
-    }
-
-    fn clone_box(&self) -> Box<dyn SerializableStruct + Send + Sync + 'static> {
-        Box::new(self.clone())
-    }
-}
-
-impl ValueType {
-    /// Create a ValueType from a JSON Value
-    pub fn from_json(value: Value) -> Self {
-        ValueType::Json(value)
-    }
-
-    /// Convert this ValueType to a JSON Value
-    pub fn to_json(&self) -> Value {
-        match self {
-            ValueType::Json(value) => value.clone(),
-            ValueType::Map(map) => {
-                let mut json_map = serde_json::Map::new();
-                for (key, value) in map {
-                    json_map.insert(key.clone(), value.to_json());
-                }
-                Value::Object(json_map)
-            }
-            ValueType::Array(array) => {
-                let json_array = array.iter().map(|v| v.to_json()).collect();
-                Value::Array(json_array)
-            }
-            ValueType::String(s) => Value::String(s.clone()),
-            ValueType::Number(n) => {
-                if let Some(f) = serde_json::Number::from_f64(*n) {
-                    Value::Number(f)
-                } else {
-                    Value::Null
-                }
-            }
-            ValueType::Bool(b) => Value::Bool(*b),
-            ValueType::Null => Value::Null,
-            ValueType::Bytes(b) => {
-                // Base64 encode binary data for JSON representation
-                let base64 = base64::encode(b);
-                Value::String(base64)
-            }
-            ValueType::Struct(s) => {
-                // Serialize the struct to JSON on demand
-                match s.to_json_value() {
-                    Ok(v) => v,
-                    Err(_) => Value::Null,
-                }
-            }
-        }
-    }
-
-    /// Convert this ValueType to a HashMap if possible
-    pub fn to_map(&self) -> Result<HashMap<String, ValueType>> {
-        match self {
-            ValueType::Map(map) => Ok(map.clone()),
-            ValueType::Json(Value::Object(obj)) => {
-                let mut map = HashMap::new();
-                for (k, v) in obj {
-                    map.insert(k.clone(), ValueType::from_json(v.clone()));
-                }
-                Ok(map)
-            }
-            ValueType::Struct(s) => s.to_map(),
-            _ => Err(anyhow!("Cannot convert {:?} to HashMap", self)),
-        }
-    }
-
-    /// Get a reference to a map if this ValueType is a Map
-    pub fn as_map(&self) -> Option<&HashMap<String, ValueType>> {
-        match self {
-            ValueType::Map(map) => Some(map),
-            _ => None,
-        }
-    }
-
-    /// Get a reference to an array if this ValueType is an Array
-    pub fn as_array(&self) -> Option<&Vec<ValueType>> {
-        match self {
-            ValueType::Array(array) => Some(array),
-            _ => None,
-        }
-    }
-
-    /// Get a reference to a string if this ValueType is a String
-    pub fn as_str(&self) -> Option<&str> {
-        match self {
-            ValueType::String(s) => Some(s),
-            _ => None,
-        }
-    }
-
-    /// Get an integer if this ValueType is an Integer
-    pub fn as_i64(&self) -> Option<i64> {
-        match self {
-            ValueType::Number(n) => Some(*n as i64),
-            _ => None,
-        }
-    }
-
-    /// Get a float if this ValueType is a Float
-    pub fn as_f64(&self) -> Option<f64> {
-        match self {
-            ValueType::Number(n) => Some(*n),
-            _ => None,
-        }
-    }
-
-    /// Get a boolean if this ValueType is a Boolean
-    pub fn as_bool(&self) -> Option<bool> {
-        match self {
-            ValueType::Bool(b) => Some(*b),
-            _ => None,
-        }
-    }
-
-    /// Get a reference to bytes if this ValueType is Bytes
-    pub fn as_bytes(&self) -> Option<&[u8]> {
-        match self {
-            ValueType::Bytes(b) => Some(b),
-            _ => None,
-        }
-    }
-
-    /// Get a map value by key
-    pub fn get(&self, key: &str) -> Option<ValueType> {
-        match self {
-            ValueType::Map(map) => map.get(key).cloned(),
-            ValueType::Json(Value::Object(map)) => {
-                // Create a ValueType from the JSON value
-                map.get(key).map(|v| ValueType::from_json(v.clone()))
-            }
-            ValueType::Struct(s) => {
-                // Try to convert to map first
-                match s.to_map() {
-                    Ok(map) => map.get(key).cloned(),
-                    Err(_) => None,
-                }
-            }
-            _ => None,
-        }
-    }
-
-    /// Get a reference to a map value by key without cloning (unsafe, only use for readonly)
-    pub fn get_ref(&self, key: &str) -> Option<&ValueType> {
-        match self {
-            ValueType::Map(map) => map.get(key),
-            _ => None,
-        }
-    }
-}
-
-/// Convenient conversions from Rust types to ValueType
-impl From<String> for ValueType {
-    fn from(s: String) -> Self {
-        ValueType::String(s)
-    }
-}
-
-impl From<&str> for ValueType {
-    fn from(s: &str) -> Self {
-        ValueType::String(s.to_string())
-    }
-}
-
-impl From<i64> for ValueType {
-    fn from(i: i64) -> Self {
-        ValueType::Number(i as f64)
-    }
-}
-
-impl From<i32> for ValueType {
-    fn from(i: i32) -> Self {
-        ValueType::Number(i as f64)
-    }
-}
-
-impl From<f64> for ValueType {
-    fn from(f: f64) -> Self {
-        ValueType::Number(f)
-    }
-}
-
-impl From<bool> for ValueType {
-    fn from(b: bool) -> Self {
-        ValueType::Bool(b)
-    }
-}
-
-impl From<Vec<u8>> for ValueType {
-    fn from(b: Vec<u8>) -> Self {
-        ValueType::Bytes(b)
-    }
-}
-
-impl From<HashMap<String, ValueType>> for ValueType {
-    fn from(map: HashMap<String, ValueType>) -> Self {
-        ValueType::Map(map)
-    }
-}
-
-impl From<Vec<ValueType>> for ValueType {
-    fn from(array: Vec<ValueType>) -> Self {
-        ValueType::Array(array)
-    }
-}
-
-/// Implementation of From<Value> for ValueType
-impl From<Value> for ValueType {
-    fn from(value: Value) -> Self {
-        match value {
-            Value::String(s) => ValueType::String(s),
-            Value::Number(n) => {
-                if n.is_i64() {
-                    ValueType::Number(n.as_i64().unwrap_or(0) as f64)
-                } else if n.is_u64() {
-                    ValueType::Number(n.as_u64().unwrap_or(0) as f64)
-                } else {
-                    ValueType::Number(n.as_f64().unwrap_or(0.0))
-                }
-            }
-            Value::Bool(b) => ValueType::Bool(b),
-            Value::Array(arr) => {
-                let mut vec = Vec::new();
-                for item in arr {
-                    vec.push(ValueType::from(item));
-                }
-                ValueType::Array(vec)
-            }
-            Value::Object(obj) => {
-                let mut map = HashMap::new();
-                for (k, v) in obj {
-                    map.insert(k, ValueType::from(v));
-                }
-                ValueType::Map(map)
-            }
-            Value::Null => ValueType::Null,
-        }
-    }
-}
-
-impl Default for ValueType {
-    fn default() -> Self {
-        ValueType::Null
     }
 }
 
@@ -841,22 +522,6 @@ impl ServiceManager {
     }
 }
 
-impl fmt::Display for ValueType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ValueType::String(s) => write!(f, "{}", s),
-            ValueType::Number(n) => write!(f, "{}", n),
-            ValueType::Bool(b) => write!(f, "{}", b),
-            ValueType::Null => write!(f, "null"),
-            ValueType::Json(json) => write!(f, "{}", json),
-            ValueType::Map(_) => write!(f, "{{...}}"),
-            ValueType::Array(_) => write!(f, "[...]"),
-            ValueType::Bytes(_) => write!(f, "<binary>"),
-            ValueType::Struct(_) => write!(f, "<struct>"),
-        }
-    }
-}
-
 /// Wrapper type for external types to allow implementing traits for them
 pub struct ValueWrapper<T>(pub T);
 
@@ -902,7 +567,7 @@ impl IntoValueType for bool {
 /// # Examples
 ///
 /// ```
-/// use kagi_node::vmap;
+/// use runar_node::vmap;
 /// let map = vmap! {
 ///     "name" => "John Doe",
 ///     "age" => 30,
@@ -920,11 +585,11 @@ macro_rules! vmap {
         $(
             map.insert($key.to_string(), $value.into());
         )*
-        $crate::services::ValueType::Map(map)
+        runar_common::types::ValueType::Map(map)
     }};
     () => {{
         let map = std::collections::HashMap::new();
-        $crate::services::ValueType::Map(map)
+        runar_common::types::ValueType::Map(map)
     }};
 }
 
@@ -936,109 +601,19 @@ macro_rules! vmap_opt {
         $(
             map.insert($key.to_string(), $value.into());
         )*
-        Some($crate::services::ValueType::Map(map))
+        Some(runar_common::types::ValueType::Map(map))
     }};
     () => {{
         let map = std::collections::HashMap::new();
-        Some($crate::services::ValueType::Map(map))
+        Some(runar_common::types::ValueType::Map(map))
     }};
 }
 
 /// Helper function to convert a value to ValueType
 /// This is used by the vmap! macro
 pub fn to_value_type<T: Serialize>(value: T) -> ValueType {
-    // Special case for &str or String
-    if let Ok(s) = serde_json::to_value(&value) {
-        if s.is_string() {
-            if let Value::String(string_val) = s {
-                return ValueType::String(string_val);
-            }
-        }
-    }
-
-    // Use serde_json to convert the value to a JSON Value first
-    match serde_json::to_value(value) {
-        Ok(Value::String(s)) => ValueType::String(s),
-        Ok(Value::Number(n)) => {
-            if let Some(f) = n.as_f64() {
-                ValueType::Number(f)
-            } else {
-                ValueType::Number(n.as_i64().unwrap_or(0) as f64)
-            }
-        }
-        Ok(Value::Bool(b)) => ValueType::Bool(b),
-        Ok(Value::Array(arr)) => {
-            let values = arr.into_iter().map(|v| ValueType::Json(v)).collect();
-            ValueType::Array(values)
-        }
-        Ok(Value::Object(obj)) => {
-            let mut map = HashMap::new();
-            for (k, v) in obj {
-                // Recursively convert each value using its appropriate type
-                map.insert(
-                    k,
-                    match v {
-                        Value::String(s) => ValueType::String(s),
-                        Value::Number(n) => {
-                            if let Some(f) = n.as_f64() {
-                                ValueType::Number(f)
-                            } else {
-                                ValueType::Number(n.as_i64().unwrap_or(0) as f64)
-                            }
-                        }
-                        Value::Bool(b) => ValueType::Bool(b),
-                        Value::Array(arr) => {
-                            let values = arr
-                                .into_iter()
-                                .map(|item| match item {
-                                    Value::String(s) => ValueType::String(s),
-                                    Value::Number(n) => {
-                                        if let Some(f) = n.as_f64() {
-                                            ValueType::Number(f)
-                                        } else {
-                                            ValueType::Number(n.as_i64().unwrap_or(0) as f64)
-                                        }
-                                    }
-                                    Value::Bool(b) => ValueType::Bool(b),
-                                    Value::Object(obj) => ValueType::Json(Value::Object(obj)),
-                                    Value::Array(arr) => ValueType::Json(Value::Array(arr)),
-                                    Value::Null => ValueType::Null,
-                                })
-                                .collect();
-                            ValueType::Array(values)
-                        }
-                        Value::Object(nested_obj) => {
-                            let mut nested_map = HashMap::new();
-                            for (nested_k, nested_v) in nested_obj {
-                                nested_map.insert(
-                                    nested_k,
-                                    match nested_v {
-                                        Value::String(s) => ValueType::String(s),
-                                        Value::Number(n) => {
-                                            if let Some(f) = n.as_f64() {
-                                                ValueType::Number(f)
-                                            } else {
-                                                ValueType::Number(n.as_i64().unwrap_or(0) as f64)
-                                            }
-                                        }
-                                        Value::Bool(b) => ValueType::Bool(b),
-                                        Value::Object(obj) => ValueType::Json(Value::Object(obj)),
-                                        Value::Array(arr) => ValueType::Json(Value::Array(arr)),
-                                        Value::Null => ValueType::Null,
-                                    },
-                                );
-                            }
-                            ValueType::Map(nested_map)
-                        }
-                        Value::Null => ValueType::Null,
-                    },
-                );
-            }
-            ValueType::Map(map)
-        }
-        Ok(Value::Null) => ValueType::Null,
-        Err(_) => ValueType::Null,
-    }
+    // Use runar_common's ValueType conversion functionality
+    runar_common::types::to_value_type(value)
 }
 
 /// Helper function to check if a value can be cast to a specific type
@@ -1050,7 +625,7 @@ fn option_as<U: 'static>(value: &dyn Any) -> Option<&U> {
 #[macro_export]
 macro_rules! vjson {
     ($($json:tt)+) => {
-        $crate::services::ValueType::from(serde_json::json!($($json)+))
+        runar_common::types::ValueType::from(serde_json::json!($($json)+))
     };
 }
 
@@ -1186,61 +761,3 @@ impl RequestContext {
         self.subscribe_with_options(topic, callback, options).await
     }
 }
-
-impl From<ValueType> for serde_json::Value {
-    fn from(value: ValueType) -> Self {
-        match value {
-            ValueType::String(s) => serde_json::Value::String(s),
-            ValueType::Number(n) => {
-                if let Some(num) = serde_json::Number::from_f64(n) {
-                    serde_json::Value::Number(num)
-                } else {
-                    serde_json::Value::Null
-                }
-            },
-            ValueType::Bool(b) => serde_json::Value::Bool(b),
-            ValueType::Array(arr) => serde_json::Value::Array(arr.into_iter().map(|v| v.into()).collect()),
-            ValueType::Map(map) => serde_json::Value::Object(map.into_iter().map(|(k, v)| (k, v.into())).collect()),
-            ValueType::Json(v) => v,
-            ValueType::Null => serde_json::Value::Null,
-            ValueType::Bytes(b) => serde_json::Value::String(base64::encode(&b)),
-            ValueType::Struct(s) => s.to_json_value().unwrap_or(serde_json::Value::Null),
-        }
-    }
-}
-
-impl From<f32> for ValueType {
-    fn from(value: f32) -> Self {
-        ValueType::Number(value as f64)
-    }
-}
-
-/* Commenting out duplicate definitions
-#[async_trait::async_trait]
-pub trait AbstractService: Send + Sync + 'static {
-    fn name(&self) -> &str;
-    fn path(&self) -> &str;
-    fn state(&self) -> &str;
-    fn description(&self) -> &str;
-    fn metadata(&self) -> ServiceMetadata;
-    async fn init(&mut self) -> Result<()>;
-    async fn start(&mut self) -> Result<()>;
-    async fn stop(&mut self) -> Result<()>;
-    async fn handle_request(&self, ctx: RequestContext) -> Result<ServiceResponse>;
-}
-
-#[derive(Debug, Clone)]
-pub struct ServiceMetadata {
-    pub operations: Vec<String>,
-    pub description: String,
-}
-
-impl ServiceMetadata {
-    pub fn new(operations: Vec<String>, description: String) -> Self {
-        Self {
-            operations,
-            description,
-        }
-    }
-}
-*/

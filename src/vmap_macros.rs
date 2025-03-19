@@ -4,7 +4,8 @@
 // in a type-safe and ergonomic way.
 
 use std::collections::HashMap;
-use crate::services::ValueType;
+// Import ValueType from runar_common instead of the local module
+use runar_common::types::ValueType;
 
 // NOTE: Macros are defined in services/mod.rs and exported at the crate root
 // These definitions are commented out to prevent redefinition errors

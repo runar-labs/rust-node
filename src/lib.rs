@@ -14,6 +14,10 @@ pub mod util;
 pub mod web;
 pub mod vmap_macros;
 
+// Import common types from runar_common
+pub use runar_common::types::ValueType;
+pub use runar_common::types::SerializableStruct;
+
 // Re-export types for easier access
 pub use anyhow::Result;
 use std::path::PathBuf;
@@ -26,7 +30,7 @@ use crate::services::service_registry::ServiceRegistry;
 // Re-export important types and traits for macros and external use
 pub use crate::node::NodeConfig;
 pub use crate::services::{
-    RequestContext, ResponseStatus, ServiceRequest, ServiceResponse, ValueType,
+    RequestContext, ResponseStatus, ServiceRequest, ServiceResponse,
     // Re-export registry types for macros
     ActionHandler, ProcessHandler, EventSubscription, PublicationInfo,
 };
@@ -40,13 +44,15 @@ pub use crate::p2p::transport::P2PTransport;
 // Re-export initializer types
 pub use crate::init::{Initializer, INITIALIZERS};
 
-// Re-export macros 
-// Note: These are already defined in services/mod.rs
-// Comment them out to avoid redefinition errors
-// pub use crate::vmap;
-// pub use crate::vmap_opt;
-// pub use crate::vmap_extract;
-// pub use crate::vmap_direct;
+// Re-export macros
+// Use macros from runar_common
+pub use runar_common::vmap;
+pub use runar_common::vmap_opt;
+pub use runar_common::vmap_extract;
+pub use runar_common::vmap_extract_string;
+pub use runar_common::vmap_extract_i32;
+pub use runar_common::vmap_extract_f64;
+pub use runar_common::vmap_extract_bool;
 
 // Re-export distributed slice attribute if enabled
 #[cfg(feature = "distributed_slice")]
