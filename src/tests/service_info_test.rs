@@ -1,4 +1,4 @@
-use kagi_common::ServiceInfo;
+use runar_common::ServiceInfo;
 
 #[test]
 fn test_service_info_trait() {

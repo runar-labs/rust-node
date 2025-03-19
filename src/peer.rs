@@ -224,7 +224,7 @@ impl Peer {
             .map_err(|e| anyhow!("Failed to create server config: {}", e))?;
 
         // Set ALPN protocols
-        server_config.alpn_protocols = vec![b"kagi-p2p".to_vec()];
+        server_config.alpn_protocols = vec![b"runar-p2p".to_vec()];
 
         let server_config = quinn::ServerConfig::with_crypto(Arc::new(server_config));
 
@@ -235,7 +235,7 @@ impl Peer {
             .with_no_client_auth();
 
         // Set ALPN protocols
-        client_crypto.alpn_protocols = vec![b"kagi-p2p".to_vec()];
+        client_crypto.alpn_protocols = vec![b"runar-p2p".to_vec()];
 
         let client_config = quinn::ClientConfig::new(Arc::new(client_crypto));
 
