@@ -2,7 +2,8 @@ use crate::p2p::crypto::{AccessToken, Crypto, NetworkId, PeerId};
 use crate::p2p::peer::{NetworkInfo, Peer};
 use crate::p2p::stun::get_public_endpoint;
 use crate::services::remote::P2PTransport as P2PTransportTrait;
-use crate::services::{ServiceResponse, ValueType};
+use crate::services::ServiceResponse;
+use crate::services::types::ValueType;
 use crate::util::logging::{debug_log, error_log, info_log, warn_log, Component};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -53,6 +54,9 @@ pub enum P2PMessage {
         path: String,
         /// Request parameters
         params: ValueType,
+        /// Optional metadata for additional context
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<HashMap<String, ValueType>>,
     },
     /// Service response message
     Response {
@@ -60,6 +64,9 @@ pub enum P2PMessage {
         request_id: String,
         /// Response data
         response: ServiceResponse,
+        /// Optional metadata for additional context
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<HashMap<String, ValueType>>,
     },
     /// Event message
     Event {
@@ -67,11 +74,17 @@ pub enum P2PMessage {
         topic: String,
         /// Event data
         data: ValueType,
+        /// Optional metadata for additional context
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<HashMap<String, ValueType>>,
     },
     /// Service discovery message
     ServiceDiscovery {
         /// Services available on the peer
         services: Vec<P2PServiceInfo>,
+        /// Optional metadata for additional context
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<HashMap<String, ValueType>>,
     },
     /// Connection notification message
     ConnectNotification {
@@ -79,6 +92,9 @@ pub enum P2PMessage {
         peer_id: PeerId,
         /// The address of the connecting peer
         address: String,
+        /// Optional metadata for additional context
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        metadata: Option<HashMap<String, ValueType>>,
     },
 }
 
@@ -259,6 +275,7 @@ impl P2PTransport {
                         P2PMessage::Response {
                             request_id,
                             response,
+                            metadata: _,
                         } => {
                             // Handle response
                             debug_log(
@@ -289,7 +306,7 @@ impl P2PTransport {
                             // Don't forward responses
                             continue;
                         }
-                        P2PMessage::Event { topic, data } => {
+                        P2PMessage::Event { topic, data, metadata: _ } => {
                             // Handle event
                             debug_log(
                                 Component::P2P,
@@ -321,6 +338,7 @@ impl P2PTransport {
                             request_id,
                             path,
                             params: _,
+                            metadata: _,
                         } => {
                             // Handle request
                             debug_log(
@@ -333,7 +351,7 @@ impl P2PTransport {
                             let _ = tx.send((peer_id.clone(), data.clone())).await;
                             continue;
                         }
-                        P2PMessage::ServiceDiscovery { services } => {
+                        P2PMessage::ServiceDiscovery { services, metadata: _ } => {
                             // Handle service discovery
                             debug_log(
                                 Component::P2P,
@@ -361,6 +379,7 @@ impl P2PTransport {
                         P2PMessage::ConnectNotification {
                             peer_id: connecting_peer_id,
                             address,
+                            metadata: _,
                         } => {
                             debug_log(
                                 Component::P2P,
@@ -395,6 +414,94 @@ impl P2PTransport {
         uuid::Uuid::new_v4().to_string()
     }
 
+    /// Send a request to a peer with optional metadata
+    async fn send_request_with_metadata(
+        &self,
+        peer_id: PeerId,
+        path: String,
+        params: ValueType,
+        metadata: Option<HashMap<String, ValueType>>,
+    ) -> Result<ServiceResponse> {
+        debug_log(
+            Component::P2P,
+            &format!("Sending request to peer {:?}: path={}", peer_id, path),
+        )
+        .await;
+
+        // Generate a unique request ID
+        let request_id = Self::generate_request_id();
+
+        // Create a channel for the response
+        let (tx, rx) = oneshot::channel();
+
+        // Store the response channel
+        {
+            let mut pending_requests = self.pending_requests.write().await;
+            pending_requests.insert(request_id.clone(), tx);
+        }
+
+        // Create and send the request message
+        let request = P2PMessage::Request {
+            request_id: request_id.clone(),
+            path,
+            params,
+            metadata,
+        };
+
+        self.send_to_peer(peer_id.clone(), request).await?;
+
+        // Wait for the response with a timeout
+        match tokio::time::timeout(Duration::from_secs(30), rx).await {
+            Ok(Ok(response)) => {
+                debug_log(
+                    Component::P2P,
+                    &format!("Received response for request {}", request_id),
+                )
+                .await;
+                Ok(response)
+            }
+            Ok(Err(_)) => {
+                error_log(
+                    Component::P2P,
+                    &format!(
+                        "Channel closed before receiving response for request {}",
+                        request_id
+                    ),
+                )
+                .await;
+                Err(anyhow!("Response channel closed unexpectedly"))
+            }
+            Err(_) => {
+                error_log(
+                    Component::P2P,
+                    &format!("Request {} to peer {:?} timed out", request_id, peer_id),
+                )
+                .await;
+                Err(anyhow!("Request timed out"))
+            }
+        }
+    }
+
+    /// Publish an event to a peer with optional metadata
+    async fn publish_event_with_metadata(
+        &self,
+        peer_id: PeerId,
+        topic: String,
+        data: ValueType,
+        metadata: Option<HashMap<String, ValueType>>,
+    ) -> Result<()> {
+        debug_log(
+            Component::P2P,
+            &format!("Publishing event to peer {:?}: topic={}", peer_id, topic),
+        )
+        .await;
+
+        // Create and send the event message
+        let event = P2PMessage::Event { topic, data, metadata };
+
+        self.send_to_peer(peer_id, event).await
+    }
+
     /// Share local service information with a peer
     pub async fn share_services(&self, peer_id: PeerId, services: Vec<P2PServiceInfo>) -> Result<()> {
         debug_log(
@@ -408,7 +515,10 @@ impl P2PTransport {
         .await;
 
         // Create a service discovery message
-        let message = P2PMessage::ServiceDiscovery { services };
+        let message = P2PMessage::ServiceDiscovery { 
+            services,
+            metadata: None 
+        };
 
         // Serialize and send to the peer
         self.send_to_peer(peer_id, message).await
@@ -458,7 +568,10 @@ impl P2PTransport {
         }
 
         // Request services from the peer - explicit request to ensure we get their services
-        let request_message = P2PMessage::ServiceDiscovery { services: vec![] };
+        let request_message = P2PMessage::ServiceDiscovery { 
+            services: vec![],
+            metadata: None
+        };
         self.send_to_peer(peer_id.clone(), request_message).await?;
 
         // Wait for a short time to receive services
@@ -581,76 +694,34 @@ impl P2PTransportTrait for P2PTransport {
         path: String,
         params: ValueType,
     ) -> Result<ServiceResponse> {
-        debug_log(
-            Component::P2P,
-            &format!("Sending request to peer {:?}: path={}", peer_id, path),
-        )
-        .await;
-
-        // Generate a unique request ID
-        let request_id = Self::generate_request_id();
-
-        // Create a channel for the response
-        let (tx, rx) = oneshot::channel();
-
-        // Store the response channel
-        {
-            let mut pending_requests = self.pending_requests.write().await;
-            pending_requests.insert(request_id.clone(), tx);
-        }
-
-        // Create and send the request message
-        let request = P2PMessage::Request {
-            request_id: request_id.clone(),
-            path,
-            params,
-        };
-
-        self.send_to_peer(peer_id.clone(), request).await?;
-
-        // Wait for the response with a timeout
-        match tokio::time::timeout(Duration::from_secs(30), rx).await {
-            Ok(Ok(response)) => {
-                debug_log(
-                    Component::P2P,
-                    &format!("Received response for request {}", request_id),
-                )
-                .await;
-                Ok(response)
-            }
-            Ok(Err(_)) => {
-                error_log(
-                    Component::P2P,
-                    &format!(
-                        "Channel closed before receiving response for request {}",
-                        request_id
-                    ),
-                )
-                .await;
-                Err(anyhow!("Response channel closed unexpectedly"))
-            }
-            Err(_) => {
-                error_log(
-                    Component::P2P,
-                    &format!("Request {} to peer {:?} timed out", request_id, peer_id),
-                )
-                .await;
-                Err(anyhow!("Request timed out"))
-            }
-        }
+        // Use the new method with None for metadata
+        self.send_request_with_metadata(peer_id, path, params, None).await
     }
 
     async fn publish_event(&self, peer_id: PeerId, topic: String, data: ValueType) -> Result<()> {
-        debug_log(
-            Component::P2P,
-            &format!("Publishing event to peer {:?}: topic={}", peer_id, topic),
-        )
-        .await;
+        // Use the new method with None for metadata
+        self.publish_event_with_metadata(peer_id, topic, data, None).await
+    }
 
-        // Create and send the event message
-        let event = P2PMessage::Event { topic, data };
+    // Add metadata versions of the transport trait methods
+    async fn send_request_with_metadata(
+        &self,
+        peer_id: PeerId,
+        path: String,
+        params: ValueType,
+        metadata: Option<HashMap<String, ValueType>>,
+    ) -> Result<ServiceResponse> {
+        self.send_request_with_metadata(peer_id, path, params, metadata).await
+    }
 
-        self.send_to_peer(peer_id, event).await
+    async fn publish_event_with_metadata(
+        &self,
+        peer_id: PeerId,
+        topic: String,
+        data: ValueType,
+        metadata: Option<HashMap<String, ValueType>>,
+    ) -> Result<()> {
+        self.publish_event_with_metadata(peer_id, topic, data, metadata).await
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

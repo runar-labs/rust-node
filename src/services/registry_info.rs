@@ -108,22 +108,24 @@ impl AbstractService for RegistryInfoService {
             "get" => {
                 // Get information about a specific service
                 if let Some(params) = &request.params {
-                    if let Some(ValueType::String(name)) = params.get("name") {
-                        match self.registry.get_service(&name).await {
-                            Some(service) => {
-                                let mut service_map = HashMap::new();
-                                service_map.insert("name".to_string(), ValueType::String(service.name().to_string()));
-                                service_map.insert("path".to_string(), ValueType::String(service.path().to_string()));
-                                service_map.insert("state".to_string(), ValueType::String(service.state().to_string()));
-                                service_map.insert("description".to_string(), ValueType::String(service.description().to_string()));
-                                
-                                return Ok(ServiceResponse::success(
-                                    format!("Service '{}' info", name),
-                                    Some(ValueType::Map(service_map)),
-                                ));
-                            }
-                            None => {
-                                return Ok(ServiceResponse::error(format!("Service '{}' not found", name)));
+                    if let ValueType::Map(param_map) = params {
+                        if let Some(ValueType::String(name)) = param_map.get("name") {
+                            match self.registry.get_service(&name).await {
+                                Some(service) => {
+                                    let mut service_map = HashMap::new();
+                                    service_map.insert("name".to_string(), ValueType::String(service.name().to_string()));
+                                    service_map.insert("path".to_string(), ValueType::String(service.path().to_string()));
+                                    service_map.insert("state".to_string(), ValueType::String(service.state().to_string()));
+                                    service_map.insert("description".to_string(), ValueType::String(service.description().to_string()));
+                                    
+                                    return Ok(ServiceResponse::success(
+                                        format!("Service '{}' info", name),
+                                        Some(ValueType::Map(service_map)),
+                                    ));
+                                }
+                                None => {
+                                    return Ok(ServiceResponse::error(format!("Service '{}' not found", name)));
+                                }
                             }
                         }
                     }

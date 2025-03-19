@@ -521,7 +521,7 @@ pub async fn download_web_ui(web_ui_dir: &PathBuf) -> Result<()> {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Kagi Node Setup</title>
+    <title>Runar Node Setup</title>
     <!-- This is a fallback UI. For the full UI, build the Svelte project -->
     <style>
         body {
@@ -587,7 +587,7 @@ pub async fn download_web_ui(web_ui_dir: &PathBuf) -> Result<()> {
 </head>
 <body>
     <div class="container">
-        <h1>Kagi Node Setup</h1>
+        <h1>Runar Node Setup</h1>
         <form id="setupForm">
             <div class="form-group">
                 <label for="node_name">Node Name:</label>

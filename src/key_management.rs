@@ -13,7 +13,7 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-/// The type of key used in the Kagi network
+/// The type of key used in the Runar network
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum KeyType {
     /// Network identity key used for P2P connections
@@ -26,9 +26,9 @@ pub enum KeyType {
     Temporary,
 }
 
-/// A keypair with additional metadata for the Kagi network
+/// A keypair with additional metadata for the Runar network
 #[derive(Debug)]
-pub struct KagiKeypair {
+pub struct RunarKeypair {
     /// The underlying keypair
     keypair: Keypair,
     /// The type of key
@@ -39,7 +39,7 @@ pub struct KagiKeypair {
     expires_at: Option<Instant>,
 }
 
-impl KagiKeypair {
+impl RunarKeypair {
     /// Create a new keypair of the specified type
     pub fn new(key_type: KeyType, expiration: Option<Duration>) -> Result<Self> {
         // For now, use a non-cryptographic RNG during testing
@@ -118,7 +118,7 @@ impl KagiKeypair {
     /// Encrypt data using ChaCha20Poly1305
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
         // Derive an encryption key from our keypair
-        let salt = b"kagi-encryption";
+        let salt = b"runar-encryption";
         let hkdf = Hkdf::<Sha256>::new(Some(salt), self.keypair.secret.as_bytes());
         let mut enc_key = [0u8; 32];
         hkdf.expand(b"chacha20poly1305-key", &mut enc_key)
@@ -157,7 +157,7 @@ impl KagiKeypair {
         let actual_ciphertext = &ciphertext[12..];
 
         // Derive the encryption key
-        let salt = b"kagi-encryption";
+        let salt = b"runar-encryption";
         let hkdf = Hkdf::<Sha256>::new(Some(salt), self.keypair.secret.as_bytes());
         let mut enc_key = [0u8; 32];
         hkdf.expand(b"chacha20poly1305-key", &mut enc_key)
@@ -179,7 +179,7 @@ impl KagiKeypair {
 /// The KeyManager manages the lifecycle of keys
 pub struct KeyManager {
     /// The keys managed by this instance
-    keys: HashMap<KeyType, KagiKeypair>,
+    keys: HashMap<KeyType, RunarKeypair>,
     /// The config directory where keys are stored
     config_dir: String,
 }
@@ -214,7 +214,7 @@ impl KeyManager {
     }
 
     /// Load or create the node key
-    pub fn load_or_create_node_key(&mut self) -> Result<&KagiKeypair> {
+    pub fn load_or_create_node_key(&mut self) -> Result<&RunarKeypair> {
         if self.keys.contains_key(&KeyType::Node) {
             return Ok(&self.keys[&KeyType::Node]);
         }
@@ -224,11 +224,11 @@ impl KeyManager {
         if key_path.exists() {
             // Load existing key
             let bytes = fs::read(&key_path)?;
-            let keypair = KagiKeypair::from_bytes(KeyType::Node, &bytes, None)?;
+            let keypair = RunarKeypair::from_bytes(KeyType::Node, &bytes, None)?;
             self.keys.insert(KeyType::Node, keypair);
         } else {
             // Create new key
-            let keypair = KagiKeypair::new(KeyType::Node, None)?;
+            let keypair = RunarKeypair::new(KeyType::Node, None)?;
             fs::write(&key_path, &keypair.keypair_bytes())?;
             self.keys.insert(KeyType::Node, keypair);
         }
@@ -237,7 +237,7 @@ impl KeyManager {
     }
 
     /// Load or create the network key
-    pub fn load_or_create_network_key(&mut self) -> Result<&KagiKeypair> {
+    pub fn load_or_create_network_key(&mut self) -> Result<&RunarKeypair> {
         if self.keys.contains_key(&KeyType::Network) {
             return Ok(&self.keys[&KeyType::Network]);
         }
@@ -247,11 +247,11 @@ impl KeyManager {
         if key_path.exists() {
             // Load existing key
             let bytes = fs::read(&key_path)?;
-            let keypair = KagiKeypair::from_bytes(KeyType::Network, &bytes, None)?;
+            let keypair = RunarKeypair::from_bytes(KeyType::Network, &bytes, None)?;
             self.keys.insert(KeyType::Network, keypair);
         } else {
             // Create new key
-            let keypair = KagiKeypair::new(KeyType::Network, None)?;
+            let keypair = RunarKeypair::new(KeyType::Network, None)?;
             fs::write(&key_path, &keypair.keypair_bytes())?;
             self.keys.insert(KeyType::Network, keypair);
         }
@@ -260,14 +260,14 @@ impl KeyManager {
     }
 
     /// Add a temporary key with an expiration
-    pub fn add_temporary_key(&mut self, duration: Duration) -> Result<&KagiKeypair> {
-        let keypair = KagiKeypair::new(KeyType::Temporary, Some(duration))?;
+    pub fn add_temporary_key(&mut self, duration: Duration) -> Result<&RunarKeypair> {
+        let keypair = RunarKeypair::new(KeyType::Temporary, Some(duration))?;
         self.keys.insert(KeyType::Temporary, keypair);
         Ok(&self.keys[&KeyType::Temporary])
     }
 
     /// Get a key by type
-    pub fn get_key(&self, key_type: KeyType) -> Option<&KagiKeypair> {
+    pub fn get_key(&self, key_type: KeyType) -> Option<&RunarKeypair> {
         self.keys.get(&key_type)
     }
 
@@ -295,7 +295,7 @@ mod tests {
     #[test]
     fn test_keypair_generation() {
         // Test keypair generation and basic properties
-        let keypair = KagiKeypair::new(KeyType::Node, None).unwrap();
+        let keypair = RunarKeypair::new(KeyType::Node, None).unwrap();
 
         // Check key type
         assert_eq!(keypair.key_type(), KeyType::Node);
@@ -311,17 +311,17 @@ mod tests {
     #[test]
     fn test_signing_and_verification() {
         // Generate a keypair
-        let keypair = KagiKeypair::new(KeyType::Node, None).unwrap();
+        let keypair = RunarKeypair::new(KeyType::Node, None).unwrap();
 
         // Sign a message
-        let message = b"Hello, Kagi!";
+        let message = b"Hello, Runar!";
         let signature = keypair.sign(message);
 
         // Verify the signature
         assert!(keypair.verify(message, &signature));
 
         // Verify that a modified message fails
-        let modified_message = b"Hello, Kagi?";
+        let modified_message = b"Hello, Runar?";
         assert!(!keypair.verify(modified_message, &signature));
 
         // Verify that a modified signature fails
@@ -334,10 +334,10 @@ mod tests {
     #[test]
     fn test_encryption_and_decryption() {
         // Generate a keypair
-        let keypair = KagiKeypair::new(KeyType::Node, None).unwrap();
+        let keypair = RunarKeypair::new(KeyType::Node, None).unwrap();
 
         // Encrypt a message
-        let plaintext = b"Secret Kagi message";
+        let plaintext = b"Secret Runar message";
         let ciphertext = keypair.encrypt(plaintext).unwrap();
 
         // Decrypt the message
@@ -358,7 +358,7 @@ mod tests {
     fn test_temporary_key_expiration() {
         // Create a temporary key that expires in 10ms
         let keypair =
-            KagiKeypair::new(KeyType::Temporary, Some(Duration::from_millis(10))).unwrap();
+            RunarKeypair::new(KeyType::Temporary, Some(Duration::from_millis(10))).unwrap();
 
         // Initially, the key should not be expired
         assert_eq!(keypair.is_expired(), false);
@@ -409,11 +409,11 @@ mod tests {
     #[test]
     fn test_keypair_from_bytes() {
         // Create a keypair
-        let original_keypair = KagiKeypair::new(KeyType::Node, None).unwrap();
+        let original_keypair = RunarKeypair::new(KeyType::Node, None).unwrap();
         let keypair_bytes = original_keypair.keypair_bytes();
 
         // Create a new keypair from the bytes
-        let new_keypair = KagiKeypair::from_bytes(KeyType::Node, &keypair_bytes, None).unwrap();
+        let new_keypair = RunarKeypair::from_bytes(KeyType::Node, &keypair_bytes, None).unwrap();
 
         // The public keys should match
         assert_eq!(
@@ -422,7 +422,7 @@ mod tests {
         );
 
         // Check that signing with both keypairs produces verifiable signatures
-        let message = b"Hello, Kagi!";
+        let message = b"Hello, Runar!";
         let signature1 = original_keypair.sign(message);
         let signature2 = new_keypair.sign(message);
 

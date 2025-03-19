@@ -23,6 +23,24 @@ pub trait P2PTransport: Send + Sync {
     /// Publish an event to a remote peer
     async fn publish_event(&self, peer_id: PeerId, topic: String, data: ValueType) -> Result<()>;
 
+    /// Send a request to a remote peer with metadata and wait for the response
+    async fn send_request_with_metadata(
+        &self,
+        peer_id: PeerId,
+        path: String,
+        params: ValueType,
+        metadata: Option<HashMap<String, ValueType>>,
+    ) -> Result<ServiceResponse>;
+
+    /// Publish an event to a remote peer with metadata
+    async fn publish_event_with_metadata(
+        &self,
+        peer_id: PeerId,
+        topic: String,
+        data: ValueType,
+        metadata: Option<HashMap<String, ValueType>>,
+    ) -> Result<()>;
+
     /// Get a reference to self as Any for downcasting
     fn as_any(&self) -> &dyn std::any::Any;
 }
@@ -139,11 +157,20 @@ impl AbstractService for RemoteService {
             ),
         );
 
-        // Forward the request to the remote peer via P2P
-        self.p2p_transport.send_request(
-            self.peer_id.clone(),
-            request.path,
-            request.params.unwrap_or(ValueType::Null),
-        ).await
+        // Forward the request to the remote peer via P2P, including metadata if available
+        if let Some(metadata) = request.metadata {
+            self.p2p_transport.send_request_with_metadata(
+                self.peer_id.clone(),
+                request.path,
+                request.params.unwrap_or(ValueType::Null),
+                Some(metadata),
+            ).await
+        } else {
+            self.p2p_transport.send_request(
+                self.peer_id.clone(),
+                request.path,
+                request.params.unwrap_or(ValueType::Null),
+            ).await
+        }
     }
 }

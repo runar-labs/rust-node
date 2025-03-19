@@ -1,12 +1,13 @@
-use kagi_macros::{service, action, subscribe};
-use kagi_node::{
+use runar_macros::{service, action, subscribe};
+use runar_node::{
     logging::{debug_log, info_log, Component},
     services::{
-        RequestContext, ResponseStatus, ServiceResponse, ValueType,
+        RequestContext, ResponseStatus, ServiceResponse,
         ServiceState, ServiceMetadata, ServiceRequest, AbstractService,
     },
     node::{Node, NodeConfig},
     services::service_registry::ServiceRegistry,
+    ValueType
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -72,9 +73,9 @@ struct PublisherService {
 
 impl PublisherService {
     fn new(name: String, p2p: Arc<P2PService>, service_registry: Arc<ServiceRegistry>) -> Self {
-        Self {
+        PublisherService {
             name,
-            p2p,
+            cp2p: p2p,
             service_registry,
             subscriber_count: Arc::new(AtomicUsize::new(0)),
             event_storage: Arc::new(EventStorage::new()),
@@ -223,16 +224,16 @@ impl PublisherService {
 #[service(name = "listener")]
 struct ListenerService {
     name: String,
-    p2p: Arc<P2PService>,
+    cp2p: Arc<P2PService>,
     service_registry: Arc<ServiceRegistry>,
     event_storage: Arc<EventStorage>,
 }
 
 impl ListenerService {
     fn new(name: String, p2p: Arc<P2PService>, service_registry: Arc<ServiceRegistry>, event_storage: Arc<EventStorage>) -> Self {
-        Self {
+        ListenerService {
             name,
-            p2p,
+            cp2p: p2p,
             service_registry,
             event_storage,
         }
@@ -387,9 +388,9 @@ impl ListenerService {
 // Need to implement Clone for ListenerService to support the subscription pattern
 impl Clone for ListenerService {
     fn clone(&self) -> Self {
-        Self {
+        ListenerService {
             name: self.name.clone(),
-            p2p: self.p2p.clone(),
+            cp2p: self.cp2p.clone(),
             service_registry: self.service_registry.clone(),
             event_storage: self.event_storage.clone(),
         }
@@ -461,7 +462,7 @@ async fn test_p2p_publish_subscribe_with_macros() -> Result<(), anyhow::Error> {
         // Update the publisher_service to use the shared event_storage
         let publisher_service = PublisherService {
             name: publisher_service.name,
-            p2p: publisher_service.p2p,
+            cp2p: publisher_service.cp2p,
             service_registry: publisher_service.service_registry,
             subscriber_count: publisher_service.subscriber_count,
             event_storage: event_storage.clone(),
@@ -471,7 +472,7 @@ async fn test_p2p_publish_subscribe_with_macros() -> Result<(), anyhow::Error> {
         // Create the listener service with the SAME event_storage instance
         let listener_service = ListenerService {
             name: "listener".to_string(),
-            p2p: Arc::new(P2PService::new()),
+            cp2p: Arc::new(P2PService::new()),
             service_registry: Arc::new(ServiceRegistry::new("test-network")),
             event_storage: event_storage.clone(),
         };

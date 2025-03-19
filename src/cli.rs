@@ -36,7 +36,7 @@ pub enum Commands {
 }
 
 pub async fn run() -> Result<()> {
-    info!("Starting Kagi Node...");
+    info!("Starting Runar Node...");
 
     // Parse command line arguments
     let args = Args::parse();
@@ -142,10 +142,7 @@ async fn start_node(config_dir: PathBuf) -> Result<()> {
 
             // Start the IPC server
             info!("Starting IPC server...");
-            /* Commenting out IPC server start
-            let _ipc_server =
-            crate::init_ipc_server(node_arc.clone(), PathBuf::from("/tmp/kagi.sock")).await?;
-            */
+            crate::init_ipc_server(node_arc.clone(), PathBuf::from("/tmp/runar.sock")).await?;
             
             // Start the web server in normal mode
             info!("Starting web server in normal mode...");
@@ -200,11 +197,7 @@ async fn start_node(config_dir: PathBuf) -> Result<()> {
 
                     // Start the IPC server
                     info!("Starting IPC server...");
-                    /* Commenting out IPC server start
-                    let _ipc_server =
-                    crate::init_ipc_server(node_arc.clone(), PathBuf::from("/tmp/kagi.sock"))
-                        .await?;
-                    */
+                    crate::init_ipc_server(node_arc.clone(), PathBuf::from("/tmp/runar.sock")).await?;
                     
                     // Start the web server in normal mode
                     info!("Starting web server in normal mode...");

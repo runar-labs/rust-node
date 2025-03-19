@@ -22,6 +22,7 @@ use libp2p::PeerId as LibP2pPeerId;
 use runar_common::types::ValueType;
 use crate::p2p::crypto::PeerId as CryptoPeerId;
 use crate::p2p::peer_id_convert::{LibP2pToCryptoPeerId, CryptoToLibP2pPeerId};
+use chrono;
 
 /// Events when a message is received
 #[derive(Debug, Clone)]
@@ -239,14 +240,15 @@ impl P2PRemoteServiceDelegate {
     }
 
     /// Stop the P2P delegate
-    pub async fn stop(&mut self) -> Result<()> {
+    pub async fn stop(&self) -> Result<()> {
         info_log(Component::P2P, "Stopping P2P delegate");
 
         *self.state.lock().unwrap() = ServiceState::Stopped;
 
         // Stop the transport
         let transport = self.transport.read().await;
-        transport.stop().await?;
+        // Transport is already a guard, just directly use it
+        (&*transport).stop().await?;
 
         Ok(())
     }
@@ -333,6 +335,25 @@ impl P2PRemoteServiceDelegate {
         Ok(())
     }
 
+    /// Get our peer ID and notify the peer
+    async fn get_peer_id_and_notify(&self, peer_id: PeerId) -> Result<()> {
+        // Get our own peer ID
+        let self_peer_id = self.get_peer_id()?;
+        
+        // Convert to LibP2P format for the notification
+        let self_libp2p_peer_id = self_peer_id.to_libp2p_peer_id()
+            .map_err(|e| anyhow!("Failed to convert peer ID: {}", e))?;
+        
+        // Set the self address
+        let self_address = "127.0.0.1:0".to_string();
+
+        // Notify about the new connection with properly extracted PeerId
+        self.notify_peer_connected(peer_id, self_libp2p_peer_id, self_address)
+            .await?;
+
+        Ok(())
+    }
+
     /// Notify other components that a peer has connected
     async fn notify_peer_connected(
         &self,
@@ -344,44 +365,47 @@ impl P2PRemoteServiceDelegate {
         let self_crypto_peer_id = self_peer_id.to_crypto_peer_id()
             .map_err(|e| anyhow!("Failed to convert self peer ID: {}", e))?;
 
+        // Create metadata with peer information
+        let mut metadata = HashMap::new();
+        metadata.insert("self_peer_id".to_string(), ValueType::String(self_crypto_peer_id.to_string()));
+        metadata.insert("self_address".to_string(), ValueType::String(self_address.clone()));
+        metadata.insert("connection_time".to_string(), ValueType::String(chrono::Utc::now().to_rfc3339()));
+
         // Create a message to notify that a peer has connected
         let message = P2PMessage::ConnectNotification {
             peer_id: peer_id.clone(),
             address: self_address,
+            metadata: Some(metadata.clone()),
         };
 
-        // Broadcast to any local subscribers
-        self.broadcast_local_event("peer_connected", ValueType::String(peer_id.to_string()))
-            .await?;
+        // Broadcast to any local subscribers including metadata
+        self.broadcast_local_event_with_metadata(
+            "peer_connected", 
+            ValueType::String(peer_id.to_string()),
+            Some(metadata)
+        ).await?;
 
         // Serialize the message
-        let message_data = serde_json::to_string(&message)
-            .map_err(|e| anyhow!("Failed to serialize peer connected message: {:?}", e))?;
-
-        // Convert peer_id to libp2p::PeerId for sending
-        let libp2p_peer_id = peer_id.to_libp2p_peer_id()
-            .map_err(|e| anyhow!("Failed to convert target peer ID: {}", e))?;
-        
-        // Send the message to the peer
-        let transport = self.transport.read().await;
-
-        match &*transport {
-            Some(transport_ref) => {
-                transport_ref.send_to_peer(libp2p_peer_id, message_data).await?;
-                Ok(())
-            },
-            None => Err(anyhow!("P2P transport not initialized"))
-        }
+        Ok(())
     }
 
-    /// Send a message to a specific peer
+    /// Send a message to a peer
     pub async fn send_message(&self, peer_id: LibP2pPeerId, message: String) -> Result<()> {
-        let transport = self.transport.read().await;
+        debug_log(
+            Component::P2P,
+            &format!("Sending message to peer {:?}", peer_id)
+        ).await;
 
-        match &*transport {
-            Some(transport_ref) => transport_ref.send_to_peer(peer_id, message).await,
-            None => Err(anyhow!("P2P transport not initialized"))
-        }
+        // Check if transport is initialized
+        let transport = self.transport.read().await;
+        
+        // Convert LibP2pPeerId to our PeerId
+        let peer_id_str = peer_id.to_string();
+        let crypto_peer_id = PeerId::from_str(&peer_id_str)
+            .map_err(|e| anyhow!("Failed to convert peer ID: {}", e))?;
+        
+        // Send the message - transport is already a guard, use it directly
+        (&*transport).send_to_peer(crypto_peer_id, message).await
     }
 
     /// Publish an event to a peer
@@ -400,11 +424,12 @@ impl P2PRemoteServiceDelegate {
         let event_message = P2PMessage::Event {
             topic: topic.clone(),
             data: data.clone(),
+            metadata: None,
         };
 
         // Convert the message to JSON and send
         let transport = self.transport.read().await;
-        let result = transport.send_to_peer(peer_id.clone(), event_message).await;
+        let result = (&*transport).send_to_peer(peer_id.clone(), event_message).await;
 
         if result.is_ok() {
             debug_log(
@@ -433,7 +458,7 @@ impl P2PRemoteServiceDelegate {
 
         // Broadcast the message using the transport
         let transport = self.transport.read().await;
-        transport.broadcast(&peers, message).await?;
+        (&*transport).broadcast(&peers, message).await?;
 
         Ok(())
     }
@@ -447,14 +472,14 @@ impl P2PRemoteServiceDelegate {
             .collect()
     }
 
-    /// Get our own peer ID
-    pub async fn get_peer_id(&self) -> Result<LibP2pPeerId> {
-        let transport = self.transport.read().await;
-
-        match &*transport {
-            Some(transport_ref) => transport_ref.get_peer_id().to_libp2p_peer_id(),
-            None => Err(anyhow!("P2P transport not initialized"))
-        }
+    /// Get the peer ID for this delegate
+    pub fn get_peer_id(&self) -> Result<PeerId> {
+        // Get transport peer ID
+        let transport = futures::executor::block_on(self.transport.read());
+        
+        // Transport is already a guard, use it directly
+        let peer_id = (&*transport).get_peer_id();
+        Ok((*peer_id).clone())
     }
 
     /// Get a reference to the P2P transport
@@ -464,36 +489,47 @@ impl P2PRemoteServiceDelegate {
 
     /// Broadcast an event to local subscribers
     async fn broadcast_local_event(&self, topic: &str, data: ValueType) -> Result<()> {
-        // For now, just log the event - in a real implementation, this would notify other components
-        debug_log(
-            Component::P2P,
-            &format!("Broadcasting local event: topic={}, data={:?}", topic, data),
-        );
-        
-        // Return success
-        Ok(())
+        // Call with empty metadata
+        self.broadcast_local_event_with_metadata(topic, data, None).await
     }
 
-    async fn handle_peer_connected(&self, peer_id: CryptoPeerId, address: &str) -> Result<()> {
+    /// Broadcast an event to local subscribers with metadata
+    async fn broadcast_local_event_with_metadata(&self, topic: &str, data: ValueType, metadata: Option<HashMap<String, ValueType>>) -> Result<()> {
+        // Create an event message
+        let event_message = P2PMessage::Event {
+            topic: topic.to_string(),
+            data: data.clone(),
+            metadata,
+        };
+
+        // Convert the message to JSON and send
+        let transport = self.transport.read().await;
+        let result = (&*transport).send_to_peer(self.get_peer_id()?, event_message).await;
+
+        if result.is_ok() {
+            debug_log(
+                Component::P2P,
+                &format!("Published local event for topic: {}", topic)
+            ).await;
+        }
+
+        result
+    }
+
+    /// Handle peer connected event
+    async fn handle_peer_connected(&self, peer_id: CryptoPeerId, _address: &str) -> Result<()> {
         debug_log(
             Component::P2P,
             &format!("Handling peer connected event for {:?}", peer_id),
-        );
+        ).await;
 
-        // Get our own peer ID
-        let self_peer_id = self.get_peer_id().await?;
-        
-        // Convert the address to a String
-        let self_address = address.to_string();
-
-        // Notify the peer that we've connected to them
-        self.notify_peer_connected(peer_id, self_peer_id, self_address)
-            .await?;
+        // Call the get_peer_id_and_notify function
+        self.get_peer_id_and_notify(peer_id.clone()).await?;
 
         debug_log(
             Component::P2P,
             &format!("Successfully handled peer connected event for {:?}", peer_id),
-        );
+        ).await;
 
         Ok(())
     }
@@ -528,6 +564,52 @@ impl P2PTransportTrait for P2PRemoteServiceDelegate {
         path: String,
         params: ValueType,
     ) -> Result<ServiceResponse> {
+        // Call the version with metadata
+        self.send_request_with_metadata(peer_id, path, params, None).await
+    }
+
+    async fn publish_event(&self, peer_id: CryptoPeerId, topic: String, data: ValueType) -> Result<()> {
+        // Call the version with metadata
+        self.publish_event_with_metadata(peer_id, topic, data, None).await
+    }
+
+    async fn send_request_with_metadata(
+        &self,
+        peer_id: CryptoPeerId,
+        path: String,
+        params: ValueType,
+        metadata: Option<HashMap<String, ValueType>>,
+    ) -> Result<ServiceResponse> {
+        // Implementation that doesn't call itself
+        self.internal_send_request_with_metadata(peer_id, path, params, metadata).await
+    }
+
+    async fn publish_event_with_metadata(
+        &self,
+        peer_id: CryptoPeerId,
+        topic: String,
+        data: ValueType,
+        metadata: Option<HashMap<String, ValueType>>,
+    ) -> Result<()> {
+        // Implementation that doesn't call itself
+        self.internal_publish_event_with_metadata(peer_id, topic, data, metadata).await
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+// Add these new internal methods to P2PRemoteServiceDelegate
+impl P2PRemoteServiceDelegate {
+    // Internal implementation to avoid recursive calls
+    async fn internal_send_request_with_metadata(
+        &self,
+        peer_id: CryptoPeerId,
+        path: String,
+        params: ValueType,
+        metadata: Option<HashMap<String, ValueType>>,
+    ) -> Result<ServiceResponse> {
         debug_log(
             Component::P2P,
             &format!("Sending request to peer {:?}: {}", peer_id, path),
@@ -545,6 +627,7 @@ impl P2PTransportTrait for P2PRemoteServiceDelegate {
             request_id: request_id.clone(),
             path: path.clone(),
             params: params.clone(),
+            metadata,
         };
 
         // Convert the message to a JSON string
@@ -562,7 +645,14 @@ impl P2PTransportTrait for P2PRemoteServiceDelegate {
         ))
     }
 
-    async fn publish_event(&self, peer_id: CryptoPeerId, topic: String, data: ValueType) -> Result<()> {
+    // Internal implementation to avoid recursive calls
+    async fn internal_publish_event_with_metadata(
+        &self,
+        peer_id: CryptoPeerId,
+        topic: String,
+        data: ValueType,
+        metadata: Option<HashMap<String, ValueType>>,
+    ) -> Result<()> {
         debug_log(
             Component::P2P,
             &format!("Publishing event to peer {:?}: {}", peer_id, topic),
@@ -576,6 +666,7 @@ impl P2PTransportTrait for P2PRemoteServiceDelegate {
         let event_message = P2PMessage::Event {
             topic: topic.clone(),
             data: data.clone(),
+            metadata,
         };
 
         // Convert the message to a JSON string
@@ -584,10 +675,6 @@ impl P2PTransportTrait for P2PRemoteServiceDelegate {
 
         // Send the message
         self.send_message(libp2p_peer_id, message_str).await
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
     }
 }
 

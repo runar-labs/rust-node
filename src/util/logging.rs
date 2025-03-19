@@ -79,7 +79,7 @@ pub fn init_logging() {
     // Set up env_logger with custom format
     let env = env_logger::Env::default()
         .filter_or("RUST_LOG", "debug") // Default to debug level
-        .filter_or("KAGI_NODE_LOG", "debug"); // Allow override with KAGI_NODE_LOG
+        .filter_or("RUNAR_NODE_LOG", "debug"); // Allow override with RUNAR_NODE_LOG
 
     env_logger::Builder::from_env(env)
         .format(|buf, record| {
@@ -99,7 +99,7 @@ pub fn init_logging() {
 
 // Get test-specific filter - this is useful for enabling specific components during tests
 pub fn get_test_filter() -> String {
-    std::env::var("KAGI_TEST_LOG").unwrap_or_else(|_| "debug".to_string())
+    std::env::var("RUNAR_TEST_LOG").unwrap_or_else(|_| "debug".to_string())
 }
 
 // Configure logging for tests

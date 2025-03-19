@@ -5,7 +5,7 @@ mod tests {
     use anyhow::Result;
     use serde_json::json;
     
-    use kagi_node::services::ValueType;
+    use runar_node::ValueType;
     
     // Define a simple wrapper around HashMap<String, ValueType> to replace VMap
     #[derive(Clone, Debug)]

@@ -3,6 +3,7 @@ pub mod cli;
 pub mod config;
 pub mod db;
 pub mod init;
+pub mod ipc;
 pub mod key_management;
 pub mod node;
 pub mod p2p;
@@ -27,6 +28,9 @@ pub use util::logging;
 use crate::db::SqliteDatabase;
 use crate::services::service_registry::ServiceRegistry;
 
+// Re-export IPC functionality
+pub use crate::ipc::init_ipc_server;
+
 // Re-export important types and traits for macros and external use
 pub use crate::node::NodeConfig;
 pub use crate::services::{
@@ -46,8 +50,7 @@ pub use crate::init::{Initializer, INITIALIZERS};
 
 // Re-export macros
 // Use macros from runar_common
-pub use runar_common::vmap;
-pub use runar_common::vmap_opt;
+pub use runar_common::implement_from_for_valuetype;
 pub use runar_common::vmap_extract;
 pub use runar_common::vmap_extract_string;
 pub use runar_common::vmap_extract_i32;

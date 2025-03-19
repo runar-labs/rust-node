@@ -1,5 +1,5 @@
-use kagi_node::services::ValueType;
-use kagi_node::{vjson, vmap};
+use runar_common::types::ValueType;
+use runar_node::{vjson, vmap};
 
 fn main() {
     println!("Testing ValueType implementation");

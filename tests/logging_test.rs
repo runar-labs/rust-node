@@ -1,9 +1,9 @@
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
-    use kagi_node::services::{RequestContext, ValueType};
-    use kagi_node::util::logging::{Component, debug_log, info_log, warn_log, error_log};
-    use kagi_node::node::DummyNodeRequestHandler;
+    use runar_node::{RequestContext, ValueType};
+    use runar_node::util::logging::{Component, debug_log, info_log, warn_log, error_log};
+    use runar_node::node::DummyNodeRequestHandler;
     use std::sync::Arc;
     use tokio::sync::Mutex;
     use std::collections::HashMap;
@@ -71,7 +71,7 @@ mod tests {
         
         // Configure logging for tests only once
         INIT_LOGGER.call_once(|| {
-            kagi_node::util::logging::configure_test_logging();
+            runar_node::util::logging::configure_test_logging();
         });
         
         logger

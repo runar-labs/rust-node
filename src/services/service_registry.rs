@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use log::{debug, error, info};
 use serde_json::json;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -14,6 +15,8 @@ use tokio::time::timeout;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration as StdDuration;
+use tokio::runtime::Handle;
+use crate::vmap_opt;
 
 use crate::db::SqliteDatabase;
 use crate::node::NodeRequestHandlerImpl;
@@ -284,12 +287,14 @@ impl NodeRequestHandler for ServiceRegistry {
         );
         
         // Create a service request
+        let mut map = std::collections::HashMap::new();
         let request = ServiceRequest {
-            request_id: Some(uuid::Uuid::new_v4().to_string()),
-            path: path.clone(),
-            operation: path.split('/').last().unwrap_or("").to_string(),
-            params: Some(params),
+            request_id: None,
+            path: path.to_string(),
+            operation: "default".to_string(),
+            params: Some(ValueType::Map(map)),
             request_context: Arc::new(context),
+            metadata: None,
         };
         
         // Process the request
@@ -1095,12 +1100,14 @@ impl ServiceRegistry {
                 ).await;
                 
                 // Create a service request
+                let mut map = std::collections::HashMap::new();
                 let request = ServiceRequest {
-                    request_id: Some(uuid::Uuid::new_v4().to_string()),
+                    request_id: None,
                     path: format!("{}/{}", service_obj.path(), action),
                     operation: action.to_string(),
-                    params: Some(params.clone()),
+                    params: Some(ValueType::Map(map)),
                     request_context: Arc::new(context.clone()),
+                    metadata: None,
                 };
                 
                 // Call through the service's handle_request method
@@ -1157,12 +1164,14 @@ impl ServiceRegistry {
                 ).await;
 
             // Create a service request
+            let mut map = std::collections::HashMap::new();
             let request = ServiceRequest {
-                    request_id: Some(uuid::Uuid::new_v4().to_string()),
+                    request_id: None,
                     path: format!("{}/{}", service_obj.path(), operation),
                     operation: operation.to_string(),
-                    params: Some(params.clone()),
+                    params: Some(ValueType::Map(map)),
                     request_context: Arc::new(context.clone()),
+                    metadata: None,
                 };
                 
                 // Call through the service's handle_request method
@@ -1231,7 +1240,7 @@ impl ServiceRegistry {
                 ).await;
                 
                 // Use the direct handler
-                return match timeout(entry.timeout, (entry.handler)(context.as_ref(), params)).await {
+                return match timeout(entry.timeout, (entry.handler)(context, params)).await {
                     Ok(result) => result,
                     Err(_) => {
                         error_log(
@@ -1257,7 +1266,7 @@ impl ServiceRegistry {
                 ).await;
                 
                 // Use the direct handler
-                return match timeout(entry.timeout, (entry.handler)(context.as_ref(), action_name, params)).await {
+                return match timeout(entry.timeout, (entry.handler)(context, action_name, params)).await {
                     Ok(result) => result,
                     Err(_) => {
             error_log(
@@ -1281,8 +1290,16 @@ impl ServiceRegistry {
         // Get the service from the registry
         if let Some(service) = self.get_service(service_name).await {
             // Call handle_request on the service
-            service.handle_request(request).await
-                            } else {
+            let result = Handle::current().block_on(service.handle_request(ServiceRequest {
+                request_id: request.request_id.clone(),
+                request_context: context.clone(),
+                path: request.path.clone(),
+                params: Some(params.clone()),
+                operation: request.path.split('/').collect::<Vec<&str>>().get(1).unwrap_or(&"").to_string(),
+                metadata: None,
+            }));
+            result
+        } else {
             // Service not found
                                 error_log(
                                     Component::Registry,
@@ -1355,7 +1372,7 @@ impl ServiceRegistry {
         
         // Process based on message type
         match message {
-            P2PMessage::Request { request_id, path, params } => {
+            P2PMessage::Request { request_id, path, params, metadata } => {
                 // Handle service request
                 // Parse the path to get service and operation
                 let parts: Vec<&str> = path.split('/').collect();
@@ -1374,13 +1391,14 @@ impl ServiceRegistry {
                         Arc::new(NodeRequestHandlerImpl::new(Arc::new(self.clone()))),
                     );
                     
-                    // Create a service request
+                    // Create a service request with metadata
                     let request = ServiceRequest {
                         request_id: Some(request_id.clone()),
-                        path,
-                        operation,
-                        params: Some(params),
                         request_context: Arc::new(context),
+                        path: path.clone(),
+                        operation: operation.clone(),
+                        params: Some(params.clone()),
+                        metadata: metadata.clone(), // Clone here to avoid moving
                     };
                     
                     // Process the request
@@ -1388,45 +1406,27 @@ impl ServiceRegistry {
                         Ok(response) => {
                             // Send response back via P2P
                             if let Some(delegate) = self.p2p_delegate.read().await.as_ref() {
-                                // Wrap in request message
-                                let request_message = P2PMessage::Request {
-                                    request_id,
-                                    path: format!("{}{}", service, path),
-                                    params: params.clone(),
+                                // Create a response message
+                                let response_message = P2PMessage::Response {
+                                    request_id: request_id.clone(),
+                                    response,
+                                    metadata: metadata.clone(), // Clone here to avoid moving
                                 };
                                 
                                 // Convert peer_id to libp2p::PeerId for sending
                                 let libp2p_peer_id = peer_id.to_libp2p_peer_id()
                                     .map_err(|e| anyhow!("Failed to convert peer ID: {}", e))?;
                                 
-                                // Serialize to binary
-                                let serialized = bincode::serialize(&request_message)?;
-                                
-                                // Send the actual request
+                                // Serialize and send - need to use the delegate's method
+                                let serialized = bincode::serialize(&response_message)?;
                                 delegate.send_message(libp2p_peer_id, String::from_utf8_lossy(&serialized).to_string()).await?;
                             }
                         }
                         Err(e) => {
                             error_log(
                                 Component::Registry,
-                                &format!("Error processing request: {}", e)
+                                &format!("Error handling request: {}", e),
                             ).await;
-                            
-                            // Send error response
-                            let error_response = ServiceResponse {
-                                status: crate::services::ResponseStatus::Error,
-                                message: format!("Error processing request: {}", e),
-                                data: None,
-                            };
-                            
-                            if let Some(delegate) = self.p2p_delegate.read().await.as_ref() {
-                                // Convert peer_id to libp2p::PeerId for sending
-                                let libp2p_peer_id = peer_id.to_libp2p_peer_id()
-                                    .map_err(|e| anyhow!("Failed to convert peer ID: {}", e))?;
-                                    
-                                let serialized = bincode::serialize(&error_response)?;
-                                delegate.send_message(libp2p_peer_id, String::from_utf8_lossy(&serialized).to_string()).await?;
-                            }
                         }
                     }
                 } else {
@@ -1443,19 +1443,26 @@ impl ServiceRegistry {
                         let libp2p_peer_id = peer_id.to_libp2p_peer_id()
                             .map_err(|e| anyhow!("Failed to convert peer ID: {}", e))?;
                             
-                        let serialized = bincode::serialize(&error_response)?;
+                        // Create an error response message with the original metadata if any
+                        let response_message = P2PMessage::Response {
+                            request_id: request_id.clone(),
+                            response: error_response,
+                            metadata: metadata.clone(), // Clone here to avoid moving
+                        };
+                            
+                        let serialized = bincode::serialize(&response_message)?;
                         delegate.send_message(libp2p_peer_id, String::from_utf8_lossy(&serialized).to_string()).await?;
                     }
                 }
             }
-            P2PMessage::Response { request_id, response } => {
+            P2PMessage::Response { request_id, response, metadata: _ } => {
                 // This would be handled by the P2P service directly
                 debug_log(
                     Component::Registry,
                     &format!("Got service response for request {}", request_id)
                 ).await;
             }
-            P2PMessage::Event { topic, data } => {
+            P2PMessage::Event { topic, data, metadata: _ } => {
                 // Handle incoming events from remote peers
                 debug_log(
                     Component::Registry,
@@ -1465,22 +1472,15 @@ impl ServiceRegistry {
                 // Forward to local subscribers
                 self.publish(topic, data).await?;
             }
-            P2PMessage::ServiceDiscovery { services } => {
+            P2PMessage::ServiceDiscovery { services, metadata: _ } => {
                 // Register remote services from this peer
                 self.register_remote_services(peer_id, services).await?;
             }
-            P2PMessage::ConnectNotification { peer_id: _, address: _ } => {
+            P2PMessage::ConnectNotification { peer_id: notify_peer_id, address, metadata: _ } => {
                 // Handle connection notification
                 debug_log(
                     Component::Registry,
-                    &format!("Got connection notification from peer {:?}", peer_id)
-                ).await;
-            }
-            _ => {
-                // Unknown message type
-                debug_log(
-                    Component::Registry,
-                    &format!("Unknown message type received")
+                    &format!("Got connection notification from peer {:?} about peer {:?}", peer_id, notify_peer_id)
                 ).await;
             }
         }

@@ -1,9 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use kagi_node::services::abstract_service::{AbstractService, ServiceMetadata, ServiceState};
-use kagi_node::services::ResponseStatus;
-use kagi_node::services::{RequestContext, ServiceRequest, ServiceResponse, ValueType};
-use kagi_node::vmap;
+use runar_node::services::abstract_service::{AbstractService, ServiceMetadata, ServiceState};
+use runar_node::services::ResponseStatus;
+use runar_node::{RequestContext, ServiceRequest, ServiceResponse, ValueType, vmap};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -441,9 +440,9 @@ impl AbstractService for MockDocumentStore {
 
 /// Test helper function to create a temporary node for testing
 pub async fn create_test_node() -> Result<(
-    kagi_node::node::Node,
+    runar_node::node::Node,
     tempfile::TempDir,
-    kagi_node::node::NodeConfig,
+    runar_node::node::NodeConfig,
 )> {
     // Create a temporary directory for node storage
     let temp_dir = tempfile::tempdir()?;
@@ -452,11 +451,11 @@ pub async fn create_test_node() -> Result<(
 
     // Create a NodeConfig for the node
     let node_config =
-        kagi_node::node::NodeConfig::new(network_id, node_path, &format!("{}/db", node_path));
+        runar_node::node::NodeConfig::new(network_id, node_path, &format!("{}/db", node_path));
 
     // Create and initialize the node
     let node_config_clone = node_config.clone();
-    let mut node = kagi_node::node::Node::new(node_config_clone).await?;
+    let mut node = runar_node::node::Node::new(node_config_clone).await?;
     node.init().await?;
 
     Ok((node, temp_dir, node_config))

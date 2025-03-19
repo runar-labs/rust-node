@@ -1,14 +1,14 @@
 use anyhow::Result;
 use futures;
-use kagi_node::node::{Node, NodeConfig};
-use kagi_node::p2p::transport::TransportConfig;
-use kagi_node::services::abstract_service::{AbstractService, ServiceMetadata, ServiceState};
-use kagi_node::services::{
+use runar_node::node::{Node, NodeConfig};
+use runar_node::p2p::transport::TransportConfig;
+use runar_node::services::abstract_service::{AbstractService, ServiceMetadata, ServiceState};
+use runar_node::{
     RequestContext, ResponseStatus, ServiceRequest, ServiceResponse, ValueType,
 };
 // Import from the vmap module
 use crate::vmap::VMap;
-use kagi_node::services::service_registry::ServiceRegistry;
+use runar_node::services::service_registry::ServiceRegistry;
 
 use serde_json::json;
 use std::sync::Arc;
@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 use tempfile;
 // Import logging utilities
-use kagi_node::util::logging::{debug_log, info_log, warn_log, error_log, Component};
+use runar_node::util::logging::{debug_log, info_log, warn_log, error_log, Component};
 
 /// A service that publishes events
 struct PublisherService {
@@ -467,7 +467,7 @@ async fn test_service_publishing_subscribing() -> Result<()> {
         let _test_context = RequestContext::new(
             "test-node".to_string(),
             "test-network".to_string(),
-            Arc::new(kagi_node::node::NodeRequestHandlerImpl::new(registry))
+            Arc::new(runar_node::node::NodeRequestHandlerImpl::new(registry))
         );
         
         // Configure logging using context
@@ -647,13 +647,15 @@ async fn test_service_publishing_subscribing() -> Result<()> {
         if !valid_events.is_empty() {
             let valid_event = &valid_events[0];
             info_log(Component::Service, &format!("Valid event content: {:?}", valid_event)).await;
-            assert!(valid_event.to_string().contains("valid"));
+            let valid_event_str = format!("{:?}", valid_event);
+            assert!(valid_event_str.contains("valid"));
         }
 
         if !invalid_events.is_empty() {
             let invalid_event = &invalid_events[0];
             info_log(Component::Service, &format!("Invalid event content: {:?}", invalid_event)).await;
-            assert!(invalid_event.to_string().contains("invalid"));
+            let invalid_event_str = format!("{:?}", invalid_event);
+            assert!(invalid_event_str.contains("invalid"));
         }
 
         // The test has completed successfully by reaching this point
@@ -664,11 +666,11 @@ async fn test_service_publishing_subscribing() -> Result<()> {
 }
 
 // Add a module to define the VMap functionality needed for the test
+#[cfg(test)]
 mod vmap {
     use std::collections::HashMap;
-    use kagi_node::services::ValueType;
+    use runar_node::ValueType;
 
-    #[derive(Debug, Clone)]
     pub struct VMap(pub HashMap<String, ValueType>);
 
     impl VMap {
@@ -682,7 +684,7 @@ mod vmap {
 
         pub fn from_value_type(value: ValueType) -> Self {
             match value {
-                ValueType::Map(map) => VMap(map),
+                ValueType::Map(map) => Self(map),
                 _ => VMap::new(),
             }
         }
@@ -699,15 +701,15 @@ mod vmap {
     #[macro_export]
     macro_rules! vmap {
         ($($key:expr => $value:expr),* $(,)?) => {{
-            let map = std::collections::HashMap::new();
+            let mut map = std::collections::HashMap::new();
             $(
                 let key_str = $key.to_string();
                 map.insert(key_str, $value.into());
             )*
-            kagi_node::services::ValueType::Map(map)
+            runar_node::ValueType::Map(map)
         }};
         () => {
-            kagi_node::services::ValueType::Map(std::collections::HashMap::new())
+            runar_node::ValueType::Map(std::collections::HashMap::new())
         };
     }
 

@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use async_trait::async_trait;
 use log::info;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -198,6 +199,9 @@ pub struct ServiceRequest {
     pub params: Option<ValueType>,
     /// Request ID for tracing
     pub request_id: Option<String>,
+    /// Optional metadata for additional context
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<HashMap<String, ValueType>>,
     /// Request context object (not serialized)
     #[serde(skip)]
     pub request_context: Arc<RequestContext>,
@@ -211,15 +215,47 @@ impl ServiceRequest {
         params: V,
         request_context: Arc<RequestContext>,
     ) -> Self {
-        let path_str = path.into();
-        let op_str = operation.into();
-        let params_value = params.into();
-
         ServiceRequest {
-            path: path_str,
-            operation: op_str,
-            params: Some(params_value),
-            request_id: None,
+            path: path.into(),
+            operation: operation.into(),
+            params: Some(params.into()),
+            request_id: Some(uuid::Uuid::new_v4().to_string()),
+            metadata: None,
+            request_context,
+        }
+    }
+
+    /// Create a new service request with optional parameters
+    pub fn new_with_optional<P: Into<String>, O: Into<String>>(
+        path: P,
+        operation: O,
+        params: Option<ValueType>,
+        request_context: Arc<RequestContext>,
+    ) -> Self {
+        ServiceRequest {
+            path: path.into(),
+            operation: operation.into(),
+            params,
+            request_id: Some(uuid::Uuid::new_v4().to_string()),
+            metadata: None,
+            request_context,
+        }
+    }
+
+    /// Create a new service request with metadata
+    pub fn new_with_metadata<P: Into<String>, O: Into<String>, V: Into<ValueType>>(
+        path: P,
+        operation: O,
+        params: V,
+        metadata: HashMap<String, ValueType>,
+        request_context: Arc<RequestContext>,
+    ) -> Self {
+        ServiceRequest {
+            path: path.into(),
+            operation: operation.into(),
+            params: Some(params.into()),
+            request_id: Some(uuid::Uuid::new_v4().to_string()),
+            metadata: Some(metadata),
             request_context,
         }
     }

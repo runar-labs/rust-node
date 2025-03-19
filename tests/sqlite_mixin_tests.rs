@@ -1,20 +1,20 @@
 use anyhow::{anyhow, Result};
-use kagi_common::ServiceInfo;
-use kagi_node::db::SqliteDatabase;
-use kagi_node::services::{
+use runar_common::ServiceInfo;
+use runar_node::db::SqliteDatabase;
+use runar_node::{
     RequestContext, ResponseStatus, ServiceRequest, ServiceResponse, ValueType,
+    vjson, vmap
 };
-use kagi_node::services::sqlite::{
+use runar_node::services::sqlite::{
     SqliteCrudMixin, SqliteSchema, SqliteSchemaField, SqliteStorageOptions, SqliteStorageType,
 };
-use kagi_node::{vjson, vmap};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::time::timeout;
 use std::time::Duration;
 use log::{debug, info};
-use kagi_node::node::NodeConfig;
-use kagi_node::node::Node;
+use runar_node::node::NodeConfig;
+use runar_node::node::Node;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tempfile::tempdir;
@@ -116,6 +116,7 @@ fn create_test_request(operation: &str, params: ValueType) -> ServiceRequest {
         params: Some(params),
         request_id: None,
         request_context: context,
+        metadata: None,
     }
 }
 

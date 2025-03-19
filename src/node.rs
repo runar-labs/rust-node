@@ -19,8 +19,9 @@ use crate::p2p::transport::{TransportConfig, P2PTransport};
 use crate::services::abstract_service::{ServiceMetadata, ServiceState};
 use crate::services::{
     NodeRequestHandler, RequestContext, ServiceRequest, ServiceResponse,
-    SubscriptionOptions, ValueType, ResponseStatus,
+    SubscriptionOptions, ResponseStatus,
 };
+use crate::services::types::ValueType;
 use crate::services::service_registry::ServiceRegistry;
 use crate::services::abstract_service::AbstractService;
 use crate::services::node_info::NodeInfoService;
@@ -94,7 +95,7 @@ impl NodeConfig {
     }
 }
 
-/// Node represents a Kagi node that can host services and communicate with other nodes
+/// Node represents a Runar node that can host services and communicate with other nodes
 pub struct Node {
     /// Configuration for the node
     pub config: NodeConfig,
@@ -230,6 +231,7 @@ impl NodeRequestHandler for NodeRequestHandlerImpl {
                 vmap_opt! {},
                 Arc::new(NodeRequestHandlerImpl::new(self.service_registry.clone()))
             )),
+            metadata: None,
         };
 
         // Call the service through the registry
@@ -605,10 +607,11 @@ impl Node {
         
         let request = ServiceRequest {
             path: service_name.clone(),
-            operation,
-            params: Some(processed_params),
-            request_id: Some(uuid::Uuid::new_v4().to_string()),
+            operation: operation.clone(),
+            params: Some(processed_params.clone()),
+            request_id: None,
             request_context: context,
+            metadata: None,
         };
         
         // Find the target service
@@ -675,8 +678,9 @@ impl Node {
             path: "node".to_string(),
             operation: "info".to_string(),
             params: Some(params),
-            request_id: Some(uuid::Uuid::new_v4().to_string()),
+            request_id: None,
             request_context: context,
+            metadata: None,
         };
         
         // Find the target service
@@ -991,6 +995,7 @@ where {
                             operation: "get_info".to_string(),
                             params: vmap_opt! {},
                             request_context,
+                            metadata: None,
                         };
 
                         // Process the request
@@ -1000,15 +1005,25 @@ where {
                                     // Extract information from the response
                                     if let Some(data) = response.data {
                                         // Check if this is an anonymous subscriber service that can be cleaned up
-                                        let is_expired = data
-                                            .get("is_expired")
-                                            .and_then(|v| v.as_bool())
-                                            .unwrap_or(false);
+                                        let is_expired = if let ValueType::Map(data_map) = &data {
+                                            if let Some(ValueType::Bool(expired)) = data_map.get("is_expired") {
+                                                *expired
+                                            } else {
+                                                false
+                                            }
+                                        } else {
+                                            false
+                                        };
 
-                                        let subscription_count = data
-                                            .get("subscription_count")
-                                            .and_then(|v| v.as_i64())
-                                            .unwrap_or(1);
+                                        let subscription_count = if let ValueType::Map(data_map) = &data {
+                                            if let Some(ValueType::Number(count)) = data_map.get("subscription_count") {
+                                                *count as i64
+                                            } else {
+                                                1
+                                            }
+                                        } else {
+                                            1
+                                        };
 
                                         if is_expired && subscription_count == 0 {
                                             // Get the service name
@@ -1027,6 +1042,7 @@ where {
                                                     vmap_opt! {},
                                                     Arc::new(NodeRequestHandlerImpl::new(registry.clone())),
                                                 )),
+                                                metadata: None,
                                             };
                                             
                                             if let Err(e) = service.handle_request(request).await {

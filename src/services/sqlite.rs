@@ -806,15 +806,12 @@ impl SqliteService {
     /// Execute a query
     async fn execute_query(&self, query: &str) -> Result<ValueType> {
         let request = ServiceRequest {
-            path: self.path.clone(),
-            operation: "query".to_string(),
-            params: Some(ValueType::Map({
-                let mut map = HashMap::new();
-                map.insert("sql".to_string(), ValueType::String(query.to_string()));
-                map
-            })),
-            request_context: Arc::new(RequestContext::default()),
+            path: format!("{}/{}", self.path, query),
+            operation: query.to_string(),
+            params: None,
             request_id: None,
+            request_context: Arc::new(RequestContext::default()),
+            metadata: None,
         };
 
         let response = self.query_mixin.handle_request(request).await?;
@@ -827,32 +824,37 @@ impl SqliteService {
         
         // Extract SQL and parameters from the request
         if let Some(params) = &request.params {
-            if let Some(ValueType::String(sql)) = params.get("sql") {
-                debug!("Executing SQL query: {}", sql);
-                
-                // Execute the query using the query mixin
-                let params_value = params.clone();
-                match self.query_mixin.query(&sql, params_value).await {
-                    Ok(response) => {
-                        let row_count = response.data.as_ref().map_or(0, |d| {
-                            if let ValueType::Array(arr) = d {
-                                arr.len()
-                            } else {
-                                0
-                            }
-                        });
-                        
-                        info!("Query executed successfully, returned {} rows", row_count);
-                        Ok(response)
-                    },
-                    Err(e) => {
-                        error!("Error executing query: {}", e);
-                        Ok(ServiceResponse::error(format!("Error executing query: {}", e)))
-                    },
+            if let ValueType::Map(param_map) = params {
+                if let Some(ValueType::String(sql)) = param_map.get("sql") {
+                    debug!("Executing SQL query: {}", sql);
+                    
+                    // Execute the query using the query mixin
+                    let params_value = params.clone();
+                    match self.query_mixin.query(&sql, params_value).await {
+                        Ok(response) => {
+                            let row_count = response.data.as_ref().map_or(0, |d| {
+                                if let ValueType::Array(arr) = d {
+                                    arr.len()
+                                } else {
+                                    0
+                                }
+                            });
+                            
+                            info!("Query executed successfully, returned {} rows", row_count);
+                            Ok(response)
+                        },
+                        Err(e) => {
+                            error!("Error executing query: {}", e);
+                            Ok(ServiceResponse::error(format!("Error executing query: {}", e)))
+                        },
+                    }
+                } else {
+                    warn!("Missing 'sql' parameter in query request");
+                    Ok(ServiceResponse::error("Missing 'sql' parameter"))
                 }
             } else {
-                warn!("Missing 'sql' parameter in query request");
-                Ok(ServiceResponse::error("Missing 'sql' parameter"))
+                warn!("Missing parameters in query request");
+                Ok(ServiceResponse::error("Missing parameters"))
             }
         } else {
             warn!("Missing parameters in query request");
@@ -864,34 +866,30 @@ impl SqliteService {
     async fn handle_execute(&self, request: ServiceRequest) -> Result<ServiceResponse> {
         debug!("Processing execute operation on path: {}", request.path);
         
-        // Execute a SQL statement that doesn't return rows
+        // Extract SQL and parameters from the request
         if let Some(params) = &request.params {
-            if let Some(ValueType::String(sql)) = params.get("sql") {
-                debug!("Executing SQL statement: {}", sql);
-                
-                // Execute the statement using the query mixin
-                let params_value = params.clone();
-                match self.query_mixin.execute(&sql, params_value).await {
-                    Ok(response) => {
-                        let rows_affected = response.data.as_ref().map_or(0, |d| {
-                            if let ValueType::Number(n) = d {
-                                *n as i64
-                            } else {
-                                0
-                            }
-                        });
-                        
-                        info!("Statement executed successfully, {} rows affected", rows_affected);
-                        Ok(response)
-                    },
-                    Err(e) => {
-                        error!("Error executing statement: {}", e);
-                        Ok(ServiceResponse::error(format!("Error executing statement: {}", e)))
-                    },
+            if let ValueType::Map(param_map) = params {
+                if let Some(ValueType::String(sql)) = param_map.get("sql") {
+                    debug!("Executing SQL statement: {}", sql);
+                    
+                    // Execute the statement using the query mixin
+                    let params_value = params.clone();
+                    match self.query_mixin.execute(&sql, params_value).await {
+                        Ok(response) => {
+                            Ok(response)
+                        },
+                        Err(e) => {
+                            error!("Error executing SQL: {}", e);
+                            Ok(ServiceResponse::error(format!("SQL execution error: {}", e)))
+                        }
+                    }
+                } else {
+                    warn!("Missing 'sql' parameter in execute request");
+                    Ok(ServiceResponse::error("Missing 'sql' parameter"))
                 }
             } else {
-                warn!("Missing 'sql' parameter in execute request");
-                Ok(ServiceResponse::error("Missing 'sql' parameter"))
+                warn!("Missing parameters in execute request");
+                Ok(ServiceResponse::error("Missing parameters"))
             }
         } else {
             warn!("Missing parameters in execute request");
@@ -903,18 +901,26 @@ impl SqliteService {
     async fn handle_batch(&self, request: ServiceRequest) -> Result<ServiceResponse> {
         debug!("Processing batch operation on path: {}", request.path);
         
-        // Execute multiple SQL statements in one batch
+        // Extract SQL and parameters from the request
         if let Some(params) = &request.params {
-            if let Some(ValueType::String(sql)) = params.get("sql") {
-                debug!("Executing SQL batch with length: {}", sql.len());
-                
-                // This would normally execute the batch through the mixin
-                // For now, just return success
-                info!("Batch executed successfully");
-                Ok(ServiceResponse::success::<String>("Batch executed successfully".to_string(), None))
+            if let ValueType::Map(param_map) = params {
+                if let Some(ValueType::String(sql)) = param_map.get("sql") {
+                    debug!("Executing SQL batch: {}", sql);
+                    
+                    // Process batch operation
+                    // ... Implementation details ...
+                    
+                    Ok(ServiceResponse::success(
+                        "Batch execution completed successfully".to_string(), 
+                        Some(ValueType::Null)
+                    ))
+                } else {
+                    warn!("Missing 'sql' parameter in batch request");
+                    Ok(ServiceResponse::error("Missing 'sql' parameter"))
+                }
             } else {
-                warn!("Missing 'sql' parameter in batch request");
-                Ok(ServiceResponse::error("Missing 'sql' parameter"))
+                warn!("Missing parameters in batch request");
+                Ok(ServiceResponse::error("Missing parameters"))
             }
         } else {
             warn!("Missing parameters in batch request");

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use kagi_node::services::ValueType;
+use runar_node::ValueType;
 
 /// VMap wrapper for easier ValueType manipulation
 #[derive(Debug, Clone)]
@@ -43,10 +43,10 @@ macro_rules! vmap {
             let key_str = $key.to_string();
             map.insert(key_str, $value.into());
         )*
-        kagi_node::services::ValueType::Map(map)
+        runar_node::ValueType::Map(map)
     }};
     () => {
-        kagi_node::services::ValueType::Map(std::collections::HashMap::new())
+        runar_node::ValueType::Map(std::collections::HashMap::new())
     };
 }
 

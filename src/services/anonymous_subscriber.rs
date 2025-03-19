@@ -258,18 +258,22 @@ impl AbstractService for AnonymousSubscriberService {
             "publish" => {
                 // Handle publish request
                 if let Some(params) = &request.params {
-                    if let Some(message) = params.get("message") {
-                        self.update_last_activity();
-                        
-                        // In a real implementation, this would publish the message
-                        // to the subscription topic
-                        
-                        Ok(ServiceResponse::success(
-                            format!("Message published to topic {}", self.subscription_topic()),
-                            Some(message.clone()),
-                        ))
+                    if let ValueType::Map(param_map) = params {
+                        if let Some(message) = param_map.get("message") {
+                            self.update_last_activity();
+                            
+                            // In a real implementation, this would publish the message
+                            // to the subscription topic
+                            
+                            Ok(ServiceResponse::success(
+                                format!("Message published to topic {}", self.subscription_topic()),
+                                Some(message.clone()),
+                            ))
+                        } else {
+                            Ok(ServiceResponse::error("Missing 'message' parameter"))
+                        }
                     } else {
-                        Ok(ServiceResponse::error("Missing 'message' parameter"))
+                        Ok(ServiceResponse::error("Invalid parameters format"))
                     }
                 } else {
                     Ok(ServiceResponse::error("Missing parameters"))
