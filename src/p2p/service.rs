@@ -22,7 +22,6 @@ use uuid;
 use libp2p::PeerId as LibP2pPeerId;
 use runar_common::types::ValueType;
 use crate::p2p::crypto::PeerId as CryptoPeerId;
-use crate::p2p::crypto::NetworkId;
 use crate::p2p::peer_id_convert::{LibP2pToCryptoPeerId, CryptoToLibP2pPeerId};
 
 /// Events when a message is received
@@ -364,12 +363,10 @@ impl P2PRemoteServiceDelegate {
             .map_err(|e| anyhow!("Failed to convert target peer ID: {}", e))?;
         
         // Send the message to the peer
-        let transport_lock = self.transport.lock().map_err(|_| {
-            anyhow!("Failed to acquire lock on P2P transport")
-        })?;
+        let transport = self.transport.read().await;
 
-        if let Some(transport) = &*transport_lock {
-            transport.send_to_peer(libp2p_peer_id, message_data).await?;
+        if let Some(transport_ref) = &*transport {
+            transport_ref.send_to_peer(libp2p_peer_id, message_data).await?;
         }
 
         Ok(())
@@ -377,12 +374,10 @@ impl P2PRemoteServiceDelegate {
 
     /// Send a message to a specific peer
     pub async fn send_message(&self, peer_id: LibP2pPeerId, message: String) -> Result<()> {
-        let transport_lock = self.transport.lock().map_err(|_| {
-            anyhow!("Failed to acquire lock on P2P transport")
-        })?;
+        let transport = self.transport.read().await;
 
-        if let Some(transport) = &*transport_lock {
-            transport.send_to_peer(peer_id, message).await
+        if let Some(transport_ref) = &*transport {
+            transport_ref.send_to_peer(peer_id, message).await
         } else {
             Err(anyhow!("P2P transport not initialized"))
         }
@@ -452,14 +447,12 @@ impl P2PRemoteServiceDelegate {
     }
 
     /// Get our own peer ID
-    pub fn get_peer_id(&self) -> Result<LibP2pPeerId> {
-        let transport_lock = self.transport.lock().map_err(|_| {
-            anyhow!("Failed to acquire lock on P2P transport")
-        })?;
+    pub async fn get_peer_id(&self) -> Result<LibP2pPeerId> {
+        let transport = self.transport.read().await;
 
-        if let Some(transport) = &*transport_lock {
+        if let Some(transport_ref) = &*transport {
             // Convert from CryptoPeerId to LibP2pPeerId
-            transport.get_peer_id().to_libp2p_peer_id()
+            transport_ref.get_peer_id().to_libp2p_peer_id()
         } else {
             Err(anyhow!("P2P transport not initialized"))
         }

@@ -1,24 +1,22 @@
 use anyhow::{anyhow, Result};
-use base64;
 use log::info;
 use serde::{Deserialize, Serialize};
-use serde_bytes;
 use serde_json::{json, Value};
 use std::any::Any;
 use std::collections::HashMap;
-use std::fmt;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid;
-use crate::vmap;
-use crate::vmap_opt;
 
 use crate::db::SqliteDatabase;
 use crate::node::NodeConfig;
 
-// Import ValueType and SerializableStruct from runar_common
-use runar_common::types::ValueType;
-use runar_common::types::SerializableStruct;
+// Import types from runar_common
+use runar_common::types::{ValueType, SerializableStruct};
+
+// Import the vmap_opt macro
+#[allow(unused_imports)]
+use crate::vmap_opt;
 
 // Export the abstract service module
 pub mod abstract_service;
@@ -47,11 +45,11 @@ pub use anonymous_subscriber::AnonymousSubscriberService;
 pub use node_info::NodeInfoService;
 pub use remote::{P2PTransport, RemoteService};
 pub use sqlite::SqliteService;
-pub use manager::*;
 
-// Re-export ValueType and SerializableStruct from runar_common
-pub use runar_common::types::ValueType;
-pub use runar_common::types::SerializableStruct;
+// Re-export common types (safely)
+pub mod types {
+    pub use runar_common::types::{ValueType, SerializableStruct};
+}
 
 // Re-export distributed registry types (for macros)
 pub use distributed_registry::{
@@ -59,14 +57,17 @@ pub use distributed_registry::{
     ProcessHandler, 
     EventSubscription, 
     PublicationInfo,
+};
+
+// Re-export registry objects if distributed slice feature is enabled
+#[cfg(feature = "distributed_slice")]
+pub use distributed_registry::{
     ACTION_REGISTRY,
     PROCESS_REGISTRY,
     SUBSCRIPTION_REGISTRY,
     PUBLICATION_REGISTRY,
+    distributed_slice,
 };
-
-#[cfg(feature = "distributed_slice")]
-pub use distributed_registry::distributed_slice;
 
 /// Handler for node requests - used to make service calls and handle events
 #[async_trait::async_trait]
@@ -612,8 +613,42 @@ macro_rules! vmap_opt {
 /// Helper function to convert a value to ValueType
 /// This is used by the vmap! macro
 pub fn to_value_type<T: Serialize>(value: T) -> ValueType {
-    // Use runar_common's ValueType conversion functionality
-    runar_common::types::to_value_type(value)
+    // Convert the value to a JSON Value first
+    let json_value = match serde_json::to_value(&value) {
+        Ok(v) => v,
+        Err(_) => return ValueType::Null,
+    };
+    
+    // Then convert to ValueType
+    match json_value {
+        serde_json::Value::Null => ValueType::Null,
+        serde_json::Value::Bool(b) => ValueType::Bool(b),
+        serde_json::Value::Number(n) => {
+            if let Some(f) = n.as_f64() {
+                ValueType::Number(f)
+            } else {
+                ValueType::Null
+            }
+        },
+        serde_json::Value::String(s) => ValueType::String(s),
+        serde_json::Value::Array(arr) => {
+            let values: Vec<ValueType> = arr.into_iter()
+                .map(|v| {
+                    // Convert each element recursively
+                    to_value_type(v)
+                })
+                .collect();
+            ValueType::Array(values)
+        },
+        serde_json::Value::Object(obj) => {
+            let mut map = HashMap::new();
+            for (k, v) in obj {
+                // Convert each value recursively
+                map.insert(k, to_value_type(v));
+            }
+            ValueType::Map(map)
+        },
+    }
 }
 
 /// Helper function to check if a value can be cast to a specific type

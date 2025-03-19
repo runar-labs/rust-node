@@ -12,9 +12,9 @@ pub mod peer_id_convert;
 pub use crypto::{AccessToken, Crypto, NetworkId, PeerId};
 pub use peer::NetworkInfo;
 pub use qr::{generate_network_qr, generate_peer_qr, generate_token_qr, parse_qr};
-pub use service::{P2PRemoteServiceDelegate, P2PMessage};
+pub use service::P2PRemoteServiceDelegate;
 pub use stun::{get_public_endpoint, start_stun_like_server};
-pub use transport::{P2PTransport, P2PTransportOptions};
+pub use transport::{P2PTransport, P2PMessage};
 pub use peer_id_convert::{LibP2pToCryptoPeerId, CryptoToLibP2pPeerId};
 
 pub async fn init() -> anyhow::Result<transport::P2PTransport> {
