@@ -1,15 +1,14 @@
+use anyhow::{anyhow, bail, Result};
+use async_trait::async_trait;
 use crate::db::SqliteDatabase;
-use crate::p2p::crypto::{AccessToken, NetworkId, PeerId};
+use crate::p2p::crypto::{NetworkId, PeerId};
 use crate::p2p::transport::{P2PMessage, P2PTransport, TransportConfig};
 use crate::services::abstract_service::{AbstractService, ServiceMetadata, ServiceState};
 use crate::services::service_registry::ServiceRegistry;
 use crate::services::remote::P2PTransport as P2PTransportTrait;
-use crate::services::{RequestContext, ResponseStatus, ServiceRequest, ServiceResponse, ValueType};
+use crate::services::{RequestContext, ServiceRequest, ServiceResponse};
+use crate::services::types::ValueType;
 use crate::util::logging::{debug_log, error_log, info_log, warn_log, Component};
-use crate::vmap;
-use anyhow::{anyhow, Result};
-use async_trait::async_trait;
-use bincode;
 use futures::future::BoxFuture;
 use log::{debug, error, info};
 use serde_json::json;
@@ -20,6 +19,11 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
 use uuid;
+use libp2p::PeerId as LibP2pPeerId;
+use runar_common::types::ValueType;
+use crate::p2p::crypto::PeerId as CryptoPeerId;
+use crate::p2p::crypto::NetworkId;
+use crate::p2p::peer_id_convert::{LibP2pToCryptoPeerId, CryptoToLibP2pPeerId};
 
 /// Events when a message is received
 #[derive(Debug, Clone)]
@@ -330,126 +334,57 @@ impl P2PRemoteServiceDelegate {
         Ok(())
     }
 
-    /// Notify a peer that we've connected to them
+    /// Notify other components that a peer has connected
     async fn notify_peer_connected(
         &self,
-        target_peer_id: PeerId,
-        self_peer_id: PeerId,
-        self_addr: &str,
+        peer_id: CryptoPeerId,
+        self_peer_id: LibP2pPeerId,
+        self_address: String,
     ) -> Result<()> {
-        debug_log(
-            Component::P2P,
-            &format!(
-                "Notifying peer {:?} that we've connected to them",
-                target_peer_id
-            ),
-        )
-        .await;
+        // Convert self_peer_id to CryptoPeerId for consistency
+        let self_crypto_peer_id = self_peer_id.to_crypto_peer_id()
+            .map_err(|e| anyhow!("Failed to convert self peer ID: {}", e))?;
 
-        // Create a connection notification message
+        // Create a message to notify that a peer has connected
         let message = P2PMessage::ConnectNotification {
-            peer_id: self_peer_id,
-            address: self_addr.to_string(),
+            peer_id: peer_id.clone(),
+            address: self_address,
         };
 
-        // Serialize and send the message
-        let message_data = bincode::serialize(&message)?;
-        let transport_guard = self.transport.read().await;
-        transport_guard
-            .send_to_peer(target_peer_id.clone(), message_data)
-            .await
-            .map_err(|e| anyhow!("Failed to send connection notification: {}", e))?;
+        // Broadcast to any local subscribers
+        self.broadcast_local_event("peer_connected", ValueType::String(peer_id.to_string()))
+            .await?;
 
-        debug_log(
-            Component::P2P,
-            &format!("Connection notification sent to peer {:?}", target_peer_id),
-        )
-        .await;
+        // Serialize the message
+        let message_data = serde_json::to_string(&message)
+            .map_err(|e| anyhow!("Failed to serialize peer connected message: {:?}", e))?;
+
+        // Convert peer_id to libp2p::PeerId for sending
+        let libp2p_peer_id = peer_id.to_libp2p_peer_id()
+            .map_err(|e| anyhow!("Failed to convert target peer ID: {}", e))?;
+        
+        // Send the message to the peer
+        let transport_lock = self.transport.lock().map_err(|_| {
+            anyhow!("Failed to acquire lock on P2P transport")
+        })?;
+
+        if let Some(transport) = &*transport_lock {
+            transport.send_to_peer(libp2p_peer_id, message_data).await?;
+        }
 
         Ok(())
     }
 
-    /// Send a message to a peer
-    pub async fn send_message(&self, peer_id: PeerId, message: String) -> Result<()> {
-        debug_log(
-            Component::P2P,
-            &format!("Sending message to peer {:?}: {}", peer_id, message),
-        );
+    /// Send a message to a specific peer
+    pub async fn send_message(&self, peer_id: LibP2pPeerId, message: String) -> Result<()> {
+        let transport_lock = self.transport.lock().map_err(|_| {
+            anyhow!("Failed to acquire lock on P2P transport")
+        })?;
 
-        // Get the P2P transport
-        let transport = self.transport.read().await;
-
-        // Try to send the message up to 3 times if the connection is closed
-        let mut attempts = 0;
-        let max_attempts = 3;
-
-        loop {
-            attempts += 1;
-            let result = transport
-                .send_to_peer(peer_id.clone(), message.clone())
-                .await;
-
-            match result {
-                Ok(_) => {
-                    debug_log(
-                        Component::P2P,
-                        &format!(
-                            "Successfully sent message to peer {:?} on attempt {}",
-                            peer_id, attempts
-                        ),
-                    );
-                    return Ok(());
-                }
-                Err(e) => {
-                    if attempts >= max_attempts {
-                        error_log(
-                            Component::P2P,
-                            &format!(
-                                "Failed to send message to peer {:?} after {} attempts: {:?}",
-                                peer_id, attempts, e
-                            ),
-                        );
-                        return Err(e);
-                    }
-
-                    warn_log(
-                        Component::P2P,
-                        &format!(
-                            "Failed to send message to peer {:?} on attempt {}: {:?}. Retrying...",
-                            peer_id, attempts, e
-                        ),
-                    );
-
-                    // Check if the peer is in our connected peers
-                    let peer_address = {
-                        let peers = self.peers.read().await;
-                        peers.get(&peer_id).cloned()
-                    };
-
-                    // If we have an address for the peer, try to reconnect
-                    if let Some(address) = peer_address {
-                        debug_log(
-                            Component::P2P,
-                            &format!(
-                                "Attempting to reconnect to peer {:?} at {}",
-                                peer_id, address
-                            ),
-                        );
-
-                        // Try to reconnect
-                        let _reconnect_result = transport
-                            .connect_to_peer(
-                                peer_id.clone(),
-                                self.network_id.clone(),
-                                address.clone(),
-                            )
-                            .await;
-                    }
-
-                    // Wait a moment before retrying
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            }
+        if let Some(transport) = &*transport_lock {
+            transport.send_to_peer(peer_id, message).await
+        } else {
+            Err(anyhow!("P2P transport not initialized"))
         }
     }
 
@@ -517,15 +452,34 @@ impl P2PRemoteServiceDelegate {
     }
 
     /// Get our own peer ID
-    pub fn get_peer_id(&self) -> PeerId {
-        // Synchronous version for ease of use
-        let transport = futures::executor::block_on(self.transport.read());
-        (*transport.get_peer_id()).clone()
+    pub fn get_peer_id(&self) -> Result<LibP2pPeerId> {
+        let transport_lock = self.transport.lock().map_err(|_| {
+            anyhow!("Failed to acquire lock on P2P transport")
+        })?;
+
+        if let Some(transport) = &*transport_lock {
+            // Convert from CryptoPeerId to LibP2pPeerId
+            transport.get_peer_id().to_libp2p_peer_id()
+        } else {
+            Err(anyhow!("P2P transport not initialized"))
+        }
     }
 
     /// Get a reference to the P2P transport
     pub fn transport(&self) -> Arc<RwLock<P2PTransport>> {
         self.transport.clone()
+    }
+
+    /// Broadcast an event to local subscribers
+    async fn broadcast_local_event(&self, topic: &str, data: ValueType) -> Result<()> {
+        // For now, just log the event - in a real implementation, this would notify other components
+        debug_log(
+            Component::P2P,
+            &format!("Broadcasting local event: topic={}, data={:?}", topic, data),
+        );
+        
+        // Return success
+        Ok(())
     }
 }
 
@@ -550,11 +504,11 @@ impl Clone for P2PRemoteServiceDelegate {
 }
 
 /// Implementation of the P2PTransport trait for P2PRemoteServiceDelegate
-#[async_trait]
+#[async_trait::async_trait]
 impl P2PTransportTrait for P2PRemoteServiceDelegate {
     async fn send_request(
         &self,
-        peer_id: PeerId,
+        peer_id: CryptoPeerId,
         path: String,
         params: ValueType,
     ) -> Result<ServiceResponse> {
@@ -562,6 +516,10 @@ impl P2PTransportTrait for P2PRemoteServiceDelegate {
             Component::P2P,
             &format!("Sending request to peer {:?}: {}", peer_id, path),
         );
+
+        // Convert peer_id to libp2p PeerId for internal use
+        let libp2p_peer_id = peer_id.to_libp2p_peer_id()
+            .map_err(|e| anyhow!("Failed to convert peer ID: {}", e))?;
 
         // Generate a request ID
         let request_id = uuid::Uuid::new_v4().to_string();
@@ -578,7 +536,7 @@ impl P2PTransportTrait for P2PRemoteServiceDelegate {
             .map_err(|e| anyhow!("Failed to serialize message: {:?}", e))?;
 
         // Send the message
-        self.send_message(peer_id, message_str).await?;
+        self.send_message(libp2p_peer_id, message_str).await?;
 
         // In a real implementation, we would wait for the response
         // For now, just return a dummy response
@@ -588,11 +546,15 @@ impl P2PTransportTrait for P2PRemoteServiceDelegate {
         ))
     }
 
-    async fn publish_event(&self, peer_id: PeerId, topic: String, data: ValueType) -> Result<()> {
+    async fn publish_event(&self, peer_id: CryptoPeerId, topic: String, data: ValueType) -> Result<()> {
         debug_log(
             Component::P2P,
             &format!("Publishing event to peer {:?}: {}", peer_id, topic),
         );
+
+        // Convert peer_id to libp2p PeerId for internal use
+        let libp2p_peer_id = peer_id.to_libp2p_peer_id()
+            .map_err(|e| anyhow!("Failed to convert peer ID: {}", e))?;
 
         // Create an Event message
         let event_message = P2PMessage::Event {
@@ -605,7 +567,7 @@ impl P2PTransportTrait for P2PRemoteServiceDelegate {
             .map_err(|e| anyhow!("Failed to serialize message: {:?}", e))?;
 
         // Send the message
-        self.send_message(peer_id, message_str).await
+        self.send_message(libp2p_peer_id, message_str).await
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -613,7 +575,7 @@ impl P2PTransportTrait for P2PRemoteServiceDelegate {
     }
 }
 
-#[async_trait]
+#[async_trait::async_trait]
 impl AbstractService for P2PRemoteServiceDelegate {
     fn name(&self) -> &str {
         "p2p"
