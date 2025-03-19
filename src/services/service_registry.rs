@@ -27,6 +27,7 @@ use crate::services::{
     SubscriptionOptions, ValueType,
 };
 use crate::util::logging::{debug_log, error_log, info_log, warn_log, Component};
+use crate::p2p::peer_id_convert::CryptoToLibP2pPeerId;
 // Remove the common module imports
 // use crate::common::async_cache::AsyncCache;
 // use crate::common::service::{
@@ -760,17 +761,17 @@ impl ServiceRegistry {
                     callbacks.remove(service_name);
 
                     // Also remove the service from the subscribers list
-            let mut subscribers = self.event_subscribers.write().await;
-            if let Some(subscribers_for_topic) = subscribers.get_mut(topic) {
-                subscribers_for_topic.retain(|s| s != service_name);
+                    let mut subscribers = self.event_subscribers.write().await;
+                    if let Some(subscribers_for_topic) = subscribers.get_mut(topic) {
+                        subscribers_for_topic.retain(|s| s != service_name);
 
-                // If no more subscribers, remove the topic entry
-                if subscribers_for_topic.is_empty() {
-                    subscribers.remove(topic);
-                    all_subscriptions_removed = true;
+                        // If no more subscribers, remove the topic entry
+                        if subscribers_for_topic.is_empty() {
+                            subscribers.remove(topic);
+                            all_subscriptions_removed = true;
+                        }
+                    }
                 }
-            }
-        }
             }
         }
 
@@ -1387,15 +1388,22 @@ impl ServiceRegistry {
                         Ok(response) => {
                             // Send response back via P2P
                             if let Some(delegate) = self.p2p_delegate.read().await.as_ref() {
-                                // Need to wrap with response
-                                let response_msg = P2PMessage::Response {
+                                // Wrap in request message
+                                let request_message = P2PMessage::Request {
                                     request_id,
-                                    response,
+                                    path: format!("{}{}", service, path),
+                                    params: params.clone(),
                                 };
                                 
-                                // Serialize and send - need to use the delegate's method
-                                let serialized = bincode::serialize(&response_msg)?;
-                                delegate.send_message(peer_id, String::from_utf8_lossy(&serialized).to_string()).await?;
+                                // Convert peer_id to libp2p::PeerId for sending
+                                let libp2p_peer_id = peer_id.to_libp2p_peer_id()
+                                    .map_err(|e| anyhow!("Failed to convert peer ID: {}", e))?;
+                                
+                                // Serialize to binary
+                                let serialized = bincode::serialize(&request_message)?;
+                                
+                                // Send the actual request
+                                delegate.send_message(libp2p_peer_id, String::from_utf8_lossy(&serialized).to_string()).await?;
                             }
                         }
                         Err(e) => {
@@ -1412,8 +1420,12 @@ impl ServiceRegistry {
                             };
                             
                             if let Some(delegate) = self.p2p_delegate.read().await.as_ref() {
+                                // Convert peer_id to libp2p::PeerId for sending
+                                let libp2p_peer_id = peer_id.to_libp2p_peer_id()
+                                    .map_err(|e| anyhow!("Failed to convert peer ID: {}", e))?;
+                                    
                                 let serialized = bincode::serialize(&error_response)?;
-                                delegate.send_message(peer_id, String::from_utf8_lossy(&serialized).to_string()).await?;
+                                delegate.send_message(libp2p_peer_id, String::from_utf8_lossy(&serialized).to_string()).await?;
                             }
                         }
                     }
@@ -1427,8 +1439,12 @@ impl ServiceRegistry {
                     
                     // Send error response
                     if let Some(delegate) = self.p2p_delegate.read().await.as_ref() {
+                        // Convert peer_id to libp2p::PeerId for sending
+                        let libp2p_peer_id = peer_id.to_libp2p_peer_id()
+                            .map_err(|e| anyhow!("Failed to convert peer ID: {}", e))?;
+                            
                         let serialized = bincode::serialize(&error_response)?;
-                        delegate.send_message(peer_id, String::from_utf8_lossy(&serialized).to_string()).await?;
+                        delegate.send_message(libp2p_peer_id, String::from_utf8_lossy(&serialized).to_string()).await?;
                     }
                 }
             }

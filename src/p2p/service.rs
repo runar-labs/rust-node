@@ -7,7 +7,6 @@ use crate::services::abstract_service::{AbstractService, ServiceMetadata, Servic
 use crate::services::service_registry::ServiceRegistry;
 use crate::services::remote::P2PTransport as P2PTransportTrait;
 use crate::services::{RequestContext, ServiceRequest, ServiceResponse};
-use crate::services::types::ValueType;
 use crate::util::logging::{debug_log, error_log, info_log, warn_log, Component};
 use futures::future::BoxFuture;
 use log::{debug, error, info};
@@ -322,12 +321,13 @@ impl P2PRemoteServiceDelegate {
         addresses.insert(peer_id_value.clone(), address.to_string());
 
         // Get local peer ID and address for the notification
-        let self_peer_id_arc = transport_guard.get_peer_id().clone();
-        let self_peer_id = (*self_peer_id_arc).clone();
-        let self_address = "127.0.0.1:0";
+        let self_crypto_peer_id = transport_guard.get_peer_id().clone();
+        let self_libp2p_peer_id = self_crypto_peer_id.to_libp2p_peer_id()
+            .map_err(|e| anyhow!("Failed to convert peer ID: {}", e))?;
+        let self_address = "127.0.0.1:0".to_string();
 
         // Notify about the new connection with properly extracted PeerId
-        self.notify_peer_connected(peer_id_value, self_peer_id, self_address)
+        self.notify_peer_connected(peer_id_value, self_libp2p_peer_id, self_address)
             .await?;
 
         Ok(())
@@ -365,21 +365,22 @@ impl P2PRemoteServiceDelegate {
         // Send the message to the peer
         let transport = self.transport.read().await;
 
-        if let Some(transport_ref) = &*transport {
-            transport_ref.send_to_peer(libp2p_peer_id, message_data).await?;
+        match &*transport {
+            Some(transport_ref) => {
+                transport_ref.send_to_peer(libp2p_peer_id, message_data).await?;
+                Ok(())
+            },
+            None => Err(anyhow!("P2P transport not initialized"))
         }
-
-        Ok(())
     }
 
     /// Send a message to a specific peer
     pub async fn send_message(&self, peer_id: LibP2pPeerId, message: String) -> Result<()> {
         let transport = self.transport.read().await;
 
-        if let Some(transport_ref) = &*transport {
-            transport_ref.send_to_peer(peer_id, message).await
-        } else {
-            Err(anyhow!("P2P transport not initialized"))
+        match &*transport {
+            Some(transport_ref) => transport_ref.send_to_peer(peer_id, message).await,
+            None => Err(anyhow!("P2P transport not initialized"))
         }
     }
 
@@ -450,11 +451,9 @@ impl P2PRemoteServiceDelegate {
     pub async fn get_peer_id(&self) -> Result<LibP2pPeerId> {
         let transport = self.transport.read().await;
 
-        if let Some(transport_ref) = &*transport {
-            // Convert from CryptoPeerId to LibP2pPeerId
-            transport_ref.get_peer_id().to_libp2p_peer_id()
-        } else {
-            Err(anyhow!("P2P transport not initialized"))
+        match &*transport {
+            Some(transport_ref) => transport_ref.get_peer_id().to_libp2p_peer_id(),
+            None => Err(anyhow!("P2P transport not initialized"))
         }
     }
 
@@ -472,6 +471,30 @@ impl P2PRemoteServiceDelegate {
         );
         
         // Return success
+        Ok(())
+    }
+
+    async fn handle_peer_connected(&self, peer_id: CryptoPeerId, address: &str) -> Result<()> {
+        debug_log(
+            Component::P2P,
+            &format!("Handling peer connected event for {:?}", peer_id),
+        );
+
+        // Get our own peer ID
+        let self_peer_id = self.get_peer_id().await?;
+        
+        // Convert the address to a String
+        let self_address = address.to_string();
+
+        // Notify the peer that we've connected to them
+        self.notify_peer_connected(peer_id, self_peer_id, self_address)
+            .await?;
+
+        debug_log(
+            Component::P2P,
+            &format!("Successfully handled peer connected event for {:?}", peer_id),
+        );
+
         Ok(())
     }
 }
