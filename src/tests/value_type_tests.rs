@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::services::ValueType;
+    use crate::ValueType;
     use crate::{vjson, vmap};
     use std::collections::HashMap;
 

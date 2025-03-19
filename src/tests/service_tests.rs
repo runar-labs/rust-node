@@ -15,10 +15,10 @@ use crate::services::{
     ServiceResponse,
 };
 use crate::services::service_registry::ServiceRegistry;
-use crate::services::ValueType;
+use crate::ValueType;
 use crate::services::ServiceState;
 use crate::services::ServiceMetadata;
-use kagi_common::ServiceInfo;
+use runar_common::ServiceInfo;
 
 // Constants
 const TEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -67,6 +67,7 @@ async fn test_registry_service() -> Result<()> {
         params: Some(ValueType::Null),
         request_id: Some("test-request".to_string()),
         request_context: request_context.clone(),
+        metadata: None,
     };
     
     // Handle the request
@@ -92,32 +93,28 @@ async fn test_registry_service_register_only() -> Result<()> {
 
         // Create the Registry service
         let network_id = "test_network";
-        let mut service = ServiceRegistry::new(network_id);
-        service.set_db(db.clone()); // Set the database
-
-        // Start the service
-        service.start().await?;
+        let service = ServiceRegistry::new(network_id);
+        // Note: ServiceRegistry doesn't have set_db, start, or stop methods in the current implementation
+        // We'll just use it directly
 
         // Register a service
+        let ctx = RequestContext::default().into();
         let register_request = ServiceRequest {
-            request_id: Some("register-test".to_string()),
-            path: format!("{}/registry", network_id),
+            path: "registry".to_string(),
             operation: "register".to_string(),
-            params: json!({
+            params: Some(ValueType::from_json(json!({
                 "name": "test-service",
                 "path": "test/endpoint",
                 "description": "A test service",
                 "version": "1.0.0"
-            })
-            .into(),
-            request_context: RequestContext::default().into(),
+            }))),
+            request_id: None,
+            request_context: ctx,
+            metadata: None,
         };
 
         let response = service.handle_request(register_request).await?;
         assert!(response.status == ResponseStatus::Success);
-
-        // Stop the service
-        service.stop().await?;
 
         Ok(())
     })
@@ -141,7 +138,7 @@ async fn test_service_manager_registry_register_only() -> Result<()> {
     // Run the entire test with a timeout
     timeout(TEST_TIMEOUT, async {
         // Create a test database
-        let db = create_test_db();
+        let db = create_test_db().await?;
 
         // Create a service manager
         let network_id = "test_network";
@@ -150,25 +147,26 @@ async fn test_service_manager_registry_register_only() -> Result<()> {
             &format!("./test_data/{}", network_id),
             &format!("./test_data/{}/db", network_id),
         ));
-        let mut service_manager = ServiceManager::new(db.clone(), config);
+        let mut service_manager = ServiceManager::new(db, config);
 
         // Initialize services
         service_manager.init_services().await?;
 
         // Test Registry service through the manager
         // Register a service
+        let ctx = RequestContext::default().into();
         let register_request = ServiceRequest {
-            request_id: Some("register-test".to_string()),
-            path: format!("{}/registry", network_id),
+            path: "registry".to_string(),
             operation: "register".to_string(),
-            params: json!({
+            params: Some(ValueType::from_json(json!({
                 "name": "test-service",
                 "path": "test/endpoint",
                 "description": "A test service",
                 "version": "1.0.0"
-            })
-            .into(),
-            request_context: RequestContext::default().into(),
+            }))),
+            request_id: None,
+            request_context: ctx,
+            metadata: None,
         };
 
         let response = service_manager.handle_request(register_request).await?;
@@ -261,7 +259,7 @@ mod tests {
             // Simple echo service
             let response = ServiceResponse::success(
                 format!("Echoing request: {}", request.operation),
-                Some(ValueType::from(request.params.unwrap_or_default())), // Convert to ValueType
+                Some(ValueType::from(request.params.unwrap_or(ValueType::Null))),
             );
             Ok(response)
         }
@@ -321,6 +319,7 @@ mod tests {
                 }))),
                 request_id: Some("test-request".to_string()),
                 request_context: request_context.clone(),
+                metadata: None,
             };
             
             // Get the service
@@ -376,6 +375,24 @@ mod tests {
             }))),
             request_id: Some("test-request".to_string()),
             request_context: request_context.clone(),
+            metadata: None,
         };
     }
+}
+
+#[tokio::test]
+async fn test_basic_service() -> anyhow::Result<()> {
+    // Create a test service request
+    let request = ServiceRequest {
+        path: "/test".to_string(),
+        operation: "echo".to_string(),
+        params: Some(ValueType::String("test".to_string())),
+        request_id: None,
+        request_context: std::sync::Arc::new(crate::services::RequestContext::default()),
+        metadata: None,
+    };
+
+    // ... existing code ...
+
+    Ok(())
 }
