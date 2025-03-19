@@ -1272,6 +1272,7 @@ impl ServiceRegistry {
 
         // DIAGNOSTIC: Log entry into handle_event
         println!("DIAG-REGISTRY: handle_event called for topic: {}", topic);
+        println!("DIAG-REGISTRY: event data: {:?}", data);
 
         // First, get the list of subscribers for this topic
         let subscribers_for_direct_match = {
@@ -1677,6 +1678,11 @@ impl ServiceRegistry {
         .await;
 
         Ok(())
+    }
+
+    // Add a new method to get the event subscribers (for debugging)
+    pub async fn get_event_subscribers(&self) -> tokio::sync::RwLockReadGuard<'_, HashMap<String, Vec<String>>> {
+        self.event_subscribers.read().await
     }
 }
 

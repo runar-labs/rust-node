@@ -58,3 +58,11 @@ pub fn log_event_published(service_name: &str, topic: &str) {
 pub fn log_error(service_name: &str, message: &str) {
     log_subscription(service_name, "ERROR", message);
 }
+
+pub fn log_callback_execution(service_name: &str, topic: &str) {
+    println!("[{}] Executing callback for topic: {}", service_name, topic);
+}
+
+pub fn log_published_event(service_name: &str, topic: &str) {
+    println!("[{}] Published event to topic: {}", service_name, topic);
+}

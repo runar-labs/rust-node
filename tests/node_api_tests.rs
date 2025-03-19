@@ -315,6 +315,8 @@ async fn test_node_api_with_simple_service() -> Result<()> {
             "value" => 42
         };
 
+        node.start().await?;  
+
         let echo_result = node.request("testService/echo", echo_params).await?;
 
         // Print the response for debugging

@@ -956,6 +956,24 @@ where {
         Ok(())
     }
 
+    /// Start the node and all its services
+    pub async fn start(&self) -> Result<()> {
+        if !self.initialized {
+            return Err(anyhow!("Node must be initialized before starting. Call init() first."));
+        }
+
+        // Start all services
+        self.start_services().await?;
+
+        // Start P2P delegate - clone and use deref
+        let mut p2p_delegate = (*self.p2p_delegate).clone();
+        p2p_delegate.start().await?;
+
+        info_log(Component::Node, &format!("Node started: {}", self.config.get_or_generate_node_id()));
+        
+        Ok(())
+    }
+
     /// Run periodic cleanup of anonymous services
     pub fn start_anonymous_service_cleanup(
         config: Arc<NodeConfig>,
