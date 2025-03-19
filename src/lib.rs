@@ -61,7 +61,7 @@ pub use services::distributed_slice;
 /// Initialize a node with the given configuration directory
 pub async fn init_node(config_dir: PathBuf) -> Result<Arc<node::Node>> {
     // Create the node configuration
-    let node_name = "kagi-node";
+    let node_name = "runar-node";
     let private_key = config::NodeConfig::generate_keypair()?.to_bytes().to_vec();
     let web_ui_port = 3000;
 
@@ -83,7 +83,7 @@ pub async fn init_node(config_dir: PathBuf) -> Result<Arc<node::Node>> {
     Ok(Arc::new(node))
 }
 
-/// Initialize the Kagi Node with services
+/// Initialize the Runar Node with services
 pub async fn init_with_services(db_path: &str, network_id: &str) -> Result<()> {
     // Extract the node path from the database path
     let db_path_buf = std::path::PathBuf::from(db_path);
@@ -104,13 +104,13 @@ pub async fn init_with_services(db_path: &str, network_id: &str) -> Result<()> {
     cli::run().await
 }
 
-/// Initialize the Kagi Node
+/// Initialize the Runar Node
 pub async fn init() -> Result<()> {
     // This is a placeholder for future initialization code
     Ok(())
 }
 
-/// Initialize the Kagi Node with services
+/// Initialize the Runar Node with services
 pub async fn start_node(config: node::NodeConfig) -> Result<node::Node> {
     // Create and initialize a new node
     let mut node = node::Node::new(config).await?;
