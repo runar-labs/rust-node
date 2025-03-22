@@ -119,15 +119,12 @@ impl AbstractService for SimpleTestService {
         "Simple Test Service for testing"
     }
 
-    fn metadata(&self) -> ServiceMetadata {
-        ServiceMetadata {
-            name: self.name().to_string(),
-            path: self.path().to_string(),
-            state: self.state(),
-            description: self.description().to_string(),
-            operations: vec!["echo".to_string(), "ping".to_string()],
-            version: "1.0".to_string(),
-        }
+    fn version(&self) -> &str {
+        "1.0"
+    }
+    
+    fn operations(&self) -> Vec<String> {
+        vec!["echo".to_string(), "ping".to_string()]
     }
 
     async fn init(&mut self, _context: &RequestContext) -> Result<()> {
@@ -382,21 +379,18 @@ impl AbstractService for MockDocumentStore {
         "Mock Document Store for testing"
     }
 
-    fn metadata(&self) -> ServiceMetadata {
-        ServiceMetadata {
-            name: self.name().to_string(),
-            path: self.path().to_string(),
-            state: self.state(),
-            description: self.description().to_string(),
-            operations: vec![
-                "create".to_string(),
-                "read".to_string(),
-                "update".to_string(),
-                "delete".to_string(),
-                "query".to_string(),
-            ],
-            version: "1.0".to_string(),
-        }
+    fn version(&self) -> &str {
+        "1.0"
+    }
+    
+    fn operations(&self) -> Vec<String> {
+        vec![
+            "create".to_string(),
+            "read".to_string(),
+            "update".to_string(),
+            "delete".to_string(),
+            "query".to_string(),
+        ]
     }
 
     async fn init(&mut self, _context: &RequestContext) -> Result<()> {

@@ -238,16 +238,13 @@ mod tests {
         fn description(&self) -> &str {
             &self.description
         }
-
-        fn metadata(&self) -> ServiceMetadata {
-            ServiceMetadata {
-                name: self.name.clone(),
-                path: self.path.clone(),
-                state: ServiceState::Running,
-                description: self.description.clone(),
-                operations: vec![], // No operations
-                version: self.version.clone(),
-            }
+        
+        fn version(&self) -> &str {
+            &self.version
+        }
+        
+        fn operations(&self) -> Vec<String> {
+            vec![] // No operations
         }
 
         async fn init(&mut self, _context: &RequestContext) -> Result<()> {

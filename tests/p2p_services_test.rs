@@ -199,18 +199,15 @@ impl AbstractService for PublisherService {
     }
 
     fn description(&self) -> &str {
-        "A service that publishes events"
+        "A service that listens for and processes events"
     }
 
-    fn metadata(&self) -> ServiceMetadata {
-        ServiceMetadata {
-            name: self.name.clone(),
-            path: self.path.clone(),
-            state: self.state(),
-            description: self.description().to_string(),
-            operations: vec!["validate".to_string(), "publish".to_string()],
-            version: "1.0.0".to_string(),
-        }
+    fn version(&self) -> &str {
+        "1.0.0"
+    }
+
+    fn operations(&self) -> Vec<String> {
+        vec!["get_valid_events".to_string(), "get_invalid_events".to_string()]
     }
 }
 
@@ -422,18 +419,15 @@ impl AbstractService for ListenerService {
     }
 
     fn description(&self) -> &str {
-        "A service that listens for events"
+        "A service that listens for and processes events"
     }
 
-    fn metadata(&self) -> ServiceMetadata {
-        ServiceMetadata {
-            name: self.name.clone(),
-            path: self.path.clone(),
-            state: self.state(),
-            description: self.description().to_string(),
-            operations: vec!["get_valid_events".to_string(), "get_invalid_events".to_string()],
-            version: "1.0.0".to_string(),
-        }
+    fn version(&self) -> &str {
+        "1.0.0"
+    }
+
+    fn operations(&self) -> Vec<String> {
+        vec!["get_valid_events".to_string(), "get_invalid_events".to_string()]
     }
 }
 

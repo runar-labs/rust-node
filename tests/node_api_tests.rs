@@ -200,15 +200,12 @@ impl AbstractService for AuthService {
         "Authentication service for testing"
     }
 
-    fn metadata(&self) -> ServiceMetadata {
-        ServiceMetadata {
-            name: self.name().to_string(),
-            path: self.path().to_string(),
-            state: self.state(),
-            description: self.description().to_string(),
-            operations: vec!["login".to_string(), "validateToken".to_string()],
-            version: "1.0".to_string(),
-        }
+    fn version(&self) -> &str {
+        "1.0"
+    }
+    
+    fn operations(&self) -> Vec<String> {
+        vec!["login".to_string(), "validateToken".to_string(), "logout".to_string()]
     }
 
     async fn init(&mut self, _context: &RequestContext) -> Result<()> {
@@ -262,7 +259,7 @@ impl AbstractService for AuthService {
                 log_info("AuthService::handle_request - invalid login parameters").await;
                 Ok(ServiceResponse {
                     status: ResponseStatus::Error,
-                    message: "Invalid login parameters".to_string(),
+                    message: "Invalid username or password".to_string(),
                     data: None,
                 })
             },
