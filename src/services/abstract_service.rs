@@ -68,9 +68,12 @@ pub trait AbstractService: Send + Sync + 'static {
 
     /// Get a description of the service
     fn description(&self) -> &str;
-
-    /// Get metadata about the service
-    fn metadata(&self) -> ServiceMetadata;
+    
+    /// Get the service version
+    fn version(&self) -> &str;
+    
+    /// Get the available operations for this service
+    fn operations(&self) -> Vec<String>;
 
     /// Initialize the service with a request context
     async fn init(&mut self, ctx: &RequestContext) -> Result<()>;
@@ -86,14 +89,25 @@ pub trait AbstractService: Send + Sync + 'static {
 
     /// Get information about the service
     async fn get_info(&self) -> Result<crate::services::ValueType> {
-        let metadata = self.metadata();
         let mut map = std::collections::HashMap::new();
-        map.insert("name".to_string(), crate::services::ValueType::String(metadata.name));
-        map.insert("path".to_string(), crate::services::ValueType::String(metadata.path));
-        map.insert("state".to_string(), crate::services::ValueType::String(metadata.state.to_string()));
-        map.insert("description".to_string(), crate::services::ValueType::String(metadata.description));
-        map.insert("version".to_string(), crate::services::ValueType::String(metadata.version));
+        map.insert("name".to_string(), crate::services::ValueType::String(self.name().to_string()));
+        map.insert("path".to_string(), crate::services::ValueType::String(self.path().to_string()));
+        map.insert("state".to_string(), crate::services::ValueType::String(self.state().to_string()));
+        map.insert("description".to_string(), crate::services::ValueType::String(self.description().to_string()));
+        map.insert("version".to_string(), crate::services::ValueType::String(self.version().to_string()));
         Ok(crate::services::ValueType::Map(map))
+    }
+    
+    /// Get metadata about the service (derived from other methods)
+    fn metadata(&self) -> ServiceMetadata {
+        ServiceMetadata {
+            name: self.name().to_string(),
+            path: self.path().to_string(),
+            state: self.state(),
+            description: self.description().to_string(),
+            operations: self.operations(),
+            version: self.version().to_string(),
+        }
     }
 }
 

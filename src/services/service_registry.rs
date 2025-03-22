@@ -234,6 +234,14 @@ impl AbstractService for ServerServiceAdapter {
         self.inner.name()
     }
     
+    fn version(&self) -> &str {
+        "1.0"
+    }
+    
+    fn operations(&self) -> Vec<String> {
+        vec![]
+    }
+    
     async fn handle_request(&self, request: ServiceRequest) -> Result<ServiceResponse> {
         self.inner.handle_request(request).await
     }
@@ -250,18 +258,6 @@ impl AbstractService for ServerServiceAdapter {
     
     fn description(&self) -> &str {
         "Server service adapter"
-    }
-    
-    fn metadata(&self) -> ServiceMetadata {
-        // Create default metadata
-        ServiceMetadata {
-            name: self.inner.name().to_string(),
-            path: self.inner.name().to_string(),
-            description: "Server service adapter".to_string(),
-            version: "1.0".to_string(),
-            operations: vec![],
-            state: ServiceState::Running,
-        }
     }
     
     async fn start(&mut self) -> Result<()> {

@@ -692,23 +692,20 @@ impl AbstractService for P2PRemoteServiceDelegate {
         ServiceState::Running
     }
     
-    fn metadata(&self) -> ServiceMetadata {
-        ServiceMetadata {
-            name: self.name().to_string(),
-            path: self.path().to_string(),
-            state: self.state(),
-            description: self.description().to_string(),
-            operations: vec![
-                "connect".to_string(),
-                "disconnect".to_string(),
-                "send".to_string(),
-                "list_peers".to_string(),
-                "publish".to_string(),
-                "subscribe".to_string(),
-                "unsubscribe".to_string(),
-            ],
-            version: "1.0".to_string(),
-        }
+    fn version(&self) -> &str {
+        "1.0"
+    }
+    
+    fn operations(&self) -> Vec<String> {
+        vec![
+            "connect".to_string(),
+            "disconnect".to_string(),
+            "send".to_string(),
+            "list_peers".to_string(),
+            "publish".to_string(),
+            "subscribe".to_string(),
+            "unsubscribe".to_string(),
+        ]
     }
 
     async fn init(&mut self, _context: &RequestContext) -> Result<()> {

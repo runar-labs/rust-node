@@ -55,21 +55,18 @@ impl AbstractService for RegistryInfoService {
     fn state(&self) -> ServiceState {
         ServiceState::Running
     }
-
-    fn metadata(&self) -> ServiceMetadata {
-        ServiceMetadata {
-            name: self.name().to_string(),
-            path: self.path().to_string(),
-            state: self.state(),
-            description: self.description().to_string(),
-            operations: vec![
-                "list".to_string(),
-                "get".to_string(),
-                "register_metadata".to_string(),
-                "unregister_metadata".to_string(),
-            ],
-            version: "1.0".to_string(),
-        }
+    
+    fn version(&self) -> &str {
+        "1.0"
+    }
+    
+    fn operations(&self) -> Vec<String> {
+        vec![
+            "list".to_string(),
+            "get".to_string(),
+            "register_metadata".to_string(),
+            "unregister_metadata".to_string(),
+        ]
     }
 
     async fn init(&mut self, _context: &crate::services::RequestContext) -> Result<()> {

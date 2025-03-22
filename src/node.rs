@@ -1184,15 +1184,12 @@ impl AbstractService for DummyService {
         self.state
     }
     
-    fn metadata(&self) -> ServiceMetadata {
-        ServiceMetadata {
-            name: self.name().to_string(),
-            path: self.path().to_string(),
-            state: self.state(),
-            description: self.description().to_string(),
-            operations: vec![],
-            version: "1.0".to_string(),
-        }
+    fn version(&self) -> &str {
+        "1.0"
+    }
+    
+    fn operations(&self) -> Vec<String> {
+        vec![]
     }
     
     fn description(&self) -> &str {

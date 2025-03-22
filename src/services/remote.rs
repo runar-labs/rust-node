@@ -121,16 +121,13 @@ impl AbstractService for RemoteService {
     fn description(&self) -> &str {
         "Remote service proxy"
     }
-
-    fn metadata(&self) -> ServiceMetadata {
-        ServiceMetadata {
-            name: self.name.clone(),
-            path: self.path.clone(),
-            state: self.state(),
-            description: self.description().to_string(),
-            operations: self.operations.clone(),
-            version: "1.0.0".to_string(),
-        }
+    
+    fn version(&self) -> &str {
+        "1.0.0"
+    }
+    
+    fn operations(&self) -> Vec<String> {
+        self.operations.clone()
     }
 
     async fn init(&mut self, _ctx: &RequestContext) -> Result<()> {

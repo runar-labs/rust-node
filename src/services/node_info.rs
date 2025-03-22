@@ -126,16 +126,13 @@ impl AbstractService for NodeInfoService {
     fn description(&self) -> &str {
         "Node information service"
     }
-
-    fn metadata(&self) -> ServiceMetadata {
-        ServiceMetadata {
-            name: self.name().to_string(),
-            path: self.path().to_string(),
-            state: self.state(),
-            description: self.description().to_string(),
-            operations: vec!["info".to_string(), "stats".to_string(), "config".to_string()],
-            version: "1.0.0".to_string(),
-        }
+    
+    fn version(&self) -> &str {
+        "1.0.0"
+    }
+    
+    fn operations(&self) -> Vec<String> {
+        vec!["info".to_string(), "stats".to_string(), "config".to_string()]
     }
 
     async fn init(&mut self, context: &crate::services::RequestContext) -> Result<()> {

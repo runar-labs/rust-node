@@ -192,20 +192,17 @@ impl AbstractService for AnonymousSubscriberService {
         ServiceState::Running
     }
     
-    fn metadata(&self) -> ServiceMetadata {
-        ServiceMetadata {
-            name: self.name().to_string(),
-            path: self.path().to_string(),
-            state: self.state(),
-            description: self.description().to_string(),
-            operations: vec![
-                "subscribe".to_string(),
-                "unsubscribe".to_string(),
-                "publish".to_string(),
-                "get_metrics".to_string(),
-            ],
-            version: "1.0".to_string(),
-        }
+    fn version(&self) -> &str {
+        "1.0"
+    }
+    
+    fn operations(&self) -> Vec<String> {
+        vec![
+            "subscribe".to_string(),
+            "unsubscribe".to_string(),
+            "publish".to_string(),
+            "get_metrics".to_string(),
+        ]
     }
 
     async fn init(&mut self, _context: &crate::services::RequestContext) -> Result<()> {

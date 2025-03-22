@@ -927,6 +927,13 @@ impl SqliteService {
             Ok(ServiceResponse::error("Missing parameters"))
         }
     }
+
+    /// Initialize the database.
+    pub async fn init_database(&mut self) -> Result<()> {
+        info!("Initializing SQLite database");
+        self.state = ServiceState::Initialized;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -942,20 +949,24 @@ impl AbstractService for SqliteService {
     fn state(&self) -> ServiceState {
         self.state
     }
-
-    fn metadata(&self) -> ServiceMetadata {
-        ServiceMetadata {
-            name: self.name().to_string(),
-            path: self.path().to_string(),
-            state: self.state(),
-            description: self.description().to_string(),
-            operations: vec![
-                "query".to_string(),
-                "execute".to_string(),
-                "batch".to_string(),
-            ],
-            version: "1.0".to_string(),
-        }
+    
+    fn version(&self) -> &str {
+        "1.0"
+    }
+    
+    fn operations(&self) -> Vec<String> {
+        vec![
+            "query".to_string(),
+            "exec".to_string(),
+            "get_all".to_string(),
+            "get".to_string(),
+            "put".to_string(),
+            "delete".to_string()
+        ]
+    }
+    
+    fn description(&self) -> &str {
+        "SQLite database service"
     }
 
     async fn init(&mut self, _context: &crate::services::RequestContext) -> Result<()> {
@@ -975,10 +986,6 @@ impl AbstractService for SqliteService {
         info!("Stopping SqliteService");
         self.state = ServiceState::Stopped;
         Ok(())
-    }
-
-    fn description(&self) -> &str {
-        "SQLite database service"
     }
     
     async fn handle_request(&self, request: ServiceRequest) -> Result<ServiceResponse> {
