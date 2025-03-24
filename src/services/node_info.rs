@@ -155,18 +155,18 @@ impl AbstractService for NodeInfoService {
     }
 
     async fn handle_request(&self, request: ServiceRequest) -> Result<ServiceResponse> {
-        debug!("NodeInfoService handling request: {}", request.operation);
+        debug!("NodeInfoService handling request: {}", request.action);
         
-        match request.operation.as_str() {
+        match request.action.as_str() {
             "info" => self.handle_info(&request).await,
             "stats" => self.handle_stats(&request).await,
             "config" => self.handle_config(&request).await,
             _ => {
                 let error_info = json!({
-                    "error": format!("Unknown operation: {}", request.operation),
+                    "error": format!("Unknown operation: {}", request.action),
                 });
                 Ok(ServiceResponse::error(
-                    format!("Unknown operation: {}", request.operation)
+                    format!("Unknown operation: {}", request.action)
                 ))
             }
         }

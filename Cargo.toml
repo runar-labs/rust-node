@@ -68,6 +68,7 @@ serde_bytes = "0.11.17"
 chrono = "0.4"
 rcgen = "0.10" # Added for certificate generation
 tracing = "0.1" # Added for logging
+tracing-subscriber = { version = "0.3", features = ["env-filter"] } # Added for tracing setup
 lazy_static = "1.4.0"
 hex = "0.4"
 windows-sys = { version = "0.48", features = ["Win32_Foundation"] }

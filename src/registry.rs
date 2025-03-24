@@ -623,7 +623,7 @@ impl ServiceRegistry {
                         debug!("Forwarding request to remote peer: {:?}", peer_id);
                         
                         // Extract params
-                        let params = request.params.unwrap_or(vmap! {});
+                        let params = request.data.unwrap_or(vmap! {});
                         
                         // Send the request
                         match p2p.send_request(peer_id, request.path, params).await {
@@ -1734,7 +1734,7 @@ impl AbstractService for ServiceRegistry {
     }
 
     async fn handle_request(&self, request: ServiceRequest) -> Result<ServiceResponse> {
-        match request.operation.as_str() {
+        match request.action.as_str() {
             "register" => {
                 // Register a service
                 // This would normally be more complex - for now, just return success
@@ -1747,7 +1747,7 @@ impl AbstractService for ServiceRegistry {
                 // Unregister a service
                 // This would normally be more complex - for now, just return success
                 Ok(ServiceResponse::success::<String>(
-                    format!("Service '{}' unregistered", request.params.as_ref().unwrap().get("name").unwrap().as_str().unwrap()),
+                    format!("Service '{}' unregistered", request.data.as_ref().unwrap().get("name").unwrap().as_str().unwrap()),
                     None,
                 ))
             }
@@ -1764,8 +1764,8 @@ impl AbstractService for ServiceRegistry {
             }
             "find" => {
                 // Find a service by name
-                if let Some(params) = &request.params {
-                    if let Some(ValueType::String(name)) = params.get("name") {
+                if let Some(data) = &request.data {
+                    if let Some(ValueType::String(name)) = data.get("name") {
                         if let Some(service) = self.get_service(&name).await {
                             // Service found, return success with service info
                             let service_info = service.get_info().await?;
@@ -1782,7 +1782,7 @@ impl AbstractService for ServiceRegistry {
                 Ok(ServiceResponse::error("Missing service name parameter"))
             }
             _ => {
-                Ok(ServiceResponse::error(format!("Unknown operation: {}", request.operation)))
+                Ok(ServiceResponse::error(format!("Unknown operation: {}", request.action)))
             }
         }
     }
@@ -1874,13 +1874,13 @@ impl AbstractService for RegistryService {
 
     async fn handle_request(&self, request: ServiceRequest) -> Result<ServiceResponse> {
         // Extract the operation from the request
-        let operation = &request.operation;
+        let operation = &request.action;
         
         match operation.as_str() {
             "register" => {
                 // Register a service
-                if let Some(params) = &request.params {
-                    if let Some(ValueType::Map(service_data)) = params.get("service") {
+                if let Some(data) = &request.data {
+                    if let Some(ValueType::Map(service_data)) = data.get("service") {
                         // In a real implementation, this would create and register the service
                         
                         Ok(ServiceResponse::success(
@@ -1896,8 +1896,8 @@ impl AbstractService for RegistryService {
             }
             "unregister" => {
                 // Unregister a service
-                if let Some(params) = &request.params {
-                    if let Some(ValueType::String(name)) = params.get("name") {
+                if let Some(data) = &request.data {
+                    if let Some(ValueType::String(name)) = data.get("name") {
                         // In a real implementation, this would unregister the service
                         
                         Ok(ServiceResponse::success::<String>(
@@ -1927,8 +1927,8 @@ impl AbstractService for RegistryService {
             }
             "get" => {
                 // Get information about a specific service
-                if let Some(params) = &request.params {
-                    if let Some(ValueType::String(name)) = params.get("name") {
+                if let Some(data) = &request.data {
+                    if let Some(ValueType::String(name)) = data.get("name") {
                         // In a real implementation, this would query the registry
                         
                         let mut service_info = HashMap::new();

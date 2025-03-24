@@ -231,7 +231,7 @@ impl AbstractService for AnonymousSubscriberService {
     }
 
     async fn handle_request(&self, request: ServiceRequest) -> Result<ServiceResponse> {
-        let operation = &request.operation;
+        let operation = &request.action;
         
         match operation.as_str() {
             "subscribe" => {
@@ -257,8 +257,8 @@ impl AbstractService for AnonymousSubscriberService {
             }
             "publish" => {
                 // Handle publish request
-                if let Some(params) = &request.params {
-                    if let Some(message) = params.get("message") {
+                if let Some(data) = &request.data {
+                    if let Some(message) = data.get("message") {
                         self.update_last_activity();
                         
                         // In a real implementation, this would publish the message

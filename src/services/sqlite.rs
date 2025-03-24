@@ -176,7 +176,7 @@ impl SqliteCrudMixin {
             .and_then(|v| v.as_str().map(|s| s.to_string()))
             .ok_or_else(|| anyhow!("Collection name is required"))?;
 
-        match request.operation.as_str() {
+        match request.action.as_str() {
             "create" => {
                 let document = request
                     .get_param("document")
@@ -208,7 +208,7 @@ impl SqliteCrudMixin {
 
                 self.delete(&collection, filter).await
             }
-            _ => Err(anyhow!("Unknown operation: {}", request.operation)),
+            _ => Err(anyhow!("Unknown operation: {}", request.action)),
         }
     }
 
@@ -688,7 +688,7 @@ impl SqliteQueryMixin {
 
     /// Process a query request
     pub async fn handle_request(&self, request: ServiceRequest) -> Result<ServiceResponse> {
-        match request.operation.as_str() {
+        match request.action.as_str() {
             "query" => {
                 let sql = request
                     .get_param("sql")
@@ -709,7 +709,7 @@ impl SqliteQueryMixin {
 
                 self.execute(&sql, params).await
             }
-            _ => Err(anyhow!("Unknown operation: {}", request.operation)),
+            _ => Err(anyhow!("Unknown operation: {}", request.action)),
         }
     }
 
@@ -805,13 +805,17 @@ impl SqliteService {
 
     /// Execute a query
     async fn execute_query(&self, query: &str) -> Result<ValueType> {
+        // Create a proper action path for routing
+        let action_path = crate::routing::TopicPath::new_action("default", &self.path, query);
+        
         let request = ServiceRequest {
             path: format!("{}/{}", self.path, query),
-            operation: query.to_string(),
-            params: None,
+            action: query.to_string(),
+            data: None,
             request_id: None,
-            request_context: Arc::new(RequestContext::default()),
+            context: Arc::new(RequestContext::default()),
             metadata: None,
+            topic_path: Some(action_path),
         };
 
         let response = self.query_mixin.handle_request(request).await?;
@@ -823,14 +827,14 @@ impl SqliteService {
         debug!("Processing query operation on path: {}", request.path);
         
         // Extract SQL and parameters from the request
-        if let Some(params) = &request.params {
-            if let ValueType::Map(param_map) = params {
+        if let Some(data) = &request.data {
+            if let ValueType::Map(param_map) = data {
                 if let Some(ValueType::String(sql)) = param_map.get("sql") {
                     debug!("Executing SQL query: {}", sql);
                     
                     // Execute the query using the query mixin
-                    let params_value = params.clone();
-                    match self.query_mixin.query(&sql, params_value).await {
+                    let params_value = param_map.clone();
+                    match self.query_mixin.query(&sql, ValueType::Map(params_value)).await {
                         Ok(response) => {
                             let row_count = response.data.as_ref().map_or(0, |d| {
                                 if let ValueType::Array(arr) = d {
@@ -867,14 +871,14 @@ impl SqliteService {
         debug!("Processing execute operation on path: {}", request.path);
         
         // Extract SQL and parameters from the request
-        if let Some(params) = &request.params {
-            if let ValueType::Map(param_map) = params {
+        if let Some(data) = &request.data {
+            if let ValueType::Map(param_map) = data {
                 if let Some(ValueType::String(sql)) = param_map.get("sql") {
                     debug!("Executing SQL statement: {}", sql);
                     
                     // Execute the statement using the query mixin
-                    let params_value = params.clone();
-                    match self.query_mixin.execute(&sql, params_value).await {
+                    let params_value = param_map.clone();
+                    match self.query_mixin.execute(&sql, ValueType::Map(params_value)).await {
                         Ok(response) => {
                             Ok(response)
                         },
@@ -902,8 +906,8 @@ impl SqliteService {
         debug!("Processing batch operation on path: {}", request.path);
         
         // Extract SQL and parameters from the request
-        if let Some(params) = &request.params {
-            if let ValueType::Map(param_map) = params {
+        if let Some(data) = &request.data {
+            if let ValueType::Map(param_map) = data {
                 if let Some(ValueType::String(sql)) = param_map.get("sql") {
                     debug!("Executing SQL batch: {}", sql);
                     
@@ -990,16 +994,16 @@ impl AbstractService for SqliteService {
     
     async fn handle_request(&self, request: ServiceRequest) -> Result<ServiceResponse> {
         debug!("Handling request for operation: {} on path: {}", 
-            request.operation, request.path);
+            request.action, request.path);
         
         // Delegate to specialized methods based on operation
-        match request.operation.as_str() {
+        match request.action.as_str() {
             "query" => self.handle_query(request).await,
             "execute" => self.handle_execute(request).await,
             "batch" => self.handle_batch(request).await,
             _ => {
-                warn!("Unknown operation requested: {}", request.operation);
-                Ok(ServiceResponse::error(format!("Unknown operation: {}", request.operation)))
+                warn!("Unknown operation requested: {}", request.action);
+                Ok(ServiceResponse::error(format!("Unknown operation: {}", request.action)))
             }
         }
     }

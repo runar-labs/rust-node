@@ -63,10 +63,10 @@ async fn test_registry_service() -> Result<()> {
     // Create a service request
     let request = ServiceRequest {
         path: "registry/info".to_string(),
-        operation: "info".to_string(),
-        params: Some(ValueType::Null),
+        action: "info".to_string(),
+        data: Some(ValueType::Null),
         request_id: Some("test-request".to_string()),
-        request_context: request_context.clone(),
+        context: request_context.clone(),
         metadata: None,
     };
     
@@ -101,15 +101,15 @@ async fn test_registry_service_register_only() -> Result<()> {
         let ctx = RequestContext::default().into();
         let register_request = ServiceRequest {
             path: "registry".to_string(),
-            operation: "register".to_string(),
-            params: Some(ValueType::from_json(json!({
+            action: "register".to_string(),
+            data: Some(ValueType::from_json(json!({
                 "name": "test-service",
                 "path": "test/endpoint",
                 "description": "A test service",
                 "version": "1.0.0"
             }))),
             request_id: None,
-            request_context: ctx,
+            context: ctx,
             metadata: None,
         };
 
@@ -157,15 +157,15 @@ async fn test_service_manager_registry_register_only() -> Result<()> {
         let ctx = RequestContext::default().into();
         let register_request = ServiceRequest {
             path: "registry".to_string(),
-            operation: "register".to_string(),
-            params: Some(ValueType::from_json(json!({
+            action: "register".to_string(),
+            data: Some(ValueType::from_json(json!({
                 "name": "test-service",
                 "path": "test/endpoint",
                 "description": "A test service",
                 "version": "1.0.0"
             }))),
             request_id: None,
-            request_context: ctx,
+            context: ctx,
             metadata: None,
         };
 
@@ -255,8 +255,8 @@ mod tests {
         async fn handle_request(&self, request: ServiceRequest) -> Result<ServiceResponse> {
             // Simple echo service
             let response = ServiceResponse::success(
-                format!("Echoing request: {}", request.operation),
-                Some(ValueType::from(request.params.unwrap_or(ValueType::Null))),
+                format!("Echoing request: {}", request.action),
+                Some(ValueType::from(request.data.unwrap_or(ValueType::Null))),
             );
             Ok(response)
         }
@@ -307,15 +307,15 @@ mod tests {
             // Create a service request
             let request = ServiceRequest {
                 path: "test/endpoint/echo".to_string(),
-                operation: "echo".to_string(),
-                params: Some(ValueType::from(json!({
+                action: "echo".to_string(),
+                data: Some(ValueType::from(json!({
                     "name": "test-service",
                     "path": "test/endpoint",
                     "description": "A test service",
                     "version": "1.0.0"
                 }))),
                 request_id: Some("test-request".to_string()),
-                request_context: request_context.clone(),
+                context: request_context.clone(),
                 metadata: None,
             };
             
@@ -363,15 +363,15 @@ mod tests {
         // Create a service request to test info
         let request = ServiceRequest {
             path: "test/endpoint/info".to_string(),
-            operation: "info".to_string(),
-            params: Some(ValueType::from(json!({
+            action: "info".to_string(),
+            data: Some(ValueType::from(json!({
                 "name": "test-service",
                 "path": "test/endpoint",
                 "description": "A test service",
                 "version": "1.0.0"
             }))),
             request_id: Some("test-request".to_string()),
-            request_context: request_context.clone(),
+            context: request_context.clone(),
             metadata: None,
         };
     }
@@ -382,10 +382,10 @@ async fn test_basic_service() -> anyhow::Result<()> {
     // Create a test service request
     let request = ServiceRequest {
         path: "/test".to_string(),
-        operation: "echo".to_string(),
-        params: Some(ValueType::String("test".to_string())),
+        action: "echo".to_string(),
+        data: Some(ValueType::String("test".to_string())),
         request_id: None,
-        request_context: std::sync::Arc::new(crate::services::RequestContext::default()),
+        context: std::sync::Arc::new(crate::services::RequestContext::default()),
         metadata: None,
     };
 

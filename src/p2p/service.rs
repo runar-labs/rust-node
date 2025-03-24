@@ -726,11 +726,11 @@ impl AbstractService for P2PRemoteServiceDelegate {
 
     async fn handle_request(&self, request: ServiceRequest) -> Result<ServiceResponse> {
         // Process the request based on the operation
-        match request.operation.as_str() {
+        match request.action.as_str() {
             "connect" => {
                 // Extract peer_id and address from params
-                if let Some(params) = &request.params {
-                    if let ValueType::Map(map) = params {
+                if let Some(data) = &request.data {
+                    if let ValueType::Map(map) = data {
                         let peer_id = map
                             .get("peer_id")
                             .and_then(|v| {
@@ -768,7 +768,7 @@ impl AbstractService for P2PRemoteServiceDelegate {
                     Err(anyhow!("Missing parameters"))
                 }
             }
-            _ => Err(anyhow!("Unknown operation: {}", request.operation)),
+            _ => Err(anyhow!("Unknown operation: {}", request.action)),
         }
     }
 }

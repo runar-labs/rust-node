@@ -159,14 +159,14 @@ impl AbstractService for RemoteService {
             self.p2p_transport.send_request_with_metadata(
                 self.peer_id.clone(),
                 request.path,
-                request.params.unwrap_or(ValueType::Null),
+                request.data.unwrap_or(ValueType::Null),
                 Some(metadata),
             ).await
         } else {
             self.p2p_transport.send_request(
                 self.peer_id.clone(),
                 request.path,
-                request.params.unwrap_or(ValueType::Null),
+                request.data.unwrap_or(ValueType::Null),
             ).await
         }
     }

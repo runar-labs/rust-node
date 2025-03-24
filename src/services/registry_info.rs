@@ -87,7 +87,7 @@ impl AbstractService for RegistryInfoService {
     
     async fn handle_request(&self, request: ServiceRequest) -> Result<ServiceResponse> {
         // Extract the operation from the request
-        let operation = &request.operation;
+        let operation = &request.action;
         
         match operation.as_str() {
             "list" => {
@@ -104,8 +104,8 @@ impl AbstractService for RegistryInfoService {
             }
             "get" => {
                 // Get information about a specific service
-                if let Some(params) = &request.params {
-                    if let ValueType::Map(param_map) = params {
+                if let Some(data) = &request.data {
+                    if let ValueType::Map(param_map) = data {
                         if let Some(ValueType::String(name)) = param_map.get("name") {
                             match self.registry.get_service(&name).await {
                                 Some(service) => {

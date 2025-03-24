@@ -140,10 +140,10 @@ impl AbstractService for RemoteService {
     }
 
     async fn handle_request(&self, request: ServiceRequest) -> Result<ServiceResponse> {
-        debug!("Forwarding request to remote peer", &request.request_context, 
+        debug!("Forwarding request to remote peer", &request.context, 
             "service" => &self.name,
             "path" => &request.path,
-            "operation" => &request.operation,
+            "action" => &request.action,
             "peer_id" => format!("{:?}", self.peer_id)
         );
 
@@ -151,18 +151,18 @@ impl AbstractService for RemoteService {
         let result = self.p2p_transport.send_request(
             self.peer_id.clone(),
             request.path,
-            request.params.unwrap_or(ValueType::Null),
+            request.data.unwrap_or(ValueType::Null),
         ).await;
         
         if let Err(ref e) = result {
-            error!("Failed to forward request to remote peer", &request.request_context,
+            error!("Failed to forward request to remote peer", &request.context,
                 "service" => &self.name,
                 "path" => &request.path,
                 "peer_id" => format!("{:?}", self.peer_id),
                 "error" => e.to_string()
             );
         } else {
-            debug!("Successfully forwarded request to remote peer", &request.request_context,
+            debug!("Successfully forwarded request to remote peer", &request.context,
                 "service" => &self.name,
                 "path" => &request.path,
                 "peer_id" => format!("{:?}", self.peer_id)

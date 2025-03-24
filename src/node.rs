@@ -17,6 +17,7 @@ use crate::p2p::crypto::PeerId;
 use crate::p2p::service::P2PRemoteServiceDelegate;
 use crate::p2p::transport::{TransportConfig, P2PTransport};
 use crate::services::abstract_service::{ServiceMetadata, ServiceState};
+use crate::routing::{TopicPath, PathType};
 use crate::services::{
     NodeRequestHandler, RequestContext, ServiceRequest, ServiceResponse,
     SubscriptionOptions, ResponseStatus,
@@ -220,18 +221,22 @@ impl NodeRequestHandler for NodeRequestHandlerImpl {
             ),
         );
 
-        // Create a service request
+        // Create a service request with topic_path for proper routing
+        // Get the network_id from the service registry since NodeRequestHandlerImpl doesn't have config
+        let network_id = self.service_registry.get_network_id().await;
+        let action_path = TopicPath::new_action(&network_id, &service_name, &operation);
         let request = ServiceRequest {
             path: service_name.clone(),
-            operation: operation.clone(),
-            params: Some(params),
+            action: operation.clone(),
+            data: Some(params),
             request_id: None,
-            request_context: Arc::new(RequestContext::new_with_option(
+            context: Arc::new(RequestContext::new_with_option(
                 format!("{}/{}", service_name, operation),
                 vmap_opt! {},
                 Arc::new(NodeRequestHandlerImpl::new(self.service_registry.clone()))
             )),
             metadata: None,
+            topic_path: Some(action_path),
         };
 
         // Call the service through the registry
@@ -537,6 +542,7 @@ impl Node {
         Ok(())
     }
 
+    //TODO rwemove this and any code that uses iyt.. we dont need this.  this has lead to isses in the past.. so remove ity
     /// Call a service with the given path, operation, and parameters
     /// This method is mainly for backward compatibility
     pub async fn call<P: Into<String>, O: Into<String>, V: Into<ValueType>>(
@@ -555,31 +561,40 @@ impl Node {
     }
 
     /// Make a request to a service
-    pub async fn request<P: Into<String>, V: Into<ValueType>>(
+    pub async fn request<P: Into<String>, D: Into<ValueType>>(
         &self,
         path: P,
-        params: V,
+        data: D,
     ) -> Result<ServiceResponse> {
         let path_str = path.into();
-        let params_value = params.into();
+        let data_value = data.into();
         
-        // Process the parameters and make the actual request
-        self.process_request(path_str, params_value).await
+        // Process the data and make the actual request
+        self.process_request(path_str, data_value).await
     }
     
     /// Helper method that does the actual request processing
-    async fn process_request(&self, path_str: String, params_value: ValueType) -> Result<ServiceResponse> {
-        // Parse the path into service name and operation
-        // Format should be "serviceName/operation"
-        let parts: Vec<&str> = path_str.split('/').collect();
-        if parts.len() != 2 {
-            return Err(anyhow!(
-                "Invalid path format, expected 'serviceName/operation'"
-            ));
-        }
-
-        let service_name = parts[0].to_string();
-        let operation = parts[1].to_string();
+    async fn process_request(&self, path_str: String, data_value: ValueType) -> Result<ServiceResponse> {
+        // Parse the path using TopicPath
+        // Format can be "[network_id:]serviceName/action"
+        let topic_path = match TopicPath::parse(&path_str, &self.config.network_id) {
+            Ok(tp) => tp,
+            Err(_) => {
+                // check if is a simplified path (aka local path)
+                let parts: Vec<&str> = path_str.split('/').collect();
+                if parts.len() < 2 {
+                    return Err(anyhow!(
+                        "Invalid path format, expected 'serviceName/action' or 'network:serviceName/action'"
+                    ));
+                }
+                
+                // Use current network_id with the parsed service path and action
+                 TopicPath::new_action(&self.network_id, parts[0], parts[1])
+            }
+        };
+        
+        let service_name = topic_path.service_path.clone();
+        let action = topic_path.action_or_event.clone();
         
         // Create a request context for the request
         let context = Arc::new(RequestContext::new_with_option(
@@ -588,33 +603,37 @@ impl Node {
             Arc::new(NodeRequestHandlerImpl::new(self.service_registry.clone())),
         ));
         
-        // Handle direct parameter values (non-Map ValueType)
-        let processed_params = match &params_value {
+        // Handle direct data values (non-Map ValueType)
+        let processed_data = match &data_value {
             ValueType::Map(_) => {
                 // Already a map, use as is
-                params_value
+                data_value
             },
             _ => {
-                // For any other ValueType, we need to wrap it in a parameter map
-                let param_name = self.guess_parameter_name(&service_name, &operation, &params_value);
+                // For any other ValueType, we need to wrap it in a data map
+                let param_name = "data".to_string(); // Convert to String for correct HashMap key type
                 
                 // Create a map with the single parameter
-                let mut param_map = HashMap::new();
-                param_map.insert(param_name, params_value);
-                ValueType::Map(param_map)
+                let mut data_map = HashMap::new();
+                data_map.insert(param_name, data_value);
+                ValueType::Map(data_map)
             }
         };
         
         let request = ServiceRequest {
             path: service_name.clone(),
-            operation: operation.clone(),
-            params: Some(processed_params.clone()),
+            action: action.clone(),
+            data: Some(processed_data.clone()),
+            //TODO: we need request_id, should not be None here
             request_id: None,
-            request_context: context,
+            context: context,
             metadata: None,
+            topic_path: Some(topic_path),
         };
         
         // Find the target service
+        //TODO: get_service_by_path shuod take topic_path as the parameter.. not the service name.
+        //ergistry needs to us the topic_path to find the service
         if let Some(service) = self.service_registry.get_service_by_path(&service_name).await {
             // Call the service
             service.handle_request(request).await
@@ -623,48 +642,7 @@ impl Node {
             Ok(ServiceResponse::error(format!("Service '{}' not found", service_name)))
         }
     }
-
-    /// Helper method to guess a parameter name based on the value type
-    fn guess_parameter_name(&self, service_name: &str, operation: &str, value: &ValueType) -> String {
-        // Try to intelligently guess the parameter name based on the operation and value type
-        
-        // For simple operations that follow patterns, use standard names
-        match operation {
-            "transform" | "process" | "format" | "parse" | "convert" => {
-                return "data".to_string();
-            },
-            "get" | "get_by_id" | "find" | "find_by_id" | "retrieve" => {
-                return "id".to_string();
-            },
-            "search" | "query" | "filter" => {
-                return "query".to_string();
-            },
-            "add" | "create" | "insert" => {
-                return "item".to_string();
-            },
-            "update" | "modify" | "edit" => {
-                return "data".to_string();
-            },
-            "delete" | "remove" => {
-                return "id".to_string();
-            },
-            _ => {}
-        }
-        
-        // If no pattern match, guess based on value type
-        match value {
-            ValueType::String(_) => "data".to_string(),
-            ValueType::Number(_) => "value".to_string(),
-            ValueType::Bool(_) => "flag".to_string(),
-            ValueType::Array(_) => "items".to_string(),
-            ValueType::Map(_) => "data".to_string(),
-            ValueType::Json(_) => "json".to_string(),
-            ValueType::Bytes(_) => "bytes".to_string(),
-            ValueType::Struct(_) => "data".to_string(),
-            ValueType::Null => "data".to_string(),
-        }
-    }
-
+ 
     /// Make a node request with any parameters
     pub async fn node_request(&self, params: ValueType) -> Result<ServiceResponse> {
         // Create a request context for the request
@@ -674,13 +652,16 @@ impl Node {
             Arc::new(NodeRequestHandlerImpl::new(self.service_registry.clone())),
         ));
         
+        // Create an action path for the node info request
+        let action_path = TopicPath::new_action(&self.config.network_id, "node", "info");
         let request = ServiceRequest {
             path: "node".to_string(),
-            operation: "info".to_string(),
-            params: Some(params),
+            action: "info".to_string(),
+            data: Some(params),
             request_id: None,
-            request_context: context,
+            context: context,
             metadata: None,
+            topic_path: Some(action_path),
         };
         
         // Find the target service
@@ -1007,13 +988,16 @@ where {
                         ));
 
                         // Create a get_info request to check the service status
+                        let service_path = service.path().to_string();
+                        let action_path = TopicPath::new_action(&network_id, &service_path, "get_info");
                         let request = ServiceRequest {
                             request_id: Some(Uuid::new_v4().to_string()),
-                            path: service.path().to_string(),
-                            operation: "get_info".to_string(),
-                            params: vmap_opt! {},
-                            request_context,
+                            path: service_path,
+                            action: "get_info".to_string(),
+                            data: vmap_opt! {},
+                            context: request_context,
                             metadata: None,
+                            topic_path: Some(action_path),
                         };
 
                         // Process the request
@@ -1050,17 +1034,20 @@ where {
                                             // Stop the service
                                             // Note: We can't call stop() directly because it requires &mut self
                                             // Instead, we'll create a request to stop the service
+                                            // Create action path for the stop request
+                                            let action_path = TopicPath::new_action(&network_id, &name, "stop");
                                             let request = ServiceRequest {
                                                 path: name.clone(),
-                                                operation: "stop".to_string(),
-                                                params: None,
+                                                action: "stop".to_string(),
+                                                data: None,
                                                 request_id: Some(uuid::Uuid::new_v4().to_string()),
-                                                request_context: Arc::new(RequestContext::new_with_option(
+                                                context: Arc::new(RequestContext::new_with_option(
                                                     format!("{}/stop", name),
                                                     vmap_opt! {},
                                                     Arc::new(NodeRequestHandlerImpl::new(registry.clone())),
                                                 )),
                                                 metadata: None,
+                                                topic_path: Some(action_path),
                                             };
                                             
                                             if let Err(e) = service.handle_request(request).await {

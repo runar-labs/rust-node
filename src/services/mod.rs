@@ -9,6 +9,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid;
 
+use crate::routing::{TopicPath, PathType};
+
 use crate::db::SqliteDatabase;
 use crate::node::NodeConfig;
 
@@ -193,10 +195,10 @@ impl Clone for StructArc {
 pub struct ServiceRequest {
     /// The path of the service
     pub path: String,
-    /// The operation to perform on the service
-    pub operation: String,
-    /// The parameters for the operation
-    pub params: Option<ValueType>,
+    /// The action to perform on the service
+    pub action: String,
+    /// The data for the action
+    pub data: Option<ValueType>,
     /// Request ID for tracing
     pub request_id: Option<String>,
     /// Optional metadata for additional context
@@ -204,74 +206,130 @@ pub struct ServiceRequest {
     pub metadata: Option<HashMap<String, ValueType>>,
     /// Request context object (not serialized)
     #[serde(skip)]
-    pub request_context: Arc<RequestContext>,
+    pub context: Arc<RequestContext>,
+    /// Structured topic path (not serialized)
+    /// This field will eventually replace path and action for routing
+    #[serde(skip)]
+    pub topic_path: Option<TopicPath>,
 }
 
 impl ServiceRequest {
     /// Create a new service request
-    pub fn new<P: Into<String>, O: Into<String>, V: Into<ValueType>>(
+    pub fn new<P: Into<String>, A: Into<String>, D: Into<ValueType>>(
         path: P,
-        operation: O,
-        params: V,
-        request_context: Arc<RequestContext>,
+        action: A,
+        data: D,
+        context: Arc<RequestContext>,
     ) -> Self {
+        let path_str = path.into();
+        let action_str = action.into();
+        
+        // Create a topic path from path and action
+        // For now, we default to the network_id "default" for backward compatibility
+        let topic_path = TopicPath::new_action("default", &path_str, &action_str);
+        
         ServiceRequest {
-            path: path.into(),
-            operation: operation.into(),
-            params: Some(params.into()),
+            path: path_str,
+            action: action_str,
+            data: Some(data.into()),
             request_id: Some(uuid::Uuid::new_v4().to_string()),
             metadata: None,
-            request_context,
+            context,
+            topic_path: Some(topic_path),
         }
     }
 
     /// Create a new service request with optional parameters
-    pub fn new_with_optional<P: Into<String>, O: Into<String>>(
+    pub fn new_with_optional<P: Into<String>, A: Into<String>>(
         path: P,
-        operation: O,
-        params: Option<ValueType>,
-        request_context: Arc<RequestContext>,
+        action: A,
+        data: Option<ValueType>,
+        context: Arc<RequestContext>,
     ) -> Self {
+        let path_str = path.into();
+        let action_str = action.into();
+        
+        // Create a topic path from path and action
+        let topic_path = TopicPath::new_action("default", &path_str, &action_str);
+        
         ServiceRequest {
-            path: path.into(),
-            operation: operation.into(),
-            params,
+            path: path_str,
+            action: action_str,
+            data,
             request_id: Some(uuid::Uuid::new_v4().to_string()),
             metadata: None,
-            request_context,
+            context,
+            topic_path: Some(topic_path),
         }
     }
 
     /// Create a new service request with metadata
-    pub fn new_with_metadata<P: Into<String>, O: Into<String>, V: Into<ValueType>>(
+    pub fn new_with_metadata<P: Into<String>, A: Into<String>, D: Into<ValueType>>(
         path: P,
-        operation: O,
-        params: V,
+        action: A,
+        data: D,
         metadata: HashMap<String, ValueType>,
-        request_context: Arc<RequestContext>,
+        context: Arc<RequestContext>,
     ) -> Self {
+        let path_str = path.into();
+        let action_str = action.into();
+        
+        // Create a topic path from path and action
+        let topic_path = TopicPath::new_action("default", &path_str, &action_str);
+        
         ServiceRequest {
-            path: path.into(),
-            operation: operation.into(),
-            params: Some(params.into()),
+            path: path_str,
+            action: action_str,
+            data: Some(data.into()),
             request_id: Some(uuid::Uuid::new_v4().to_string()),
             metadata: Some(metadata),
-            request_context,
+            context,
+            topic_path: Some(topic_path),
+        }
+    }
+    
+    /// Set the TopicPath with network ID for this request
+    pub fn with_topic_path(mut self, network_id: &str, service_path: &str, action: &str) -> Self {
+        self.topic_path = Some(TopicPath::new_action(network_id, service_path, action));
+        self
+    }
+    
+    /// Get the network ID for this request
+    pub fn network_id(&self) -> &str {
+        match &self.topic_path {
+            Some(tp) => &tp.network_id,
+            None => "default" // Fallback for backward compatibility
+        }
+    }
+    
+    /// Parse a path string to update the request's topic_path
+    /// The path string should be in the format: "[network_id:]service_path/action"
+    pub fn parse_path_string(&mut self, path_str: &str) -> Result<()> {
+        // Use a default network ID for parsing - ideally this should be obtained from context
+        let default_network_id = "default";
+        match TopicPath::parse(path_str, default_network_id) {
+            Ok(topic_path) => {
+                self.path = topic_path.service_path.clone();
+                self.action = topic_path.action_or_event.clone();
+                self.topic_path = Some(topic_path);
+                Ok(())
+            },
+            Err(e) => Err(anyhow!("Failed to parse path string: {}", e))
         }
     }
 
-    /// Get a parameter from the request
+    /// Get a data parameter from the request
     pub fn get_param(&self, key: &str) -> Option<ValueType> {
-        self.params.as_ref().and_then(|v| match v {
+        self.data.as_ref().and_then(|v| match v {
             ValueType::Map(map) => map.get(key).cloned(),
             ValueType::Json(json) => json.get(key).map(|v| ValueType::Json(v.clone())),
             _ => None,
         })
     }
 
-    /// Get a parameter reference from the request
+    /// Get a data parameter reference from the request
     pub fn get_param_ref(&self, key: &str) -> Option<&ValueType> {
-        self.params.as_ref().and_then(|v| match v {
+        self.data.as_ref().and_then(|v| match v {
             ValueType::Map(map) => map.get(key),
             _ => None,
         })
@@ -281,8 +339,8 @@ impl ServiceRequest {
     pub fn to_json_params(&self) -> Value {
         json!({
             "path": self.path,
-            "operation": self.operation,
-            "params": self.params.as_ref().map(|v| v.to_json()),
+            "action": self.action,
+            "data": self.data.as_ref().map(|v| v.to_json()),
             "request_id": self.request_id,
         })
     }

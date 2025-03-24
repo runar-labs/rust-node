@@ -7,6 +7,7 @@ pub mod ipc;
 pub mod key_management;
 pub mod node;
 pub mod p2p;
+pub mod routing;
 pub mod server;
 pub mod services;
 #[cfg(test)]
@@ -33,6 +34,7 @@ pub use crate::ipc::init_ipc_server;
 
 // Re-export important types and traits for macros and external use
 pub use crate::node::NodeConfig;
+pub use crate::routing::{TopicPath, PathType};
 pub use crate::services::{
     RequestContext, ResponseStatus, ServiceRequest, ServiceResponse,
     // Re-export registry types for macros

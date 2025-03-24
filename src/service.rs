@@ -527,13 +527,13 @@ impl P2PRemoteServiceDelegate {
     pub async fn handle_request(&self, request: ServiceRequest) -> Result<ServiceResponse> {
         debug_log(
             Component::P2P,
-            &format!("Processing request: {}", request.operation),
+            &format!("Processing request: {}", request.action),
         );
 
-        match request.operation.as_str() {
+        match request.action.as_str() {
             "connect" => {
                 // Get the parameters
-                let params = request.params;
+                let params = request.data;
                 
                 // Extract the address
                 let address = if let Some(ValueType::String(addr)) = params.as_ref().and_then(|p| p.get("address")) {
@@ -574,7 +574,7 @@ impl P2PRemoteServiceDelegate {
             }
             "send" => {
                 // Get the parameters
-                let params = request.params;
+                let params = request.data;
                 
                 // Extract the peer ID
                 let peer_id_base64 = if let Some(ValueType::String(id)) = params.as_ref().and_then(|p| p.get("peer_id")) {
@@ -615,21 +615,21 @@ impl P2PRemoteServiceDelegate {
             }
             "publish_event" => {
                 // Extract the peer_id
-                let peer_id_base64 = if let Some(ValueType::String(id)) = request.params.as_ref().and_then(|p| p.get("peer_id")) {
+                let peer_id_base64 = if let Some(ValueType::String(id)) = request.data.as_ref().and_then(|p| p.get("peer_id")) {
                     id.clone()
                 } else {
                     return Err(anyhow!("Missing or invalid 'peer_id' parameter"));
                 };
 
                 // Extract the topic
-                let topic = if let Some(ValueType::String(t)) = request.params.as_ref().and_then(|p| p.get("topic")) {
+                let topic = if let Some(ValueType::String(t)) = request.data.as_ref().and_then(|p| p.get("topic")) {
                     t.clone()
                 } else {
                     return Err(anyhow!("Missing or invalid 'topic' parameter"));
                 };
 
                 // Extract the data
-                let data = if let Some(value) = request.params.as_ref().and_then(|p| p.get("data")) {
+                let data = if let Some(value) = request.data.as_ref().and_then(|p| p.get("data")) {
                     value.clone()
                 } else {
                     return Err(anyhow!("Missing 'data' parameter"));
@@ -722,7 +722,7 @@ impl P2PRemoteServiceDelegate {
                 // Unknown operation
                 Ok(ServiceResponse::error(format!(
                     "Unknown operation: {}",
-                    request.operation
+                    request.action
                 )))
             }
         }
@@ -869,11 +869,11 @@ impl AbstractService for P2PRemoteServiceDelegate {
 
     async fn handle_request(&self, request: ServiceRequest) -> Result<ServiceResponse> {
         // Process the request based on the operation
-        match request.operation.as_str() {
+        match request.action.as_str() {
             "connect" => {
                 // Extract peer_id and address from params
-                if let Some(params) = &request.params {
-                    if let ValueType::Map(map) = params {
+                if let Some(data) = &request.data {
+                    if let ValueType::Map(map) = data {
                         let peer_id = map
                             .get("peer_id")
                             .and_then(|v| {
@@ -911,7 +911,7 @@ impl AbstractService for P2PRemoteServiceDelegate {
                     Err(anyhow!("Missing parameters"))
                 }
             }
-            _ => Err(anyhow!("Unknown operation: {}", request.operation)),
+            _ => Err(anyhow!("Unknown operation: {}", request.action)),
         }
     }
 }

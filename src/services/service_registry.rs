@@ -3,6 +3,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use log::{debug, error, info};
 use serde_json::json;
+
+use crate::routing::{TopicPath, PathType};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -282,15 +284,26 @@ impl NodeRequestHandler for ServiceRegistry {
             Arc::new(NodeRequestHandlerImpl::new(Arc::new(self.clone()))),
         );
         
+        // Parse the path using TopicPath to get service path and action
+        let topic_path = match TopicPath::parse(&path, &self.network_id) {
+            Ok(tp) => {
+                if tp.path_type != PathType::Action {
+                    return Err(anyhow!("Invalid path format for request: expected an action path, got: {}", path));
+                }
+                tp
+            },
+            Err(e) => return Err(anyhow!("Failed to parse request path '{}': {}", path, e))
+        };
+        
         // Create a service request
-        let mut map = std::collections::HashMap::new();
         let request = ServiceRequest {
             request_id: None,
-            path: path.to_string(),
-            operation: "default".to_string(),
-            params: Some(ValueType::Map(map)),
-            request_context: Arc::new(context),
+            path: topic_path.service_path.clone(),
+            action: topic_path.action_or_event.clone(),
+            data: Some(params),  // Use the provided params directly
+            context: Arc::new(context),
             metadata: None,
+            topic_path: Some(topic_path),
         };
         
         // Process the request
@@ -298,15 +311,52 @@ impl NodeRequestHandler for ServiceRegistry {
     }
     
     async fn publish(&self, topic: String, data: ValueType) -> Result<()> {
+        // Parse the topic string into a TopicPath for consistent handling
+        let topic_path = match TopicPath::parse(&topic, &self.network_id) {
+            Ok(tp) => {
+                // Strictly enforce that we're publishing to an event path
+                if tp.path_type != PathType::Event {
+                    // Create the correct event path format to show in the error message
+                    let correct_event_path = TopicPath::new_event(&tp.network_id, &tp.service_path, &tp.action_or_event).to_string();
+                    
+                    // Log the error with the correct format
+                    error_log(
+                        Component::Service,
+                        &format!("Error: Attempted to publish to action path: '{}'. For events, use event path: '{}'. Action paths are for service requests, event paths are for notifications.", 
+                                topic, correct_event_path)
+                    ).await;
+                    
+                    // Throw an error with guidance on the correct format
+                    return Err(anyhow!("Invalid path type for publish: expected event path, got action path: '{}'. Use event path: '{}'. The path structure is the same (<network>:<service>/<name>), but must be registered as an event path for publishing events.", 
+                                topic, correct_event_path));
+                } else {
+                    tp
+                }
+            },
+            Err(e) => {
+                // No legacy compatibility - enforce strict path format
+                error_log(
+                    Component::Service,
+                    &format!("Error: Invalid topic format: '{}'. Events must use proper path format: '<network>:<service>/<event>'", topic)
+                ).await;
+                
+                // Throw an error - no backwards compatibility
+                return Err(anyhow!("Invalid topic format: '{}'. Events must use proper path format: '<network>:<service>/<event>'", topic));
+            }
+        };
+        
         debug_log(
             Component::Service,
-            &format!("Publishing to topic: {}", topic)
+            &format!("Publishing to topic: {} (parsed as {})", topic, topic_path)
         ).await;
         
-        // Find all subscribers for this topic
+        // Find all subscribers for this topic using the normalized path
         let subscribers = {
             let subs = self.event_subscribers.read().await;
-            if let Some(subs_vec) = subs.get(&topic) {
+            
+            // Since we now enforce strict path formats, we only need to check the normalized path
+            let normalized_topic = topic_path.to_string();
+            if let Some(subs_vec) = subs.get(&normalized_topic) {
                 subs_vec.clone()
             } else {
                 Vec::new()
@@ -314,17 +364,19 @@ impl NodeRequestHandler for ServiceRegistry {
         };
         
         // Invoke each subscriber's callback
+        let normalized_topic = topic_path.to_string();
         for service_name in subscribers {
             let callbacks = self.event_callbacks.read().await;
             if let Some(callbacks_vec) = callbacks.get(&service_name) {
                 for (callback_topic, callback) in callbacks_vec {
-                    if callback_topic == &topic {
+                    // Only check against the normalized path - we now enforce strict path formats
+                    if callback_topic == &normalized_topic {
                         if let Err(e) = callback(data.clone()) {
                             error_log(
                                 Component::Service,
                                 &format!(
                                     "Error invoking callback for topic {} on service {}: {:?}",
-                                    topic, service_name, e
+                                    normalized_topic, service_name, e
                                 ),
                             ).await;
                         }
@@ -359,9 +411,46 @@ impl NodeRequestHandler for ServiceRegistry {
         callback: Box<dyn Fn(ValueType) -> Result<()> + Send + Sync>,
         options: SubscriptionOptions,
     ) -> Result<String> {
+        // Parse the topic string into a TopicPath for consistent handling
+        let topic_path = match TopicPath::parse(&topic, &self.network_id) {
+            Ok(tp) => {
+                // Strictly enforce that we're subscribing to an event path
+                if tp.path_type != PathType::Event {
+                    // Create the correct event path format to show in the error message
+                    let correct_event_path = TopicPath::new_event(&tp.network_id, &tp.service_path, &tp.action_or_event).to_string();
+                    
+                    // Log the error with the correct format
+                    error_log(
+                        Component::Service,
+                        &format!("Error: Attempted to subscribe to action path: '{}'. For events, use event path: '{}'. Action paths are for service requests, event paths are for notifications.", 
+                                topic, correct_event_path)
+                    ).await;
+                    
+                    // Throw an error with guidance on the correct format
+                    return Err(anyhow!("Invalid path type for subscription: expected event path, got action path: '{}'. Use event path: '{}'. The path structure is the same (<network>:<service>/<name>), but must be registered as an event path for event subscriptions.", 
+                                topic, correct_event_path));
+                } else {
+                    tp
+                }
+            },
+            Err(e) => {
+                // No legacy compatibility - enforce strict path format
+                error_log(
+                    Component::Service,
+                    &format!("Error: Invalid topic format for subscription: '{}'. Events must use proper path format: '<network>:<service>/<event>'", topic)
+                ).await;
+                
+                // Throw an error - no backwards compatibility
+                return Err(anyhow!("Invalid topic format for subscription: '{}'. Events must use proper path format: '<network>:<service>/<event>'", topic));
+            }
+        };
+        
+        let normalized_topic = topic_path.to_string();
+        
         debug_log(
             Component::Service,
-            &format!("Subscribing to topic: {} with options: {:?}", topic, options)
+            &format!("Subscribing to topic: {} (parsed as {}) with options: {:?}", 
+                    topic, normalized_topic, options)
         ).await;
         
         // Generate a unique subscription ID
@@ -370,18 +459,28 @@ impl NodeRequestHandler for ServiceRegistry {
         // Make up a service name from the subscription ID
         let service_name = format!("subscription_{}", subscription_id);
         
-        // Store the callback
+        // Store the callback using only the normalized topic path
         {
             let mut callbacks = self.event_callbacks.write().await;
             let service_callbacks = callbacks.entry(service_name.clone()).or_insert_with(Vec::new);
-            service_callbacks.push((topic.clone(), callback));
+            
+            // Store the callback with the normalized topic path only
+            service_callbacks.push((normalized_topic.clone(), callback));
+            
+            // We no longer store callbacks for the original topic format
+            // since we now enforce strict path formats throughout the system
         }
         
-        // Add to subscribers
+        // Add to subscribers using only the normalized topic path
         {
             let mut subscribers = self.event_subscribers.write().await;
-            let topic_subscribers = subscribers.entry(topic.clone()).or_insert_with(Vec::new);
-            topic_subscribers.push(service_name);
+            
+            // Add for the normalized topic path only
+            let normalized_subscribers = subscribers.entry(normalized_topic.clone()).or_insert_with(Vec::new);
+            normalized_subscribers.push(service_name.clone());
+            
+            // We no longer store subscribers for the original topic format
+            // since we now enforce strict path formats throughout the system
         }
         
         // Handle expiration logic if needed
@@ -445,6 +544,10 @@ impl NodeRequestHandler for ServiceRegistry {
 }
 
 impl ServiceRegistry {
+    /// Get the network ID for this registry
+    pub async fn get_network_id(&self) -> String {
+        self.network_id.clone()
+    }
     /// Create a new registry with the given network ID
     pub fn new(network_id: &str) -> Self {
         let path = format!("internal/registry");
@@ -1095,15 +1198,18 @@ impl ServiceRegistry {
                     &format!("Falling back to service.handle_request() for action '{}'", action)
                 ).await;
                 
-                // Create a service request
+                // Create a service request with proper topic_path
                 let mut map = std::collections::HashMap::new();
+                // Create action path for routing
+                let action_path = TopicPath::new_action(&self.network_id, service_obj.path(), action);
                 let request = ServiceRequest {
                     request_id: None,
                     path: format!("{}/{}", service_obj.path(), action),
-                    operation: action.to_string(),
-                    params: Some(ValueType::Map(map)),
-                    request_context: Arc::new(context.clone()),
+                    action: action.to_string(),
+                    data: Some(ValueType::Map(map)),
+                    context: Arc::new(context.clone()),
                     metadata: None,
+                    topic_path: Some(action_path),
                 };
                 
                 // Call through the service's handle_request method
@@ -1159,15 +1265,18 @@ impl ServiceRegistry {
                     &format!("Falling back to service.handle_request() for operation '{}'", operation)
                 ).await;
 
-            // Create a service request
+            // Create a service request with proper topic_path
             let mut map = std::collections::HashMap::new();
+            // Create action path for routing
+            let action_path = TopicPath::new_action(&self.network_id, service_obj.path(), &operation);
             let request = ServiceRequest {
                     request_id: None,
                     path: format!("{}/{}", service_obj.path(), operation),
-                    operation: operation.to_string(),
-                    params: Some(ValueType::Map(map)),
-                    request_context: Arc::new(context.clone()),
+                    action: operation.to_string(),
+                    data: Some(ValueType::Map(map)),
+                    context: Arc::new(context.clone()),
                     metadata: None,
+                    topic_path: Some(action_path),
                 };
                 
                 // Call through the service's handle_request method
@@ -1220,8 +1329,8 @@ impl ServiceRegistry {
         ).await;
         
         // Extract the context and parameters
-        let context = &request.request_context;
-        let params = request.params.as_ref().unwrap_or(&ValueType::Null);
+        let context = &request.context;
+        let params = request.data.as_ref().unwrap_or(&ValueType::Null);
         
         // Try to find a direct handler first for better performance
         // Check if we have a registered action handler
@@ -1286,13 +1395,20 @@ impl ServiceRegistry {
         // Get the service from the registry
         if let Some(service) = self.get_service(service_name).await {
             // Call handle_request on the service
+            // Extract action from path
+            let action = request.path.split('/').collect::<Vec<&str>>().get(1).unwrap_or(&"").to_string();
+            
+            // Create a proper action path for routing
+            let action_path = TopicPath::new_action(&self.network_id, service_name, &action);
+            
             let result = Handle::current().block_on(service.handle_request(ServiceRequest {
                 request_id: request.request_id.clone(),
-                request_context: context.clone(),
+                context: context.clone(),
                 path: request.path.clone(),
-                params: Some(params.clone()),
-                operation: request.path.split('/').collect::<Vec<&str>>().get(1).unwrap_or(&"").to_string(),
+                data: Some(params.clone()),
+                action: action,
                 metadata: None,
+                topic_path: Some(action_path),
             }));
             result
         } else {
@@ -1387,14 +1503,17 @@ impl ServiceRegistry {
                         Arc::new(NodeRequestHandlerImpl::new(Arc::new(self.clone()))),
                     );
                     
-                    // Create a service request with metadata
+                    // Create a service request with metadata and proper topic_path
+                    // Create action path for routing
+                    let action_path = TopicPath::new_action(&self.network_id, &service, &operation);
                     let request = ServiceRequest {
                         request_id: Some(request_id.clone()),
-                        request_context: Arc::new(context),
+                        context: Arc::new(context),
                         path: path.clone(),
-                        operation: operation.clone(),
-                        params: Some(params.clone()),
+                        action: operation.clone(),
+                        data: Some(params.clone()),
                         metadata: metadata.clone(), // Clone here to avoid moving
+                        topic_path: Some(action_path),
                     };
                     
                     // Process the request
@@ -1521,20 +1640,64 @@ impl ServiceRegistry {
         // Convert the subscription_id to the service name format
         let service_name = if let Some(id) = subscription_id {
             format!("subscription_{}", id)
-                    } else {
+        } else {
             // If no ID is provided, we can't know which service to unsubscribe
             return Err(anyhow!("Subscription ID is required for unsubscribing"));
         };
         
-        // Use our internal unsubscribe implementation
-        self.unsubscribe(&service_name, &topic, subscription_id).await
+        // Parse the topic string into a TopicPath for consistent handling
+        let topic_path = match TopicPath::parse(&topic, &self.network_id) {
+            Ok(tp) => {
+                // Verify this is an event path - we only subscribe to events
+                if tp.path_type != PathType::Event {
+                    // Create the correct event path format to show in the error message
+                    let correct_event_path = TopicPath::new_event(&tp.network_id, &tp.service_path, &tp.action_or_event).to_string();
+                    
+                    // Log the error with the correct format
+                    error_log(
+                        Component::Service,
+                        &format!("Error: Attempted to unsubscribe from action path: '{}'. For events, use event path: '{}'. Action paths are for service requests, event paths are for notifications.", 
+                                topic, correct_event_path)
+                    ).await;
+                    
+                    // Throw an error with guidance on the correct format
+                    return Err(anyhow!("Invalid path type for unsubscription: expected event path, got action path: '{}'. Use event path: '{}'. The path structure is the same (<network>:<service>/<name>), but must be registered as an event path for event unsubscriptions.", 
+                                topic, correct_event_path));
+                } else {
+                    tp
+                }
+            },
+            Err(e) => {
+                // No legacy compatibility - enforce strict path format
+                error_log(
+                    Component::Service,
+                    &format!("Error: Invalid topic format for unsubscription: '{}'. Events must use proper path format: '<network>:<service>/<event>'", topic)
+                ).await;
+                
+                // Throw an error - no backwards compatibility
+                return Err(anyhow!("Invalid topic format for unsubscription: '{}'. Events must use proper path format: '<network>:<service>/<event>'", topic));
+            }
+        };
+        
+        let normalized_topic = topic_path.to_string();
+        
+        debug_log(
+            Component::Service,
+            &format!("Unsubscribing from topic: {} (parsed as {})", topic, normalized_topic)
+        ).await;
+        
+        // Since we now enforce strict path formats, we only need to unsubscribe using the normalized path
+        let result = self.unsubscribe(&service_name, &normalized_topic, subscription_id).await;
+        
+        // Return the result
+        result
     }
 
     /// Fix for the signature mismatch in the unsubscribe method
     /// This method is used in the callback expiration handler
     pub async fn unsubscribe_wrapper(&self, topic_clone: String, sub_id: String) -> Result<()> {
-        // Convert the String to &str for the subscription_id
-        self.unsubscribe(&format!("subscription_{}", sub_id), &topic_clone, Some(&sub_id)).await
+        // Use the helper to handle TopicPath parsing consistently
+        self.unsubscribe_helper(topic_clone, Some(&sub_id)).await
     }
 }
 
