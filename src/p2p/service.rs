@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use crate::db::SqliteDatabase;
 use crate::p2p::crypto::{NetworkId, PeerId};
 use crate::p2p::transport::{P2PMessage, P2PTransport, TransportConfig};
-use crate::services::abstract_service::{AbstractService, ServiceMetadata, ServiceState};
+use crate::services::abstract_service::{AbstractService, ServiceMetadata, ServiceState, ActionMetadata, EventMetadata};
 use crate::services::service_registry::ServiceRegistry;
 use crate::services::remote::P2PTransport as P2PTransportTrait;
 use crate::services::{RequestContext, ServiceRequest, ServiceResponse};
@@ -696,15 +696,23 @@ impl AbstractService for P2PRemoteServiceDelegate {
         "1.0"
     }
     
-    fn operations(&self) -> Vec<String> {
+    fn actions(&self) -> Vec<ActionMetadata> {
         vec![
-            "connect".to_string(),
-            "disconnect".to_string(),
-            "send".to_string(),
-            "list_peers".to_string(),
-            "publish".to_string(),
-            "subscribe".to_string(),
-            "unsubscribe".to_string(),
+            ActionMetadata { name: "connect".to_string() },
+            ActionMetadata { name: "disconnect".to_string() },
+            ActionMetadata { name: "send_message".to_string() },
+            ActionMetadata { name: "get_peers".to_string() },
+            ActionMetadata { name: "get_peer".to_string() },
+            ActionMetadata { name: "add_peer".to_string() },
+            ActionMetadata { name: "get_peer_info".to_string() },
+        ]
+    }
+
+    fn events(&self) -> Vec<EventMetadata> {
+        vec![
+            EventMetadata { name: "peer_connected".to_string() },
+            EventMetadata { name: "peer_disconnected".to_string() },
+            EventMetadata { name: "message_received".to_string() },
         ]
     }
 

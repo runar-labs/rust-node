@@ -4,7 +4,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::services::abstract_service::{AbstractService, ServiceMetadata, ServiceState};
+use crate::services::abstract_service::{AbstractService, ServiceMetadata, ServiceState, ActionMetadata, EventMetadata};
 use crate::services::service_registry::ServiceRegistry;
 use crate::services::{ResponseStatus, ServiceRequest, ServiceResponse, ValueType};
 use crate::services::NodeRequestHandler;
@@ -60,13 +60,15 @@ impl AbstractService for RegistryInfoService {
         "1.0"
     }
     
-    fn operations(&self) -> Vec<String> {
+    fn actions(&self) -> Vec<ActionMetadata> {
         vec![
-            "list".to_string(),
-            "get".to_string(),
-            "register_metadata".to_string(),
-            "unregister_metadata".to_string(),
+            ActionMetadata { name: "get_services".to_string() },
+            ActionMetadata { name: "get_service".to_string() },
         ]
+    }
+
+    fn events(&self) -> Vec<EventMetadata> {
+        Vec::new() // No events for this service
     }
 
     async fn init(&mut self, _context: &crate::services::RequestContext) -> Result<()> {

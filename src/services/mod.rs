@@ -439,12 +439,9 @@ impl ServiceManager {
     pub async fn init_services(&mut self) -> Result<()> {
         info!("Initializing services for network ID: {}", self.network_id);
 
-        // Create a node handler for request context
-        let node_handler = if let Some(handler) = &self.node_handler {
-            handler.clone()
-        } else {
-            Arc::new(crate::node::DummyNodeRequestHandler {})
-        };
+        // Require a valid node handler
+        let node_handler = self.node_handler.clone()
+            .ok_or_else(|| anyhow!("No node handler configured - ServiceManager must be initialized with a valid node handler"))?;
 
         // Create a request context for initialization
         let request_context = Arc::new(RequestContext::new_with_option(
@@ -462,11 +459,6 @@ impl ServiceManager {
         // Get a reference to use later
         let registry = Arc::new(registry_service);
         
-        // Set it as the node handler for the service manager
-        if self.node_handler.is_none() {
-            self.node_handler = Some(registry.clone());
-        }
-
         // Initialize the SQLite service
         let mut sqlite_service = sqlite::SqliteService::new(self.db.clone(), &self.network_id);
         sqlite_service.init(&request_context).await?;
@@ -691,17 +683,62 @@ macro_rules! vmap {
 // Helper macro for creating a vmap that returns Option<ValueType>
 #[macro_export]
 macro_rules! vmap_opt {
-    ($($key:expr => $value:expr),* $(,)?) => {{
-        let mut map = std::collections::HashMap::new();
-        $(
-            map.insert($key.to_string(), $value.into());
-        )*
-        Some(runar_common::types::ValueType::Map(map))
-    }};
-    () => {{
-        let map = std::collections::HashMap::new();
-        Some(runar_common::types::ValueType::Map(map))
-    }};
+    ($($key:expr => $value:expr),* $(,)?) => {
+        {
+            let map = std::collections::HashMap::new();
+            Some(runar_common::types::ValueType::Map(map))
+        }
+    };
+}
+
+/// Extract an f64 value from a ValueType with default
+/// 
+/// This macro handles both direct ValueType and Optional<ValueType> cases,
+/// as well as both direct numbers and maps with keys.
+/// 
+/// # Examples
+/// 
+/// ```
+/// // Extract from a map with key
+/// let score = vmap_extract_f64!(data, "score", 0.0);
+/// 
+/// // Extract directly with a default
+/// let value = vmap_extract_f64!(number_value, 0.0);
+/// ```
+#[macro_export]
+macro_rules! vmap_extract_f64 {
+    // Case 1: Extract from Option<ValueType> using a key
+    ($value:expr, $key:expr, $default:expr) => {
+        {
+            match &$value {
+                Some(ValueType::Map(map)) => {
+                    match map.get($key) {
+                        Some(ValueType::Number(n)) => *n,
+                        Some(ValueType::String(s)) => s.parse::<f64>().unwrap_or($default),
+                        Some(ValueType::Bool(b)) => if *b { 1.0 } else { 0.0 },
+                        _ => $default,
+                    }
+                },
+                Some(ValueType::Number(n)) => *n,
+                _ => $default,
+            }
+        }
+    };
+    
+    // Case 2: Extract directly from a ValueType
+    ($value:expr, $default:expr) => {
+        {
+            match &$value {
+                Some(ValueType::Number(n)) => *n,
+                Some(ValueType::String(s)) => s.parse::<f64>().unwrap_or($default),
+                Some(ValueType::Bool(b)) => if *b { 1.0 } else { 0.0 },
+                ValueType::Number(n) => *n,
+                ValueType::String(s) => s.parse::<f64>().unwrap_or($default),
+                ValueType::Bool(b) => if *b { 1.0 } else { 0.0 },
+                _ => $default,
+            }
+        }
+    };
 }
 
 /// Helper function to convert a value to ValueType
@@ -785,10 +822,36 @@ impl std::fmt::Debug for RequestContext {
 
 impl Default for RequestContext {
     fn default() -> Self {
-        Self {
-            path: "default".to_string(),
-            data: ValueType::Null,
-            node_handler: Arc::new(crate::node::DummyNodeRequestHandler {}),
+        // Create a minimal implementation of NodeRequestHandler for default contexts
+        struct MinimalDefaultHandler;
+        
+        #[async_trait::async_trait]
+        impl NodeRequestHandler for MinimalDefaultHandler {
+            async fn request(&self, _path: String, _params: ValueType) -> Result<ServiceResponse> {
+                Ok(ServiceResponse::error("Default RequestContext used - not intended for production use"))
+            }
+            
+            async fn publish(&self, _topic: String, _data: ValueType) -> Result<()> {
+                Ok(())
+            }
+            
+            async fn subscribe(&self, _topic: String, _callback: Box<dyn Fn(ValueType) -> Result<()> + Send + Sync>) -> Result<String> {
+                Ok("default-subscription".to_string())
+            }
+            
+            async fn subscribe_with_options(&self, _topic: String, _callback: Box<dyn Fn(ValueType) -> Result<()> + Send + Sync>, _options: SubscriptionOptions) -> Result<String> {
+                Ok("default-subscription".to_string())
+            }
+            
+            async fn unsubscribe(&self, _topic: String, _subscription_id: Option<&str>) -> Result<()> {
+                Ok(())
+            }
+        }
+        
+        RequestContext {
+            path: "default-context".to_string(),
+            data: ValueType::Map(HashMap::new()),
+            node_handler: Arc::new(MinimalDefaultHandler),
         }
     }
 }
@@ -828,6 +891,9 @@ impl RequestContext {
             node_handler: self.node_handler.clone(),
         }
     }
+    
+    // The for_tests() method has been removed and moved to the test_helpers module
+    // to keep test utilities separate from production code
 
     /// Get a context value
     pub fn get(&self, key: &str) -> Option<ValueType> {

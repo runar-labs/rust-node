@@ -1,5 +1,5 @@
 use crate::p2p::crypto::PeerId;
-use crate::services::abstract_service::{AbstractService, ServiceMetadata, ServiceState};
+use crate::services::abstract_service::{AbstractService, ServiceMetadata, ServiceState, ActionMetadata, EventMetadata};
 use crate::services::{RequestContext, ServiceRequest, ServiceResponse, ValueType};
 use crate::util::logging::{debug_log, error_log, info_log, warn_log, Component};
 use anyhow::{anyhow, Result};
@@ -126,8 +126,16 @@ impl AbstractService for RemoteService {
         "1.0.0"
     }
     
-    fn operations(&self) -> Vec<String> {
-        self.operations.clone()
+    fn actions(&self) -> Vec<ActionMetadata> {
+        // Convert operations to ActionMetadata
+        self.operations.iter()
+            .map(|op| ActionMetadata { name: op.clone() })
+            .collect()
+    }
+    
+    fn events(&self) -> Vec<EventMetadata> {
+        // Remote services don't publish local events by default
+        Vec::new()
     }
 
     async fn init(&mut self, _ctx: &RequestContext) -> Result<()> {

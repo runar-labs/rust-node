@@ -25,12 +25,13 @@ use crate::node::NodeRequestHandlerImpl;
 use crate::p2p::crypto::PeerId;
 use crate::p2p::service::P2PRemoteServiceDelegate;
 use crate::p2p::transport::{P2PMessage, P2PServiceInfo};
-use crate::services::abstract_service::{ServiceMetadata, ServiceState};
+use crate::services::abstract_service::{ServiceMetadata, ServiceState, AbstractService, ActionMetadata, EventMetadata};
 use crate::services::remote::{P2PTransport, RemoteService};
 use crate::services::{
-    AbstractService, NodeRequestHandler, RequestContext, ServiceRequest, ServiceResponse,
-    SubscriptionOptions, ValueType,
+    NodeRequestHandler, RequestContext, ServiceRequest, ServiceResponse,
+    ResponseStatus, ValueType,
 };
+use crate::services::SubscriptionOptions;
 use crate::util::logging::{debug_log, error_log, info_log, warn_log, Component};
 use crate::p2p::peer_id_convert::CryptoToLibP2pPeerId;
 // Remove the common module imports
@@ -240,8 +241,28 @@ impl AbstractService for ServerServiceAdapter {
         "1.0"
     }
     
-    fn operations(&self) -> Vec<String> {
-        vec![]
+    fn actions(&self) -> Vec<ActionMetadata> {
+        vec![
+            ActionMetadata { name: "list_services".to_string() },
+            ActionMetadata { name: "get_service".to_string() },
+            ActionMetadata { name: "get_service_info".to_string() },
+            ActionMetadata { name: "list_service_actions".to_string() },
+            ActionMetadata { name: "list_service_events".to_string() },
+            ActionMetadata { name: "add_service".to_string() },
+            ActionMetadata { name: "remove_service".to_string() },
+            ActionMetadata { name: "subscribe".to_string() },
+            ActionMetadata { name: "unsubscribe".to_string() },
+            ActionMetadata { name: "publish".to_string() },
+        ]
+    }
+    
+    fn events(&self) -> Vec<EventMetadata> {
+        vec![
+            EventMetadata { name: "service_added".to_string() },
+            EventMetadata { name: "service_removed".to_string() },
+            EventMetadata { name: "subscription_added".to_string() },
+            EventMetadata { name: "subscription_removed".to_string() },
+        ]
     }
     
     async fn handle_request(&self, request: ServiceRequest) -> Result<ServiceResponse> {
@@ -311,30 +332,20 @@ impl NodeRequestHandler for ServiceRegistry {
     }
     
     async fn publish(&self, topic: String, data: ValueType) -> Result<()> {
+        // Debug logging for troubleshooting
+        println!("[DEBUG] ServiceRegistry::publish called with topic: '{}'", topic);
+        
         // Parse the topic string into a TopicPath for consistent handling
         let topic_path = match TopicPath::parse(&topic, &self.network_id) {
-            Ok(tp) => {
-                // Strictly enforce that we're publishing to an event path
-                if tp.path_type != PathType::Event {
-                    // Create the correct event path format to show in the error message
-                    let correct_event_path = TopicPath::new_event(&tp.network_id, &tp.service_path, &tp.action_or_event).to_string();
-                    
-                    // Log the error with the correct format
-                    error_log(
-                        Component::Service,
-                        &format!("Error: Attempted to publish to action path: '{}'. For events, use event path: '{}'. Action paths are for service requests, event paths are for notifications.", 
-                                topic, correct_event_path)
-                    ).await;
-                    
-                    // Throw an error with guidance on the correct format
-                    return Err(anyhow!("Invalid path type for publish: expected event path, got action path: '{}'. Use event path: '{}'. The path structure is the same (<network>:<service>/<name>), but must be registered as an event path for publishing events.", 
-                                topic, correct_event_path));
-                } else {
-                    tp
-                }
+            Ok(mut tp) => {
+                // Convert action paths to event paths automatically
+                tp.path_type = PathType::Event;
+                println!("[DEBUG] Successful parse of topic '{}' into topic_path: '{}'", topic, tp);
+                tp
             },
             Err(e) => {
                 // No legacy compatibility - enforce strict path format
+                println!("[DEBUG] Failed to parse topic '{}': {}", topic, e);
                 error_log(
                     Component::Service,
                     &format!("Error: Invalid topic format: '{}'. Events must use proper path format: '<network>:<service>/<event>'", topic)
@@ -354,11 +365,21 @@ impl NodeRequestHandler for ServiceRegistry {
         let subscribers = {
             let subs = self.event_subscribers.read().await;
             
+            // Debug: log all keys in the subscribers map
+            println!("[DEBUG] All subscription keys in map:");
+            for key in subs.keys() {
+                println!("[DEBUG]   - '{}'", key);
+            }
+            
             // Since we now enforce strict path formats, we only need to check the normalized path
             let normalized_topic = topic_path.to_string();
+            println!("[DEBUG] Looking for subscribers using key: '{}'", normalized_topic);
+            
             if let Some(subs_vec) = subs.get(&normalized_topic) {
+                println!("[DEBUG] Found {} subscribers for topic", subs_vec.len());
                 subs_vec.clone()
             } else {
+                println!("[DEBUG] No subscribers found for topic");
                 Vec::new()
             }
         };
@@ -413,25 +434,10 @@ impl NodeRequestHandler for ServiceRegistry {
     ) -> Result<String> {
         // Parse the topic string into a TopicPath for consistent handling
         let topic_path = match TopicPath::parse(&topic, &self.network_id) {
-            Ok(tp) => {
-                // Strictly enforce that we're subscribing to an event path
-                if tp.path_type != PathType::Event {
-                    // Create the correct event path format to show in the error message
-                    let correct_event_path = TopicPath::new_event(&tp.network_id, &tp.service_path, &tp.action_or_event).to_string();
-                    
-                    // Log the error with the correct format
-                    error_log(
-                        Component::Service,
-                        &format!("Error: Attempted to subscribe to action path: '{}'. For events, use event path: '{}'. Action paths are for service requests, event paths are for notifications.", 
-                                topic, correct_event_path)
-                    ).await;
-                    
-                    // Throw an error with guidance on the correct format
-                    return Err(anyhow!("Invalid path type for subscription: expected event path, got action path: '{}'. Use event path: '{}'. The path structure is the same (<network>:<service>/<name>), but must be registered as an event path for event subscriptions.", 
-                                topic, correct_event_path));
-                } else {
-                    tp
-                }
+            Ok(mut tp) => {
+                // Convert action paths to event paths automatically
+                tp.path_type = PathType::Event;
+                tp
             },
             Err(e) => {
                 // No legacy compatibility - enforce strict path format
@@ -452,6 +458,9 @@ impl NodeRequestHandler for ServiceRegistry {
             &format!("Subscribing to topic: {} (parsed as {}) with options: {:?}", 
                     topic, normalized_topic, options)
         ).await;
+        
+        // Additional debug logging
+        println!("[DEBUG] Storing subscription with normalized topic: '{}'", normalized_topic);
         
         // Generate a unique subscription ID
         let subscription_id = options.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -519,6 +528,29 @@ impl NodeRequestHandler for ServiceRegistry {
     }
     
     async fn unsubscribe(&self, topic: String, subscription_id: Option<&str>) -> Result<()> {
+        // Debug logging
+        println!("[DEBUG] ServiceRegistry::unsubscribe called with topic: '{}'", topic);
+        
+        // Parse the topic string into a TopicPath for consistent handling
+        let topic_path = match TopicPath::parse(&topic, &self.network_id) {
+            Ok(mut tp) => {
+                // Convert action paths to event paths automatically
+                tp.path_type = PathType::Event;
+                println!("[DEBUG] Successful parse of topic '{}' into topic_path: '{}'", topic, tp);
+                tp
+            },
+            Err(e) => {
+                println!("[DEBUG] Failed to parse topic '{}': {}", topic, e);
+                error_log(
+                    Component::Service,
+                    &format!("Error: Invalid topic format for unsubscribing: '{}'. Events must use proper path format: '<network>:<service>/<event>'", topic)
+                ).await;
+                
+                // Throw an error - no backwards compatibility
+                return Err(anyhow!("Invalid topic format for unsubscribing: '{}'. Events must use proper path format: '<network>:<service>/<event>'", topic));
+            }
+        };
+        
         // Convert the subscription_id to the service name format
         let service_name = if let Some(id) = subscription_id {
             format!("subscription_{}", id)
@@ -527,8 +559,44 @@ impl NodeRequestHandler for ServiceRegistry {
             return Err(anyhow!("Subscription ID is required for unsubscribing"));
         };
         
-        // Use our internal unsubscribe implementation
-        self.unsubscribe(&service_name, &topic, subscription_id).await
+        // Use the normalized topic path
+        let normalized_topic = topic_path.to_string();
+        println!("[DEBUG] Attempting to unsubscribe '{}' from normalized topic '{}'", service_name, normalized_topic);
+        
+        // Remove from subscribers
+        {
+            let mut subscribers = self.event_subscribers.write().await;
+            
+            // Remove from normalized topic
+            if let Some(services) = subscribers.get_mut(&normalized_topic) {
+                services.retain(|s| s != &service_name);
+                println!("[DEBUG] Removed '{}' from subscribers for '{}'", service_name, normalized_topic);
+                
+                // Clean up empty lists
+                if services.is_empty() {
+                    subscribers.remove(&normalized_topic);
+                    println!("[DEBUG] Removed empty subscriber list for '{}'", normalized_topic);
+                }
+            }
+        }
+        
+        // Remove from callbacks
+        {
+            let mut callbacks = self.event_callbacks.write().await;
+            
+            if let Some(service_callbacks) = callbacks.get_mut(&service_name) {
+                service_callbacks.retain(|(t, _)| t != &normalized_topic);
+                println!("[DEBUG] Removed callback for '{}' from service '{}'", normalized_topic, service_name);
+                
+                // Clean up empty lists
+                if service_callbacks.is_empty() {
+                    callbacks.remove(&service_name);
+                    println!("[DEBUG] Removed empty callback list for service '{}'", service_name);
+                }
+            }
+        }
+        
+        Ok(())
     }
     
     fn list_services(&self) -> Vec<String> {
@@ -810,73 +878,6 @@ impl ServiceRegistry {
 
         if let Some(topics) = remote_subs.get_mut(peer_id) {
             topics.remove(topic);
-        }
-
-        Ok(())
-    }
-
-    /// Unsubscribe from a topic
-    pub async fn unsubscribe(
-        &self,
-        service_name: &str,
-        topic: &str,
-        subscription_id: Option<&str>,
-    ) -> Result<()> {
-        debug_log(
-            Component::Service,
-            &format!("ServiceRegistry::unsubscribe - Topic: {}", topic),
-        )
-        .await;
-
-        // Track if all subscriptions for this topic were removed
-        let mut all_subscriptions_removed = false;
-
-        // If a subscription ID is provided, remove only that specific subscription
-        if let Some(id) = subscription_id {
-            let mut callbacks = self.event_callbacks.write().await;
-            if let Some(callbacks_for_service) = callbacks.get_mut(service_name) {
-                callbacks_for_service.retain(|(callback_topic, _)| callback_topic != topic);
-
-                // If no more callbacks for this service, remove the service entry
-                if callbacks_for_service.is_empty() {
-                    callbacks.remove(service_name);
-
-                    // Also remove the service from the subscribers list
-                    let mut subscribers = self.event_subscribers.write().await;
-                    if let Some(subscribers_for_topic) = subscribers.get_mut(topic) {
-                        subscribers_for_topic.retain(|s| s != service_name);
-
-                        // If no more subscribers, remove the topic entry
-                        if subscribers_for_topic.is_empty() {
-                            subscribers.remove(topic);
-                            all_subscriptions_removed = true;
-                        }
-                    }
-                }
-            }
-        } else {
-            // Remove all subscriptions for this service and topic
-            let mut callbacks = self.event_callbacks.write().await;
-            if let Some(callbacks_for_service) = callbacks.get_mut(service_name) {
-                callbacks_for_service.retain(|(callback_topic, _)| callback_topic != topic);
-
-                // If no more callbacks for this service, remove the service entry
-                if callbacks_for_service.is_empty() {
-                    callbacks.remove(service_name);
-
-                    // Also remove the service from the subscribers list
-                    let mut subscribers = self.event_subscribers.write().await;
-                    if let Some(subscribers_for_topic) = subscribers.get_mut(topic) {
-                        subscribers_for_topic.retain(|s| s != service_name);
-
-                        // If no more subscribers, remove the topic entry
-                        if subscribers_for_topic.is_empty() {
-                            subscribers.remove(topic);
-                            all_subscriptions_removed = true;
-                        }
-                    }
-                }
-            }
         }
 
         Ok(())
@@ -1635,69 +1636,11 @@ impl ServiceRegistry {
         Ok(())
     }
 
-    /// Helper method to handle unsubscribe requests
-    pub async fn unsubscribe_helper(&self, topic: String, subscription_id: Option<&str>) -> Result<()> {
-        // Convert the subscription_id to the service name format
-        let service_name = if let Some(id) = subscription_id {
-            format!("subscription_{}", id)
-        } else {
-            // If no ID is provided, we can't know which service to unsubscribe
-            return Err(anyhow!("Subscription ID is required for unsubscribing"));
-        };
-        
-        // Parse the topic string into a TopicPath for consistent handling
-        let topic_path = match TopicPath::parse(&topic, &self.network_id) {
-            Ok(tp) => {
-                // Verify this is an event path - we only subscribe to events
-                if tp.path_type != PathType::Event {
-                    // Create the correct event path format to show in the error message
-                    let correct_event_path = TopicPath::new_event(&tp.network_id, &tp.service_path, &tp.action_or_event).to_string();
-                    
-                    // Log the error with the correct format
-                    error_log(
-                        Component::Service,
-                        &format!("Error: Attempted to unsubscribe from action path: '{}'. For events, use event path: '{}'. Action paths are for service requests, event paths are for notifications.", 
-                                topic, correct_event_path)
-                    ).await;
-                    
-                    // Throw an error with guidance on the correct format
-                    return Err(anyhow!("Invalid path type for unsubscription: expected event path, got action path: '{}'. Use event path: '{}'. The path structure is the same (<network>:<service>/<name>), but must be registered as an event path for event unsubscriptions.", 
-                                topic, correct_event_path));
-                } else {
-                    tp
-                }
-            },
-            Err(e) => {
-                // No legacy compatibility - enforce strict path format
-                error_log(
-                    Component::Service,
-                    &format!("Error: Invalid topic format for unsubscription: '{}'. Events must use proper path format: '<network>:<service>/<event>'", topic)
-                ).await;
-                
-                // Throw an error - no backwards compatibility
-                return Err(anyhow!("Invalid topic format for unsubscription: '{}'. Events must use proper path format: '<network>:<service>/<event>'", topic));
-            }
-        };
-        
-        let normalized_topic = topic_path.to_string();
-        
-        debug_log(
-            Component::Service,
-            &format!("Unsubscribing from topic: {} (parsed as {})", topic, normalized_topic)
-        ).await;
-        
-        // Since we now enforce strict path formats, we only need to unsubscribe using the normalized path
-        let result = self.unsubscribe(&service_name, &normalized_topic, subscription_id).await;
-        
-        // Return the result
-        result
-    }
-
     /// Fix for the signature mismatch in the unsubscribe method
     /// This method is used in the callback expiration handler
     pub async fn unsubscribe_wrapper(&self, topic_clone: String, sub_id: String) -> Result<()> {
-        // Use the helper to handle TopicPath parsing consistently
-        self.unsubscribe_helper(topic_clone, Some(&sub_id)).await
+        // Call the unsubscribe method directly with the topic and subscription ID
+        self.unsubscribe(topic_clone, Some(&sub_id)).await
     }
 }
 

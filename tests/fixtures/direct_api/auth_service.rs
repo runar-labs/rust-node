@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use runar_node::services::abstract_service::{AbstractService, ServiceState};
 use runar_node::services::ResponseStatus;
-use runar_node::{RequestContext, ServiceRequest, ServiceResponse, ValueType};
+use runar_node::{RequestContext, ServiceRequest, ServiceResponse, ValueType, vmap};
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -37,30 +37,18 @@ impl AuthService {
         // Add test users using vmap! macro
         users.insert(
             "admin".to_string(),
-            vmap!{
-                "username" => "admin".into(),
-                "password" => "password123".into(),
-                "role" => "admin".into()
-            }
+            vmap!("username" => "admin", "password" => "password123", "role" => "admin")
         );
         
         users.insert(
             "user".to_string(),
-            vmap!{
-                "username" => "user".into(),
-                "password" => "user123".into(),
-                "role" => "user".into()
-            }
+            vmap!("username" => "user", "password" => "user123", "role" => "user")
         );
         
         // Add testuser account for service-to-service communication tests
         users.insert(
             "testuser".to_string(),
-            vmap!{
-                "username" => "testuser".into(),
-                "password" => "password123".into(),
-                "role" => "user".into()
-            }
+            vmap!("username" => "testuser", "password" => "password123", "role" => "user")
         );
         
         Self {
@@ -202,23 +190,23 @@ impl AbstractService for AuthService {
     }
     
     async fn handle_request(&self, request: ServiceRequest) -> Result<ServiceResponse> {
-        // Check if operation is empty and extract it from path if needed
-        let operation = if request.operation.is_empty() && request.path.contains("/") {
+        // Check if action is empty and extract it from path if needed
+        let action = if request.action.is_empty() && request.path.contains("/") {
             request.path.split("/").last().unwrap_or("").to_string()
         } else {
-            request.operation.clone()
+            request.action.clone()
         };
 
-        match operation.as_str() {
+        match action.as_str() {
             "login" => {
-                if let Some(params) = &request.params {
+                if let Some(data) = &request.data {
                     // Try to extract username and password from Map type
-                    if let ValueType::Map(map) = params {
+                    if let ValueType::Map(map) = data {
                         if let (Some(ValueType::String(username)), Some(ValueType::String(password))) = 
                             (map.get("username"), map.get("password")) {
                             return self.login(username, password).await;
                         }
-                    } else if let ValueType::Json(json_value) = params {
+                    } else if let ValueType::Json(json_value) = data {
                         // Also support JSON parameters
                         let username = json_value.get("username")
                             .and_then(|v| v.as_str())
@@ -237,48 +225,48 @@ impl AbstractService for AuthService {
                 })
             },
             "validateToken" => {
-                if let Some(params) = &request.params {
-                    if let ValueType::Map(map) = params {
+                if let Some(data) = &request.data {
+                    if let ValueType::Map(map) = data {
                         if let Some(ValueType::String(token)) = map.get("token") {
                             return self.validate_token(token).await;
                         }
-                    } else if let ValueType::Json(json_value) = params {
+                    } else if let ValueType::Json(json_value) = data {
                         let token = json_value.get("token")
                             .and_then(|v| v.as_str())
                             .ok_or_else(|| anyhow!("Missing token"))?;
                         return self.validate_token(token).await;
                     }
                 }
-                // Return a proper error response instead of an Err
+                
                 Ok(ServiceResponse {
                     status: ResponseStatus::Error,
-                    message: "Invalid parameters for validateToken".to_string(),
+                    message: "Invalid token".to_string(),
                     data: None,
                 })
             },
             "logout" => {
-                if let Some(params) = &request.params {
-                    if let ValueType::Map(map) = params {
+                if let Some(data) = &request.data {
+                    if let ValueType::Map(map) = data {
                         if let Some(ValueType::String(token)) = map.get("token") {
                             return self.logout(token).await;
                         }
-                    } else if let ValueType::Json(json_value) = params {
+                    } else if let ValueType::Json(json_value) = data {
                         let token = json_value.get("token")
                             .and_then(|v| v.as_str())
                             .ok_or_else(|| anyhow!("Missing token"))?;
                         return self.logout(token).await;
                     }
                 }
-                // Return a proper error response instead of an Err
+                
                 Ok(ServiceResponse {
                     status: ResponseStatus::Error,
-                    message: "Invalid parameters for logout".to_string(),
+                    message: "Invalid token".to_string(),
                     data: None,
                 })
             },
             _ => Ok(ServiceResponse {
                 status: ResponseStatus::Error,
-                message: format!("Unknown operation: {}", operation),
+                message: format!("Unknown action: {}", action),
                 data: None,
             }),
         }

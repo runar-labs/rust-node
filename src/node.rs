@@ -16,7 +16,7 @@ use crate::db::SqliteDatabase;
 use crate::p2p::crypto::PeerId;
 use crate::p2p::service::P2PRemoteServiceDelegate;
 use crate::p2p::transport::{TransportConfig, P2PTransport};
-use crate::services::abstract_service::{ServiceMetadata, ServiceState};
+use crate::services::abstract_service::{ServiceMetadata, ServiceState, AbstractService, ActionMetadata, EventMetadata};
 use crate::routing::{TopicPath, PathType};
 use crate::services::{
     NodeRequestHandler, RequestContext, ServiceRequest, ServiceResponse,
@@ -24,7 +24,6 @@ use crate::services::{
 };
 use crate::services::types::ValueType;
 use crate::services::service_registry::ServiceRegistry;
-use crate::services::abstract_service::AbstractService;
 use crate::services::node_info::NodeInfoService;
 use crate::util::logging::{debug_log, debug_log_with_data, error_log, info_log, warn_log, Component};
 
@@ -132,52 +131,6 @@ pub struct Node {
     state: Arc<RwLock<ServiceState>>,
 }
 
-/// A dummy NodeRequestHandler used to create a RequestContext that won't be used for nested requests
-pub struct DummyNodeRequestHandler {}
-
-#[async_trait::async_trait]
-impl NodeRequestHandler for DummyNodeRequestHandler {
-    async fn request(&self, _path: String, _params: ValueType) -> Result<ServiceResponse> {
-        Err(anyhow!("DummyNodeRequestHandler: Cannot make requests"))
-    }
-
-    async fn publish(&self, _topic: String, _data: ValueType) -> Result<()> {
-        Err(anyhow!("DummyNodeRequestHandler: Cannot publish events"))
-    }
-
-    async fn subscribe(
-        &self,
-        _topic: String,
-        _callback: Box<dyn Fn(ValueType) -> Result<()> + Send + Sync>,
-    ) -> Result<String> {
-        Err(anyhow!(
-            "DummyNodeRequestHandler: Cannot subscribe to events"
-        ))
-    }
-
-    async fn subscribe_with_options(
-        &self,
-        _topic: String,
-        _callback: Box<dyn Fn(ValueType) -> Result<()> + Send + Sync>,
-        _options: SubscriptionOptions,
-    ) -> Result<String> {
-        Err(anyhow!(
-            "DummyNodeRequestHandler: Cannot subscribe to events"
-        ))
-    }
-
-    async fn unsubscribe(&self, _topic: String, _subscription_id: Option<&str>) -> Result<()> {
-        Err(anyhow!(
-            "DummyNodeRequestHandler: Cannot unsubscribe from events"
-        ))
-    }
-
-    fn list_services(&self) -> Vec<String> {
-        // Return an empty list for the dummy handler
-        Vec::new()
-    }
-}
-
 /// NodeRequestHandlerImpl - Implements NodeRequestHandler by wrapping a reference to the Node
 pub struct NodeRequestHandlerImpl {
     /// Reference to the service registry
@@ -248,21 +201,13 @@ impl NodeRequestHandler for NodeRequestHandlerImpl {
     }
 
     async fn publish(&self, topic: String, data: ValueType) -> Result<()> {
-        // Parse the topic string to get service name if present
-        // Format can be either "topic" or "serviceName/topic"
-        let parts: Vec<&str> = topic.split('/').collect();
-        let (service_name, topic_name) = if parts.len() > 1 {
-            (Some(parts[0].to_string()), parts[1].to_string())
-        } else {
-            (None, topic.clone())
-        };
-
-        // Use the registry's publish method
-        if let Some(service) = service_name {
-            self.service_registry.publish(topic_name.clone(), data).await
-        } else {
-            self.service_registry.publish(topic_name, data).await
-        }
+        // Debug logging for troubleshooting
+        println!("[DEBUG] NodeRequestHandlerImpl::publish called with topic: '{}'", topic);
+        
+        // Keep the original topic as is - don't split it
+        // The ServiceRegistry will properly parse it using TopicPath
+        println!("[DEBUG] Calling registry.publish with full topic path: '{}'", topic);
+        self.service_registry.publish(topic, data).await
     }
 
     async fn subscribe(
@@ -281,49 +226,23 @@ impl NodeRequestHandler for NodeRequestHandlerImpl {
         callback: Box<dyn Fn(ValueType) -> Result<()> + Send + Sync>,
         options: SubscriptionOptions,
     ) -> Result<String> {
-        // Parse the topic string to get service name if present
-        // Format can be either "topic" or "serviceName/topic"
-        let parts: Vec<&str> = topic.split('/').collect();
-        let (service_name, topic_name) = if parts.len() > 1 {
-            (Some(parts[0].to_string()), parts[1].to_string())
-        } else {
-            (None, topic.clone())
-        };
-
-        // Use the registry's subscribe_with_options method
-        if let Some(service_name) = service_name {
-            self.service_registry.subscribe_with_options(
-                service_name, 
-                callback, 
-                options
-            ).await
-        } else {
-            // Default to using the "global" service if none specified
-            self.service_registry.subscribe_with_options(
-                "global".to_string(),
-                callback,
-                options
-            ).await
-        }
+        // Debug logging
+        println!("[DEBUG] NodeRequestHandlerImpl::subscribe_with_options called with topic: '{}'", topic);
+        
+        // Pass the full topic directly to the service registry
+        // The registry will parse it correctly using TopicPath
+        println!("[DEBUG] Calling registry.subscribe_with_options with full topic: '{}'", topic);
+        self.service_registry.subscribe_with_options(topic, callback, options).await
     }
 
     async fn unsubscribe(&self, topic: String, subscription_id: Option<&str>) -> Result<()> {
-        // Parse the topic string to get service name if present
-        // Format can be either "topic" or "serviceName/topic"
-        let parts: Vec<&str> = topic.split('/').collect();
-        let (service_name, topic_name) = if parts.len() > 1 {
-            (Some(parts[0].to_string()), parts[1].to_string())
-        } else {
-            (None, topic.clone())
-        };
-
-        // Use the registry's unsubscribe method
-        if let Some(service) = service_name {
-            self.service_registry.unsubscribe(&service, &topic_name, subscription_id).await
-        } else {
-            // Default to using the "global" service if none specified
-            self.service_registry.unsubscribe("global", &topic_name, subscription_id).await
-        }
+        // Debug logging
+        println!("[DEBUG] NodeRequestHandlerImpl::unsubscribe called with topic: '{}'", topic);
+        
+        // Pass the full topic directly to the service registry
+        // The registry will parse it correctly using TopicPath
+        println!("[DEBUG] Calling registry.unsubscribe with full topic: '{}'", topic);
+        self.service_registry.unsubscribe(topic, subscription_id).await
     }
 
     fn list_services(&self) -> Vec<String> {
@@ -566,11 +485,9 @@ impl Node {
         path: P,
         data: D,
     ) -> Result<ServiceResponse> {
-        let path_str = path.into();
-        let data_value = data.into();
-        
-        // Process the data and make the actual request
-        self.process_request(path_str, data_value).await
+        let path = path.into();
+        let data = data.into();
+        self.process_request(path, data).await
     }
     
     /// Helper method that does the actual request processing
@@ -846,21 +763,8 @@ impl Node {
 where {
         let topic_str = topic.into();
 
-        // Parse the topic to get the service name
-        let parts: Vec<&str> = topic_str.split('/').collect();
-
-        if parts.is_empty() {
-            return Err(anyhow!(
-                "Invalid topic format. Expected 'serviceName/eventName'"
-            ));
-        }
-
-        let service_name = parts[0];
-
-        // Unsubscribe from the registry
-        self.service_registry
-            .unsubscribe(service_name, &topic_str, subscription_id)
-            .await
+        // Use the service registry's unsubscribe method directly
+        self.service_registry.unsubscribe(topic_str, subscription_id).await
     }
 
     /// Get the service registry
@@ -906,8 +810,8 @@ where {
         let services = self.services.read().await.clone();
         
         for service_name in services.keys() {
-            let mut service = self.get_service_mut(service_name).await?;
-            service.stop().await?;
+            // Use request-based API with empty map
+            self.request(&format!("{}/stop", service_name), ValueType::Map(HashMap::new())).await?;
         }
         
         Ok(())
@@ -918,8 +822,8 @@ where {
         let services = self.services.read().await.clone();
         
         for service_name in services.keys() {
-            let mut service = self.get_service_mut(service_name).await?;
-            service.start().await?;
+            // Use request-based API with empty map
+            self.request(&format!("{}/start", service_name), ValueType::Map(HashMap::new())).await?;
         }
         
         Ok(())
@@ -931,7 +835,7 @@ where {
         self.stop_services().await?;
 
         // Stop P2P delegate - clone and use deref
-        let mut p2p_delegate = (*self.p2p_delegate).clone();
+        let p2p_delegate = (*self.p2p_delegate).clone();
         p2p_delegate.stop().await?;
 
         Ok(())
@@ -1126,77 +1030,12 @@ where {
 
     /// Get a mutable reference to a service by name
     async fn get_service_mut(&self, name: &str) -> Result<Box<dyn AbstractService>> {
-        let services = self.services.read().await;
-        let service = services.get(name).cloned();
+        let service = self.service_registry.get_service(name).await
+            .ok_or_else(|| anyhow!("Service '{}' not found", name))?;
         
-        if let Some(service_arc) = service {
-            // Create a new instance by cloning the service
-            // This is a workaround since we can't get a mutable reference from an Arc
-            // In a real implementation, we would need to handle this differently
-            let name = service_arc.name().to_string();
-            let path = service_arc.path().to_string();
-            
-            // Create a new dummy service
-            let dummy_service = Box::new(DummyService {
-                name,
-                path,
-                state: service_arc.state(),
-            });
-            
-            return Ok(dummy_service);
-        }
-        
-        Err(anyhow!("Service '{}' not found", name))
-    }
-}
-
-/// A dummy service used as a workaround for mutability issues
-struct DummyService {
-    name: String,
-    path: String,
-    state: ServiceState,
-}
-
-#[async_trait]
-impl AbstractService for DummyService {
-    fn name(&self) -> &str {
-        &self.name
-    }
-    
-    fn path(&self) -> &str {
-        &self.path
-    }
-    
-    fn state(&self) -> ServiceState {
-        self.state
-    }
-    
-    fn version(&self) -> &str {
-        "1.0"
-    }
-    
-    fn operations(&self) -> Vec<String> {
-        vec![]
-    }
-    
-    fn description(&self) -> &str {
-        "Dummy service"
-    }
-    
-    async fn init(&mut self, _ctx: &RequestContext) -> Result<()> {
-        Ok(())
-    }
-    
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
-    }
-    
-    async fn stop(&mut self) -> Result<()> {
-        Ok(())
-    }
-    
-    async fn handle_request(&self, _request: ServiceRequest) -> Result<ServiceResponse> {
-        Ok(ServiceResponse::error("This is a dummy service"))
+        // Instead of creating a dummy service, we should properly handle mutability
+        // using interior mutability patterns or by redesigning the API
+        Err(anyhow!("Mutable access to services is not supported in this way. Consider using interior mutability or redesigning the API."))
     }
 }
 

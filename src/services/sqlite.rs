@@ -14,7 +14,7 @@ use crate::vmap_opt;
 
 use crate::db::SqliteDatabase;
 use crate::services::abstract_service::{
-    AbstractService, CrudOperationType, ServiceMetadata, ServiceState,
+    AbstractService, ActionMetadata, CrudOperationType, EventMetadata, ServiceMetadata, ServiceState,
 };
 use crate::services::{RequestContext, ServiceRequest, ServiceResponse, ValueType};
 use crate::services::utils;
@@ -813,6 +813,9 @@ impl SqliteService {
             action: query.to_string(),
             data: None,
             request_id: None,
+            // TODO: We should refactor this to use a proper RequestContext.
+            // For now, we're using the default implementation, but this should be
+            // replaced with a properly initialized context that has the correct node handler.
             context: Arc::new(RequestContext::default()),
             metadata: None,
             topic_path: Some(action_path),
@@ -958,14 +961,22 @@ impl AbstractService for SqliteService {
         "1.0"
     }
     
-    fn operations(&self) -> Vec<String> {
+    fn actions(&self) -> Vec<ActionMetadata> {
         vec![
-            "query".to_string(),
-            "exec".to_string(),
-            "get_all".to_string(),
-            "get".to_string(),
-            "put".to_string(),
-            "delete".to_string()
+            ActionMetadata { name: "create".to_string() },
+            ActionMetadata { name: "read".to_string() },
+            ActionMetadata { name: "update".to_string() },
+            ActionMetadata { name: "delete".to_string() },
+            ActionMetadata { name: "query".to_string() },
+            ActionMetadata { name: "execute".to_string() },
+        ]
+    }
+    
+    fn events(&self) -> Vec<EventMetadata> {
+        vec![
+            EventMetadata { name: "created".to_string() },
+            EventMetadata { name: "updated".to_string() },
+            EventMetadata { name: "deleted".to_string() },
         ]
     }
     

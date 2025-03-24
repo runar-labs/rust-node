@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime};
 use uuid::Uuid;
 use std::collections::HashMap;
 
-use crate::services::abstract_service::{AbstractService, ServiceMetadata, ServiceState};
+use crate::services::abstract_service::{AbstractService, ActionMetadata, EventMetadata, ServiceState};
 use crate::services::{ResponseStatus, ServiceRequest, ServiceResponse, ValueType};
 use crate::util::logging::{info_log, Component};
 
@@ -196,12 +196,19 @@ impl AbstractService for AnonymousSubscriberService {
         "1.0"
     }
     
-    fn operations(&self) -> Vec<String> {
+    fn actions(&self) -> Vec<ActionMetadata> {
         vec![
-            "subscribe".to_string(),
-            "unsubscribe".to_string(),
-            "publish".to_string(),
-            "get_metrics".to_string(),
+            ActionMetadata { name: "subscribe".to_string() },
+            ActionMetadata { name: "unsubscribe".to_string() },
+            ActionMetadata { name: "publish".to_string() },
+            ActionMetadata { name: "get_metrics".to_string() },
+        ]
+    }
+    
+    fn events(&self) -> Vec<EventMetadata> {
+        vec![
+            EventMetadata { name: "message_received".to_string() },
+            EventMetadata { name: "subscription_expired".to_string() },
         ]
     }
 

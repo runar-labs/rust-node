@@ -41,6 +41,20 @@ pub struct ServiceMetadata {
     pub version: String,
 }
 
+/// Metadata about an action provided by a service
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionMetadata {
+    /// The name of the action
+    pub name: String,
+}
+
+/// Metadata about an event emitted by a service
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventMetadata {
+    /// The name of the event
+    pub name: String,
+}
+
 /// CRUD operation types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CrudOperationType {
@@ -72,8 +86,17 @@ pub trait AbstractService: Send + Sync + 'static {
     /// Get the service version
     fn version(&self) -> &str;
     
-    /// Get the available operations for this service
-    fn operations(&self) -> Vec<String>;
+    /// Get metadata about actions provided by this service
+    fn actions(&self) -> Vec<ActionMetadata> {
+        // Default empty implementation
+        Vec::new()
+    }
+    
+    /// Get metadata about the events emitted by this service
+    fn events(&self) -> Vec<EventMetadata> {
+        // Default empty implementation
+        Vec::new()
+    }
 
     /// Initialize the service with a request context
     async fn init(&mut self, ctx: &RequestContext) -> Result<()>;
@@ -105,7 +128,7 @@ pub trait AbstractService: Send + Sync + 'static {
             path: self.path().to_string(),
             state: self.state(),
             description: self.description().to_string(),
-            operations: self.operations(),
+            operations: self.actions().into_iter().map(|a| a.name).collect(),
             version: self.version().to_string(),
         }
     }

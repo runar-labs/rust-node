@@ -224,6 +224,25 @@ mod tests {
     }
     
     #[test]
+    fn test_parse_invalid_single_part() {
+        // Test that a single-part path (without slash) fails with an error
+        let result = TopicPath::parse("ship", "test_network");
+        assert!(result.is_err());
+        
+        if let Err(e) = result {
+            assert!(e.to_string().contains("Invalid path format"));
+        }
+        
+        // Test with network ID explicitly included
+        let result = TopicPath::parse("test_network:ship", "default");
+        assert!(result.is_err());
+        
+        if let Err(e) = result {
+            assert!(e.to_string().contains("Invalid path format"));
+        }
+    }
+    
+    #[test]
     fn test_to_string() {
         let path = TopicPath::new_action("test", "auth", "login");
         assert_eq!(path.to_string(), "test:auth/login");

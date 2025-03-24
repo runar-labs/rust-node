@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use log::{debug, error, info, warn};
 
 use crate::node::NodeConfig;
-use crate::services::abstract_service::{AbstractService, ServiceMetadata, ServiceState};
+use crate::services::abstract_service::{AbstractService, ServiceMetadata, ServiceState, ActionMetadata, EventMetadata};
 use crate::services::{RequestContext, ServiceRequest, ServiceResponse, ValueType};
 
 /// Node Info Service - provides information about the node
@@ -131,8 +131,19 @@ impl AbstractService for NodeInfoService {
         "1.0.0"
     }
     
-    fn operations(&self) -> Vec<String> {
-        vec!["info".to_string(), "stats".to_string(), "config".to_string()]
+    fn actions(&self) -> Vec<ActionMetadata> {
+        vec![
+            ActionMetadata { name: "get_info".to_string() },
+            ActionMetadata { name: "get_status".to_string() },
+            ActionMetadata { name: "get_metrics".to_string() },
+            ActionMetadata { name: "get_peer_info".to_string() },
+        ]
+    }
+
+    fn events(&self) -> Vec<EventMetadata> {
+        vec![
+            EventMetadata { name: "status_changed".to_string() },
+        ]
     }
 
     async fn init(&mut self, context: &crate::services::RequestContext) -> Result<()> {

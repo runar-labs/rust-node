@@ -56,7 +56,7 @@ pub use runar_common::implement_from_for_valuetype;
 pub use runar_common::vmap_extract;
 pub use runar_common::vmap_extract_string;
 pub use runar_common::vmap_extract_i32;
-pub use runar_common::vmap_extract_f64;
+// pub use runar_common::vmap_extract_f64; // Comment out to use our local implementation
 pub use runar_common::vmap_extract_bool;
 
 // Re-export distributed slice attribute if enabled
