@@ -339,12 +339,16 @@ impl P2PRemoteServiceDelegate {
         let self_libp2p_peer_id = self_peer_id.to_libp2p_peer_id()
             .map_err(|e| anyhow!("Failed to convert peer ID: {}", e))?;
         
-        // Set the self address
+        // Set the self address to a default value
         let self_address = "127.0.0.1:0".to_string();
 
-        // Notify about the new connection with properly extracted PeerId
-        self.notify_peer_connected(peer_id, self_libp2p_peer_id, self_address)
+        // Notify listeners that a peer has connected
+        self.notify_peer_connected(peer_id.clone(), self_libp2p_peer_id, self_address)
             .await?;
+
+        log::debug!("[{}] Successfully handled peer connected event for {:?}", 
+            Component::P2P.as_str(),
+            peer_id);
 
         Ok(())
     }
@@ -604,10 +608,9 @@ impl P2PRemoteServiceDelegate {
         params: ValueType,
         metadata: Option<HashMap<String, ValueType>>,
     ) -> Result<ServiceResponse> {
-        debug_log(
-            Component::P2P,
-            &format!("Sending request to peer {:?}: {}", peer_id, path),
-        ).await;
+        log::debug!("[{}] Sending request to peer {:?}: {}", 
+            Component::P2P.as_str(),
+            peer_id, path);
 
         // Convert peer_id to libp2p PeerId for internal use
         let libp2p_peer_id = peer_id.to_libp2p_peer_id()
@@ -647,10 +650,9 @@ impl P2PRemoteServiceDelegate {
         data: ValueType,
         metadata: Option<HashMap<String, ValueType>>,
     ) -> Result<()> {
-        debug_log(
-            Component::P2P,
-            &format!("Publishing event to peer {:?}: {}", peer_id, topic),
-        ).await;
+        log::debug!("[{}] Publishing event to peer {:?}: {}", 
+            Component::P2P.as_str(),
+            peer_id, topic);
 
         // Convert peer_id to libp2p PeerId for internal use
         let libp2p_peer_id = peer_id.to_libp2p_peer_id()

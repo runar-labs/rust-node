@@ -849,7 +849,10 @@ where {
         let mut p2p_delegate = (*self.p2p_delegate).clone();
         p2p_delegate.start().await?;
 
-        info_log(Component::Node, &format!("Node started: {}", self.config.get_or_generate_node_id())).await;
+        log::info!("[{}][{}] Node started: {}", 
+            Component::Node.as_str(),
+            self.network_id, 
+            self.config.get_or_generate_node_id());
         
         Ok(())
     }
@@ -950,13 +953,11 @@ where {
                                             };
                                             
                                             if let Err(e) = service.handle_request(request).await {
-                                                error_log(
-                                                    Component::Node,
-                                                    &format!(
-                                                        "Failed to stop service {}: {}",
-                                                        name, e
-                                                    ),
-                                                ).await;
+                                                log::error!("[{}][{}] Failed to stop service {}: {}", 
+                                                    Component::Node.as_str(),
+                                                    network_id,
+                                                    name, 
+                                                    e);
                                                 continue;
                                             }
 
