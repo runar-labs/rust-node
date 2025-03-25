@@ -10,17 +10,15 @@ mod test_utils {
 
 // Import the math service
 mod fixtures {
-    pub mod direct_api {
-        pub mod math_service {
-            include!("fixtures/direct_api/math_service.rs");
-        }
+    pub mod math_service {
+        include!("fixtures/math_service.rs");
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::fixtures::direct_api::math_service::MathService;
+    use super::fixtures::math_service::MathService;
     use super::test_utils::create_test_node;
     
     #[tokio::test]

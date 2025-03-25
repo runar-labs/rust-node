@@ -5,9 +5,9 @@
 //! 2. BaseStationService - Subscribes to and collects these events
 
 // Import the services we created
-#[path = "fixtures/events/ship_service.rs"]
+#[path = "fixtures/ship_service.rs"]
 mod ship_service;
-#[path = "fixtures/events/base_station_service.rs"]
+#[path = "fixtures/base_station_service.rs"]
 mod base_station_service;
 
 use anyhow::Result;
