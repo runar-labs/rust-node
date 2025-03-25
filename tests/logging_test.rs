@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
-    use runar_node::util::logging::{Component, debug_log, info_log, warn_log, error_log};
+    use runar_common::utils::logging::{Component, debug_log, info_log, warn_log, error_log, configure_test_logging};
     use std::sync::Arc;
     use tokio::sync::Mutex;
     use std::collections::HashMap;
@@ -61,7 +61,7 @@ mod tests {
         
         // Configure logging for tests only once
         INIT_LOGGER.call_once(|| {
-            runar_node::util::logging::configure_test_logging();
+            configure_test_logging();
         });
         
         logger

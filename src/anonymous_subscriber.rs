@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use crate::services::abstract_service::{AbstractService, ServiceMetadata, ServiceState};
 use crate::services::{ResponseStatus, ServiceRequest, ServiceResponse, ValueType};
-use crate::util::logging::{info_log, Component};
+use runar_common::utils::logging::{info_log, Component};
 
 /// Default time-to-live for anonymous services (2 hours)
 pub const DEFAULT_ANONYMOUS_SERVICE_TTL: Duration = Duration::from_secs(7200);

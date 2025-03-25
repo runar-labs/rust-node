@@ -7,7 +7,7 @@ use crate::services::abstract_service::{AbstractService, ServiceMetadata, Servic
 use crate::services::service_registry::ServiceRegistry;
 use crate::services::remote::P2PTransport as P2PTransportTrait;
 use crate::services::{RequestContext, ServiceRequest, ServiceResponse};
-use crate::util::logging::{debug_log, error_log, info_log, warn_log, Component};
+use runar_common::utils::logging::{debug_log, error_log, info_log, warn_log, Component};
 use futures::future::BoxFuture;
 use log::{debug, error, info};
 use serde_json::json;

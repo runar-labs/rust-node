@@ -25,7 +25,7 @@ use crate::services::{
 use crate::services::types::ValueType;
 use crate::services::service_registry::ServiceRegistry;
 use crate::services::node_info::NodeInfoService;
-use crate::util::logging::{debug_log, debug_log_with_data, error_log, info_log, warn_log, Component};
+use runar_common::utils::logging::{Component, debug_log, debug_log_with_data, info_log, error_log, warn_log, set_node_id};
 
 /// Configuration for a Node
 /// Encapsulates all configuration options for a node in one place

@@ -21,7 +21,8 @@ pub use runar_common::types::SerializableStruct;
 pub use anyhow::Result;
 use std::path::PathBuf;
 use std::sync::Arc;
-pub use util::logging;
+// Use logging from common crate instead of local util
+pub use runar_common::utils::logging;
 
 use crate::db::SqliteDatabase;
 use crate::services::service_registry::ServiceRegistry;

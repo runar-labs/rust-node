@@ -32,7 +32,7 @@ use crate::services::{
     ResponseStatus, ValueType,
 };
 use crate::services::SubscriptionOptions;
-use crate::util::logging::{debug_log, error_log, info_log, warn_log, Component};
+use runar_common::utils::logging::{debug_log, error_log, info_log, warn_log, Component};
 use crate::p2p::peer_id_convert::CryptoToLibP2pPeerId;
 // Remove the common module imports
 // use crate::common::async_cache::AsyncCache;

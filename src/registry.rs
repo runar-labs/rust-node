@@ -22,7 +22,7 @@ use crate::services::{
     AbstractService, NodeRequestHandler, RequestContext, ServiceRequest, ServiceResponse,
     SubscriptionOptions, ValueType,
 };
-use crate::util::logging::{debug_log, error_log, info_log, warn_log, Component};
+use runar_common::utils::logging::{debug_log, error_log, info_log, warn_log, Component};
 
 /// A type representing a callback function for event subscribers
 type EventCallback = Box<dyn Fn(ValueType) -> Result<()> + Send + Sync>;

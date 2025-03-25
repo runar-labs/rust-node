@@ -5,7 +5,7 @@ use crate::services::abstract_service::{AbstractService, ServiceMetadata, Servic
 use crate::services::registry::ServiceRegistry;
 use crate::services::remote::P2PTransport as P2PTransportTrait;
 use crate::services::{RequestContext, ResponseStatus, ServiceRequest, ServiceResponse, ValueType};
-use crate::util::logging::{debug_log, error_log, info_log, warn_log, Component};
+use runar_common::utils::logging::{debug_log, error_log, info_log, warn_log, Component};
 use crate::vmap;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;

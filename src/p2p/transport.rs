@@ -4,7 +4,7 @@ use crate::p2p::stun::get_public_endpoint;
 use crate::services::remote::P2PTransport as P2PTransportTrait;
 use crate::services::ServiceResponse;
 use crate::services::types::ValueType;
-use crate::util::logging::{debug_log, error_log, info_log, warn_log, Component};
+use runar_common::utils::logging::{debug_log, error_log, info_log, warn_log, Component};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use futures::future::BoxFuture;
