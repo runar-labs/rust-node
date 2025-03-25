@@ -89,7 +89,7 @@ pub struct SqliteCrudMixin {
     /// The database connection
     db: Arc<SqliteDatabase>,
     /// Storage options
-    storage_options: SqliteStorageOptions,
+    _storage_options: SqliteStorageOptions,
     /// Schema (if structured data)
     schema: Option<Vec<SqliteSchema>>,
 }
@@ -103,7 +103,7 @@ impl SqliteCrudMixin {
     ) -> Self {
         SqliteCrudMixin {
             db,
-            storage_options,
+            _storage_options: storage_options,
             schema,
         }
     }
@@ -141,7 +141,7 @@ impl SqliteCrudMixin {
     }
 
     /// Initialize the metadata table for SqliteCrudMixin
-    pub async fn init(&self, context: &crate::services::RequestContext) -> Result<()> {
+    pub async fn init(&self, _context: &crate::services::RequestContext) -> Result<()> {
         let conn = self.db.get_connection().await?;
 
         // Create the _metadata table to track collections
@@ -636,7 +636,7 @@ pub struct SqliteQueryMixin {
     /// The database connection
     db: Arc<SqliteDatabase>,
     /// Storage options
-    storage_options: SqliteStorageOptions,
+    _storage_options: SqliteStorageOptions,
 }
 
 impl SqliteQueryMixin {
@@ -644,7 +644,7 @@ impl SqliteQueryMixin {
     pub fn new(db: Arc<SqliteDatabase>, storage_options: SqliteStorageOptions) -> Self {
         SqliteQueryMixin {
             db,
-            storage_options,
+            _storage_options: storage_options,
         }
     }
 
@@ -776,7 +776,7 @@ pub struct SqliteService {
     /// Service state
     state: ServiceState,
     /// CRUD mixin for database operations
-    crud_mixin: SqliteCrudMixin,
+    _crud_mixin: SqliteCrudMixin,
     /// Query mixin for SQL operations
     query_mixin: SqliteQueryMixin,
 }
@@ -794,7 +794,7 @@ impl SqliteService {
             name: "sqlite".to_string(),
             path: format!("{}/sqlite", network_id),
             state: ServiceState::Created,
-            crud_mixin: SqliteCrudMixin::new(db.clone(), storage_options.clone(), None),
+            _crud_mixin: SqliteCrudMixin::new(db.clone(), storage_options.clone(), None),
             query_mixin: SqliteQueryMixin::new(db.clone(), storage_options),
         }
     }

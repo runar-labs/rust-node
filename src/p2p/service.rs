@@ -92,7 +92,7 @@ impl P2PRemoteServiceDelegate {
         info_log(
             Component::P2P,
             &format!("Creating P2P delegate for network {}", network_id_str),
-        );
+        ).await;
 
         // Create the default P2P transport configuration
         let config = TransportConfig {
@@ -110,7 +110,7 @@ impl P2PRemoteServiceDelegate {
                     error_log(
                         Component::P2P,
                         &format!("Failed to create P2P transport: {:?}", e),
-                    );
+                    ).await;
                     return Err(anyhow!("Failed to create P2P transport: {:?}", e));
                 }
             },
@@ -274,7 +274,7 @@ impl P2PRemoteServiceDelegate {
                 "Notifying message handlers of message from {:?}",
                 event.peer_id
             ),
-        );
+        ).await;
 
         let handlers = self.message_handlers.read().await;
         for handler in handlers.iter() {
@@ -290,7 +290,7 @@ impl P2PRemoteServiceDelegate {
                 "Notifying connection handlers of event for peer {:?}",
                 event.peer_id
             ),
-        );
+        ).await;
 
         let handlers = self.connection_handlers.read().await;
         for handler in handlers.iter() {
@@ -303,7 +303,7 @@ impl P2PRemoteServiceDelegate {
         info_log(
             Component::P2P,
             &format!("Connecting to peer {:?} at {}", *peer_id, address),
-        );
+        ).await;
 
         // Extract the PeerId from Arc<PeerId> to pass to notify_peer_connected
         let peer_id_value = (*peer_id).clone();
@@ -413,7 +413,7 @@ impl P2PRemoteServiceDelegate {
         debug_log(
             Component::P2P,
             &format!("Publishing event to peer {:?}: topic={}", peer_id, topic),
-        );
+        ).await;
 
         // Create an Event message
         let event_message = P2PMessage::Event {
@@ -430,12 +430,12 @@ impl P2PRemoteServiceDelegate {
             debug_log(
                 Component::P2P,
                 &format!("Successfully published event to peer {:?}", peer_id),
-            );
+            ).await;
         } else {
             error_log(
                 Component::P2P,
                 &format!("Failed to publish event to peer {:?}", peer_id),
-            );
+            ).await;
         }
 
         result
@@ -532,10 +532,9 @@ impl P2PRemoteServiceDelegate {
 
 impl Clone for P2PRemoteServiceDelegate {
     fn clone(&self) -> Self {
-        debug_log(
-            Component::P2P,
-            &format!("Cloning P2P Delegate: {}", self.name),
-        );
+        log::debug!("[{}] Cloning P2P Delegate: {}", 
+            Component::P2P.as_str(),
+            self.name);
         Self {
             name: self.name.clone(),
             state: Mutex::new(*self.state.lock().unwrap()),
@@ -608,7 +607,7 @@ impl P2PRemoteServiceDelegate {
         debug_log(
             Component::P2P,
             &format!("Sending request to peer {:?}: {}", peer_id, path),
-        );
+        ).await;
 
         // Convert peer_id to libp2p PeerId for internal use
         let libp2p_peer_id = peer_id.to_libp2p_peer_id()
@@ -651,7 +650,7 @@ impl P2PRemoteServiceDelegate {
         debug_log(
             Component::P2P,
             &format!("Publishing event to peer {:?}: {}", peer_id, topic),
-        );
+        ).await;
 
         // Convert peer_id to libp2p PeerId for internal use
         let libp2p_peer_id = peer_id.to_libp2p_peer_id()

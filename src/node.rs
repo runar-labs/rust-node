@@ -307,7 +307,7 @@ impl Node {
 
         // We can't set the node handler directly since we don't have mutable access to service_registry
         // instead, we'll create the node handler and use it for all our requests
-        let node_handler = Arc::new(NodeRequestHandlerImpl::new(self.service_registry.clone()));
+        let _node_handler = Arc::new(NodeRequestHandlerImpl::new(self.service_registry.clone()));
 
         // Create and open the node database
         // (This is already done in the constructor, so just check for success)
@@ -511,7 +511,7 @@ impl Node {
         let action = topic_path.action_or_event.clone();
         
         // Create a request context for the request
-        let context = Arc::new(RequestContext::new_with_option(
+        let _request_context = Arc::new(RequestContext::new_with_option(
             format!("node_request_{}", uuid::Uuid::new_v4()),
             vmap_opt! {},
             Arc::new(NodeRequestHandlerImpl::new(self.service_registry.clone())),
@@ -540,7 +540,7 @@ impl Node {
             data: Some(processed_data.clone()),
             //TODO: we need request_id, should not be None here
             request_id: None,
-            context: context,
+            context: _request_context,
             metadata: None,
             topic_path: Some(topic_path),
         };
@@ -548,9 +548,9 @@ impl Node {
         // Find the target service
         //TODO: get_service_by_path shuod take topic_path as the parameter.. not the service name.
         //ergistry needs to us the topic_path to find the service
-        if let Some(service) = self.service_registry.get_service_by_path(&service_name).await {
+        if let Some(_service) = self.service_registry.get_service_by_path(&service_name).await {
             // Call the service
-            service.handle_request(request).await
+            _service.handle_request(request).await
         } else {
             // Service not found
             Ok(ServiceResponse::error(format!("Service '{}' not found", service_name)))
@@ -560,7 +560,7 @@ impl Node {
     /// Make a node request with any parameters
     pub async fn node_request(&self, params: ValueType) -> Result<ServiceResponse> {
         // Create a request context for the request
-        let context = Arc::new(RequestContext::new_with_option(
+        let _request_context = Arc::new(RequestContext::new_with_option(
             format!("node_request_{}", uuid::Uuid::new_v4()),
             vmap_opt! {},
             Arc::new(NodeRequestHandlerImpl::new(self.service_registry.clone())),
@@ -573,7 +573,7 @@ impl Node {
             action: "info".to_string(),
             data: Some(params),
             request_id: None,
-            context: context,
+            context: _request_context,
             metadata: None,
             topic_path: Some(action_path),
         };
@@ -766,19 +766,17 @@ where {
 
     /// Get the service registry
     pub fn service_registry(&self) -> Arc<ServiceRegistry> {
-        warn_log(
-            Component::Node,
-            "Warning: Using service_registry() which returns a new empty clone",
-        );
+        log::warn!("[{}][{}] Warning: Using service_registry() which returns a new empty clone", 
+            self.config.get_or_generate_node_id(), 
+            Component::Node.as_str());
         Arc::new(ServiceRegistry::new(&self.network_id))
     }
 
     /// Get the service registry as an Arc
     pub fn service_registry_arc(&self) -> Arc<ServiceRegistry> {
-        debug_log(
-            Component::Node,
-            "Using service_registry_arc() which returns the actual registry",
-        );
+        log::debug!("[{}][{}] Using service_registry_arc() which returns the actual registry", 
+            self.config.get_or_generate_node_id(), 
+            Component::Node.as_str());
         self.service_registry.clone()
     }
 
@@ -882,7 +880,7 @@ where {
                     // Check if this is an anonymous subscriber service
                     if service.name().starts_with("anonymous_subscriber_") {
                         // Create a request context
-                        let request_context = Arc::new(RequestContext::new_with_option(
+                        let _request_context = Arc::new(RequestContext::new_with_option(
                             format!("{}/get_info", service.name()),
                             vmap_opt! {},
                             node_handler.clone(),
@@ -896,7 +894,7 @@ where {
                             path: service_path,
                             action: "get_info".to_string(),
                             data: vmap_opt! {},
-                            context: request_context,
+                            context: _request_context,
                             metadata: None,
                             topic_path: Some(action_path),
                         };
@@ -958,7 +956,7 @@ where {
                                                         "Failed to stop service {}: {}",
                                                         name, e
                                                     ),
-                                                );
+                                                ).await;
                                                 continue;
                                             }
 
@@ -969,7 +967,7 @@ where {
                                                     "Cleaned up expired anonymous service: {}",
                                                     name
                                                 ),
-                                            );
+                                            ).await;
 
                                             removed_count += 1;
                                         }
@@ -981,7 +979,7 @@ where {
                                 error_log(
                                     Component::Node,
                                     &format!("Error checking anonymous service status: {}", e),
-                                );
+                                ).await;
                             }
                         }
                     }
@@ -991,7 +989,7 @@ where {
                     info_log(
                         Component::Node,
                         &format!("Cleaned up {} expired anonymous services", removed_count),
-                    );
+                    ).await;
                 }
             }
         });
@@ -1027,7 +1025,7 @@ where {
 
     /// Get a mutable reference to a service by name
     async fn get_service_mut(&self, name: &str) -> Result<Box<dyn AbstractService>> {
-        let service = self.service_registry.get_service(name).await
+        let _service = self.service_registry.get_service(name).await
             .ok_or_else(|| anyhow!("Service '{}' not found", name))?;
         
         // Instead of creating a dummy service, we should properly handle mutability

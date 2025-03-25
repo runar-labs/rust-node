@@ -11,13 +11,13 @@ use crate::services::NodeRequestHandler;
 /// Registry Info Service - provides information about registered services
 pub struct RegistryInfoService {
     /// The service name
-    name: String,
+    _name: String,
 
     /// The path at which the service is available
     path: String,
 
     /// Current state of the service
-    state: Mutex<ServiceState>,
+    _state: Mutex<ServiceState>,
 
     /// Reference to the ServiceRegistry
     registry: Arc<ServiceRegistry>,
@@ -27,9 +27,9 @@ impl RegistryInfoService {
     /// Create a new Registry Info Service
     pub fn new(network_id: &str, registry: Arc<ServiceRegistry>) -> Self {
         RegistryInfoService {
-            name: "registry_info".to_string(),
+            _name: "registry_info".to_string(),
             path: format!("{}/registry", network_id),
-            state: Mutex::new(ServiceState::Created),
+            _state: Mutex::new(ServiceState::Created),
             registry,
         }
     }

@@ -3,7 +3,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit},
     ChaCha20Poly1305, Nonce,
 };
-use ed25519_dalek::{Keypair, Signature, Signer, Verifier};
+use ed25519_dalek::{Keypair, Signature, Signer};
 use hkdf::Hkdf;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -33,8 +33,8 @@ pub struct RunarKeypair {
     keypair: Keypair,
     /// The type of key
     key_type: KeyType,
-    /// When the key was created
-    created_at: Instant,
+    /// Creation timestamp
+    _created_at: Instant,
     /// Optional expiration for temporary keys
     expires_at: Option<Instant>,
 }
@@ -56,7 +56,7 @@ impl RunarKeypair {
         Ok(Self {
             keypair,
             key_type,
-            created_at: Instant::now(),
+            _created_at: Instant::now(),
             expires_at: expiration.map(|d| Instant::now() + d),
         })
     }
@@ -77,7 +77,7 @@ impl RunarKeypair {
         Ok(Self {
             keypair,
             key_type,
-            created_at: Instant::now(),
+            _created_at: Instant::now(),
             expires_at: expiration.map(|d| Instant::now() + d),
         })
     }

@@ -456,7 +456,7 @@ impl ServiceManager {
         // No need to initialize or start - ServiceRegistry is not an AbstractService
 
         // Get a reference to use later
-        let registry = Arc::new(registry_service);
+        let _registry = Arc::new(registry_service);
         
         // Initialize the SQLite service
         let mut sqlite_service = sqlite::SqliteService::new(self.db.clone(), &self.network_id);

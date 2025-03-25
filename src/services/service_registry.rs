@@ -201,7 +201,7 @@ impl ServerServiceAdapter {
     
     fn from_abstract(service: Arc<dyn AbstractService>) -> Option<Arc<Self>> {
         // Try a downcast to our adapter type
-        let type_id = std::any::TypeId::of::<ServerServiceAdapter>();
+        let _type_id = std::any::TypeId::of::<ServerServiceAdapter>();
         
         // This is a simplification - in reality we'd need a proper downcast mechanism
         // For now we'll just check if the name follows our convention
@@ -674,7 +674,7 @@ impl ServiceRegistry {
     }
 
     /// Set the P2P transport to use for remote services
-    pub async fn set_p2p_transport(&self, transport: Arc<dyn P2PTransport>) {
+    pub async fn set_p2p_transport(&self, _transport: Arc<dyn P2PTransport>) {
         debug_log(
             Component::Service,
             "Setting P2P transport for service registry",
@@ -1561,7 +1561,7 @@ impl ServiceRegistry {
                     }
                 }
             }
-            P2PMessage::Response { request_id, response, metadata: _ } => {
+            P2PMessage::Response { request_id, response: _, metadata: _ } => {
                 // This would be handled by the P2P service directly
                 debug_log(
                     Component::Registry,
@@ -1613,7 +1613,7 @@ impl ServiceRegistry {
         debug_log(
             Component::Service,
             &format!("Unregistering peer: {}", peer_id_str)
-        );
+        ).await;
 
         let peer_id_clone = peer_id.clone();
         // First, remove any remote subscriptions from this peer
@@ -1637,7 +1637,7 @@ impl ServiceRegistry {
 // Simple AsyncCache implementation
 struct AsyncCache<K, V> {
     cache: Arc<Mutex<HashMap<K, V>>>,
-    ttl: StdDuration,
+    _ttl: StdDuration,
 }
 
 impl<K, V> AsyncCache<K, V> 
@@ -1648,7 +1648,7 @@ where
     fn new(ttl: StdDuration) -> Self {
         Self {
             cache: Arc::new(Mutex::new(HashMap::new())),
-            ttl,
+            _ttl: ttl,
         }
     }
 

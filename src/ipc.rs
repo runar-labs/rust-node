@@ -159,11 +159,10 @@ pub async fn init_ipc_server(
                 info!("IPC server started on {:?}", socket_path);
                 
                 // Accept connections
-                while let Ok((stream, _)) = listener.accept().await {
-                    // Spawn a task to handle the connection
-                    let service_registry_clone = service_registry.clone();
-                    let db_clone = db.clone();
-                    let network_id_clone = network_id.clone();
+                while let Ok((_stream, _)) = listener.accept().await {
+                    let _service_registry_clone = service_registry.clone();
+                    let _db_clone = db.clone();
+                    let _network_id_clone = network_id.clone();
                     
                     tokio::spawn(async move {
                         // For now, we'll just log that we received a connection

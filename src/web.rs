@@ -648,4 +648,4 @@ pub async fn download_web_ui(web_ui_dir: &PathBuf) -> Result<()> {
 
     info!("Created fallback UI at: {}", web_ui_dir.display());
     Ok(())
-}
+} 

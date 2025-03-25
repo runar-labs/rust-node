@@ -6,7 +6,7 @@ use qrcodegen::{QrCode, QrCodeEcc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
-struct NetworkQr {
+pub struct NetworkQr {
     r#type: String,
     network_id: String,
     name: String,
@@ -15,7 +15,7 @@ struct NetworkQr {
 }
 
 #[derive(Serialize, Deserialize)]
-struct TokenQr {
+pub struct TokenQr {
     r#type: String,
     peer_id: String,
     network_id: String,
@@ -24,7 +24,7 @@ struct TokenQr {
 }
 
 #[derive(Serialize, Deserialize)]
-struct PeerQr {
+pub struct PeerQr {
     r#type: String,
     peer_id: String,
     network_id: String,

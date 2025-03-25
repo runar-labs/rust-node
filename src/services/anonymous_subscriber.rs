@@ -43,7 +43,7 @@ pub struct AnonymousSubscriberService {
     state: Mutex<ServiceState>,
 
     /// Network ID
-    network_id: String,
+    _network_id: String,
 
     /// Original subscription topic
     subscription_topic: String,
@@ -60,8 +60,8 @@ pub struct AnonymousSubscriberService {
     /// Service metrics
     metrics: Mutex<AnonymousServiceMetrics>,
 
-    /// Service creation time
-    creation_time: SystemTime,
+    /// Creation time of the service
+    _creation_time: SystemTime,
 }
 
 impl AnonymousSubscriberService {
@@ -76,22 +76,19 @@ impl AnonymousSubscriberService {
             // Use the network ID in the path
             path: format!("{}/anonymous/{}", network_id, unique_id),
             state: Mutex::new(ServiceState::Created),
-            network_id: network_id.to_string(),
+            _network_id: network_id.to_string(),
             subscription_topic: subscription_topic.to_string(),
             last_activity: Mutex::new(Instant::now()),
             ttl: DEFAULT_ANONYMOUS_SERVICE_TTL,
             subscription_count: Mutex::new(1), // Start with 1 subscription
             metrics: Mutex::new(AnonymousServiceMetrics::default()),
-            creation_time: SystemTime::now(),
+            _creation_time: SystemTime::now(),
         };
 
-        // Log service creation
-        info_log(
-            Component::Service,
-            &format!(
-                "Created anonymous subscriber service {} for topic '{}'",
-                service.name, subscription_topic
-            ),
+        log::debug!("[{}] Created anonymous subscriber service {} for topic '{}'",
+            Component::Service.as_str(),
+            service.name, 
+            subscription_topic
         );
 
         service

@@ -538,7 +538,7 @@ impl P2PTransport {
         drop(peer); // Release the lock
 
         // Implement service discovery by getting local services and sharing them with the peer
-        let timeout_duration = Duration::from_secs(10);
+        let _timeout_duration = Duration::from_secs(10);
 
         // Share our local services with the peer
         // This will trigger service discovery both ways as the remote peer
@@ -678,6 +678,15 @@ impl P2PTransport {
         // Implementation based on P2P spec requirements
         // Check QUIC endpoint and other critical components
         true // TODO: Implement proper checks based on QUIC endpoint status
+    }
+
+    pub async fn wait_for_connection(
+        &self,
+        _peer_id: &PeerId,
+        _timeout_duration: Duration,
+    ) -> Result<()> {
+        // Implementation needed
+        Ok(())
     }
 }
 

@@ -62,8 +62,8 @@ pub struct RemoteService {
     /// Current state of the service
     state: Mutex<ServiceState>,
 
-    /// Service uptime
-    uptime: Instant,
+    /// Uptime of the service
+    _uptime: Instant,
 
     /// P2P Transport for sending messages to the peer
     p2p_transport: Arc<dyn P2PTransport>,
@@ -92,7 +92,7 @@ impl RemoteService {
             peer_id,
             operations,
             state: Mutex::new(ServiceState::Created),
-            uptime: Instant::now(),
+            _uptime: Instant::now(),
             p2p_transport,
         }
     }

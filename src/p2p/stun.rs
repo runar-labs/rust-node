@@ -5,7 +5,7 @@ pub fn start_stun_like_server(port: u16) -> Result<()> {
     let socket = UdpSocket::bind(format!("0.0.0.0:{}", port))?;
     tokio::spawn(async move {
         let mut buf = [0; 1024];
-        while let Ok((amt, src)) = socket.recv_from(&mut buf) {
+        while let Ok((_amt, src)) = socket.recv_from(&mut buf) {
             let response = format!("Your public endpoint is {}", src);
             socket.send_to(response.as_bytes(), src).unwrap();
         }

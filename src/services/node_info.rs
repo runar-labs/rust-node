@@ -173,7 +173,7 @@ impl AbstractService for NodeInfoService {
             "stats" => self.handle_stats(&request).await,
             "config" => self.handle_config(&request).await,
             _ => {
-                let error_info = json!({
+                let _error_info = json!({
                     "error": format!("Unknown operation: {}", request.action),
                 });
                 Ok(ServiceResponse::error(
