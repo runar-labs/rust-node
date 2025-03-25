@@ -13,10 +13,6 @@ remote_json = []             # For JSON serialization for remote services
 max_concurrent_requests = []
 distributed_slice = ["linkme"] # For distributed slices in macros
 
-[[example]]
-name = "rest_api_example"
-path = "../examples/rest_api_example.rs"
-
 [dependencies]
 tokio = { version = "1.25", features = ["full"] }
 quinn = "0.10"

@@ -10,8 +10,6 @@ pub mod p2p;
 pub mod routing;
 pub mod server;
 pub mod services;
-#[cfg(test)]
-pub mod tests;
 pub mod util;
 pub mod web;
 
