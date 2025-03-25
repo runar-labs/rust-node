@@ -1,10 +1,9 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use async_trait::async_trait;
-use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::services::abstract_service::{AbstractService, ServiceMetadata, ServiceState, ActionMetadata, EventMetadata};
+use crate::services::abstract_service::{AbstractService, ServiceState, ActionMetadata, EventMetadata};
 use crate::services::service_registry::ServiceRegistry;
 use crate::services::{ResponseStatus, ServiceRequest, ServiceResponse, ValueType};
 use crate::services::NodeRequestHandler;

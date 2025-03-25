@@ -2,7 +2,6 @@ use crate::p2p::crypto::{NetworkId, PeerId};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
 use tokio::sync::RwLock;
 
 #[derive(Serialize, Deserialize)]

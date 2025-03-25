@@ -2,7 +2,6 @@ use anyhow::Result;
 use ed25519_dalek::{Keypair, PublicKey, SecretKey, Signature, Signer, Verifier};
 use getrandom;
 use hex;
-use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;

@@ -1,20 +1,16 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use base64;
 use log::{debug, error, info, warn};
-use rusqlite::{params, Connection, ToSql};
-use rusqlite::{Row, Statement};
+use rusqlite::{params, ToSql};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use uuid::Uuid;
-use crate::vmap;
-use crate::vmap_opt;
 
 use crate::db::SqliteDatabase;
 use crate::services::abstract_service::{
-    AbstractService, ActionMetadata, CrudOperationType, EventMetadata, ServiceMetadata, ServiceState,
+    AbstractService, ActionMetadata, CrudOperationType, EventMetadata, ServiceState,
 };
 use crate::services::{RequestContext, ServiceRequest, ServiceResponse, ValueType};
 use crate::services::utils;

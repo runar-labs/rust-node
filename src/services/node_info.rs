@@ -1,13 +1,13 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
-use log::{debug, error, info, warn};
+use std::time::Instant;
+use log::{debug, info};
 
 use crate::node::NodeConfig;
-use crate::services::abstract_service::{AbstractService, ServiceMetadata, ServiceState, ActionMetadata, EventMetadata};
-use crate::services::{RequestContext, ServiceRequest, ServiceResponse, ValueType};
+use crate::services::abstract_service::{AbstractService, ServiceState, ActionMetadata, EventMetadata};
+use crate::services::{ServiceRequest, ServiceResponse, ValueType};
 
 /// Node Info Service - provides information about the node
 pub struct NodeInfoService {

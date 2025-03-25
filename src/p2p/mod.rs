@@ -10,7 +10,6 @@ pub mod peer_id_convert;
 
 // Re-export types and modules for public use
 pub use crypto::{AccessToken, Crypto, NetworkId, PeerId};
-pub use peer::NetworkInfo;
 pub use qr::{generate_network_qr, generate_peer_qr, generate_token_qr, parse_qr};
 pub use service::P2PRemoteServiceDelegate;
 pub use stun::{get_public_endpoint, start_stun_like_server};

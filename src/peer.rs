@@ -64,15 +64,15 @@ pub enum Component {
 }
 
 // Define logging functions
-fn debug_log(component: Component, message: &str) {
+fn debug_log(component: Component, message: &str).await {
     debug!("[{:?}] {}", component, message);
 }
 
-fn error_log(component: Component, message: &str) {
+fn error_log(component: Component, message: &str).await {
     error!("[{:?}] {}", component, message);
 }
 
-fn info_log(component: Component, message: &str) {
+fn info_log(component: Component, message: &str).await {
     info!("[{:?}] {}", component, message);
 }
 

@@ -1,22 +1,17 @@
-use anyhow::{anyhow, bail, Result};
-use async_trait::async_trait;
+use anyhow::{anyhow, Result};
 use crate::db::SqliteDatabase;
 use crate::p2p::crypto::{NetworkId, PeerId};
 use crate::p2p::transport::{P2PMessage, P2PTransport, TransportConfig};
-use crate::services::abstract_service::{AbstractService, ServiceMetadata, ServiceState, ActionMetadata, EventMetadata};
+use crate::services::abstract_service::{AbstractService, ServiceState, ActionMetadata, EventMetadata};
 use crate::services::service_registry::ServiceRegistry;
 use crate::services::remote::P2PTransport as P2PTransportTrait;
 use crate::services::{RequestContext, ServiceRequest, ServiceResponse};
-use runar_common::utils::logging::{debug_log, error_log, info_log, warn_log, Component};
-use futures::future::BoxFuture;
-use log::{debug, error, info};
-use serde_json::json;
-use serde_json::Value;
+use runar_common::utils::logging::{debug_log, error_log, info_log, Component};
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, Weak};
-use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, RwLock};
+use std::time::Instant;
+use tokio::sync::RwLock;
 use uuid;
 use libp2p::PeerId as LibP2pPeerId;
 use runar_common::types::ValueType;
@@ -92,7 +87,7 @@ impl P2PRemoteServiceDelegate {
     pub async fn new(
         peer_id: Option<PeerId>,
         network_id_str: &str,
-        db: Arc<SqliteDatabase>,
+        _db: Arc<SqliteDatabase>,
     ) -> Result<Self> {
         info_log(
             Component::P2P,
@@ -134,7 +129,7 @@ impl P2PRemoteServiceDelegate {
         };
 
         // Use the provided peer_id if available, otherwise use the transport's peer_id
-        let effective_peer_id = peer_id.unwrap_or(transport_peer_id);
+        let _effective_peer_id = peer_id.unwrap_or(transport_peer_id);
 
         // Create the P2P delegate
         let delegate = Self {
@@ -178,7 +173,7 @@ impl P2PRemoteServiceDelegate {
         // This is a safe cast because we know the concrete type
         let concrete_transport_ref = transport.as_any().downcast_ref::<P2PTransport>();
         let concrete_transport = match concrete_transport_ref {
-            Some(transport_ref) => {
+            Some(_transport_ref) => {
                 // Create a new P2PTransport by cloning the reference
                 let config = TransportConfig::default(); // Use default config as we're just creating a shell
                 let cloned_transport = P2PTransport::new(config, fixed_network_id).await?;
@@ -228,7 +223,7 @@ impl P2PRemoteServiceDelegate {
 
     /// Start the P2P delegate
     pub async fn start(&mut self) -> Result<()> {
-        info_log(Component::P2P, "Starting P2P delegate");
+        info_log(Component::P2P, "Starting P2P delegate").await;
 
         *self.state.lock().unwrap() = ServiceState::Running;
 
@@ -241,7 +236,7 @@ impl P2PRemoteServiceDelegate {
 
     /// Stop the P2P delegate
     pub async fn stop(&self) -> Result<()> {
-        info_log(Component::P2P, "Stopping P2P delegate");
+        info_log(Component::P2P, "Stopping P2P delegate").await;
 
         *self.state.lock().unwrap() = ServiceState::Stopped;
 
@@ -372,7 +367,7 @@ impl P2PRemoteServiceDelegate {
         metadata.insert("connection_time".to_string(), ValueType::String(chrono::Utc::now().to_rfc3339()));
 
         // Create a message to notify that a peer has connected
-        let message = P2PMessage::ConnectNotification {
+        let _message = P2PMessage::ConnectNotification {
             peer_id: peer_id.clone(),
             address: self_address,
             metadata: Some(metadata.clone()),
@@ -448,7 +443,7 @@ impl P2PRemoteServiceDelegate {
 
     /// Broadcast a message to all connected peers
     pub async fn broadcast_message(&self, message: String) -> Result<()> {
-        debug_log(Component::P2P, "Broadcasting message to all peers");
+        debug_log(Component::P2P, "Broadcasting message to all peers").await;
 
         // Get the list of peer IDs
         let peers = {

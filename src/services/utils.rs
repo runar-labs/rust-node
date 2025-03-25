@@ -2,7 +2,6 @@ use anyhow::{anyhow, Result};
 use base64;
 use rusqlite::{Connection, Row, ToSql};
 use serde_json::Value;
-use std::collections::HashMap;
 
 /// Convert a serde_json::Value to a rusqlite::ToSql implementor
 pub fn json_value_to_sql_value(value: &Value) -> Result<Box<dyn ToSql>> {

@@ -1,27 +1,17 @@
-use crate::db::SqliteDatabase;
-use crate::p2p::crypto::{AccessToken, Crypto, NetworkId, PeerId};
+use crate::p2p::crypto::{AccessToken, NetworkId, PeerId};
 use crate::p2p::dht::DHT;
-use crate::p2p::transport::P2PTransport;
 use anyhow::{anyhow, Error, Result};
-use async_trait::async_trait;
-use base64;
 use bincode;
 use futures::future::join_all;
-use quinn::{ClientConfig, EndpointConfig, ServerConfig, TransportConfig};
-use quinn::{Connection, Endpoint, RecvStream, SendStream};
-use rand;
+use quinn::{Connection, Endpoint};
 use rcgen;
-use rustls::{Certificate, PrivateKey};
-use serde::{de::DeserializeOwned, Serialize};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::io::AsyncReadExt;
-use tokio::sync::{mpsc, RwLock};
-use tokio::time::timeout;
-use tracing::{debug, error, info, warn};
+use tokio::sync::mpsc;
+use tracing::{debug, error, info};
 
 pub struct Peer {
     pub peer_id: PeerId,
@@ -240,7 +230,7 @@ impl Peer {
         let client_config = quinn::ClientConfig::new(Arc::new(client_crypto));
 
         // Create endpoint config
-        let mut endpoint_config = quinn::EndpointConfig::default();
+        let endpoint_config = quinn::EndpointConfig::default();
         // Configure any endpoint settings if needed
 
         // Try to bind to the specified socket

@@ -1,10 +1,9 @@
 use crate::p2p::crypto::PeerId;
-use crate::services::abstract_service::{AbstractService, ServiceMetadata, ServiceState, ActionMetadata, EventMetadata};
+use crate::services::abstract_service::{AbstractService, ServiceState, ActionMetadata, EventMetadata};
 use crate::services::{RequestContext, ServiceRequest, ServiceResponse, ValueType};
-use runar_common::utils::logging::{debug_log, error_log, info_log, warn_log, Component};
-use anyhow::{anyhow, Result};
+use runar_common::utils::logging::{debug_log, info_log, Component};
+use anyhow::Result;
 use async_trait::async_trait;
-use serde_json::json;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;

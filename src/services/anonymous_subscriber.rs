@@ -1,13 +1,12 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use serde_json::json;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime};
 use uuid::Uuid;
 use std::collections::HashMap;
 
 use crate::services::abstract_service::{AbstractService, ActionMetadata, EventMetadata, ServiceState};
-use crate::services::{ResponseStatus, ServiceRequest, ServiceResponse, ValueType};
+use crate::services::{ServiceRequest, ServiceResponse, ValueType};
 use runar_common::utils::logging::{info_log, Component};
 
 /// Default time-to-live for anonymous services (2 hours)

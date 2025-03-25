@@ -1,38 +1,28 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use log::{debug, error, info};
-use serde_json::json;
 
 use crate::routing::{TopicPath, PathType};
-use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
 use tokio::sync::RwLock;
-use serde_json::Value;
-use crate::vmap;
 use tokio::time::timeout;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration as StdDuration;
 use tokio::runtime::Handle;
-use crate::vmap_opt;
 
 use crate::db::SqliteDatabase;
 use crate::node::NodeRequestHandlerImpl;
 use crate::p2p::crypto::PeerId;
 use crate::p2p::service::P2PRemoteServiceDelegate;
 use crate::p2p::transport::{P2PMessage, P2PServiceInfo};
-use crate::services::abstract_service::{ServiceMetadata, ServiceState, AbstractService, ActionMetadata, EventMetadata};
-use crate::services::remote::{P2PTransport, RemoteService};
+use crate::services::abstract_service::{ServiceState, AbstractService, ActionMetadata, EventMetadata};
+use crate::services::remote::P2PTransport;
 use crate::services::{
-    NodeRequestHandler, RequestContext, ServiceRequest, ServiceResponse,
-    ResponseStatus, ValueType,
+    NodeRequestHandler, RequestContext, ServiceRequest, ServiceResponse, ValueType,
 };
 use crate::services::SubscriptionOptions;
-use runar_common::utils::logging::{debug_log, error_log, info_log, warn_log, Component};
+use runar_common::utils::logging::{debug_log, error_log, info_log, Component};
 use crate::p2p::peer_id_convert::CryptoToLibP2pPeerId;
 // Remove the common module imports
 // use crate::common::async_cache::AsyncCache;
@@ -828,7 +818,7 @@ impl ServiceRegistry {
 
         // Also remove any remote subscriptions from this peer
         let peer_id_clone = peer_id.clone();
-        self.remove_remote_subscriptions(peer_id_clone).await;
+        let _ = self.remove_remote_subscriptions(peer_id_clone).await;
 
         Ok(())
     }
@@ -1200,7 +1190,7 @@ impl ServiceRegistry {
                 ).await;
                 
                 // Create a service request with proper topic_path
-                let mut map = std::collections::HashMap::new();
+                let map = std::collections::HashMap::new();
                 // Create action path for routing
                 let action_path = TopicPath::new_action(&self.network_id, service_obj.path(), action);
                 let request = ServiceRequest {
@@ -1267,7 +1257,7 @@ impl ServiceRegistry {
                 ).await;
 
             // Create a service request with proper topic_path
-            let mut map = std::collections::HashMap::new();
+            let map = std::collections::HashMap::new();
             // Create action path for routing
             let action_path = TopicPath::new_action(&self.network_id, service_obj.path(), &operation);
             let request = ServiceRequest {

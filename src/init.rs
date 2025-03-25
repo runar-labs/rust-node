@@ -10,9 +10,6 @@ use std::sync::RwLock;
 use once_cell::sync::Lazy;
 use log;
 
-use crate::services::types::ValueType;
-use crate::services::RequestContext;
-use crate::services::ServiceResponse;
 use crate::services::distributed_registry::{
     ActionHandler, ProcessHandler, EventSubscription, PublicationInfo,
 };

@@ -1,5 +1,4 @@
 use anyhow::{anyhow, Result};
-use async_trait::async_trait;
 use log::info;
 use serde_json::json;
 use std::collections::HashMap;
@@ -9,15 +8,13 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use uuid;
 use uuid::Uuid;
-use crate::vmap;
 use crate::vmap_opt;
 
 use crate::db::SqliteDatabase;
-use crate::p2p::crypto::PeerId;
 use crate::p2p::service::P2PRemoteServiceDelegate;
 use crate::p2p::transport::{TransportConfig, P2PTransport};
-use crate::services::abstract_service::{ServiceMetadata, ServiceState, AbstractService, ActionMetadata, EventMetadata};
-use crate::routing::{TopicPath, PathType};
+use crate::services::abstract_service::{ServiceState, AbstractService};
+use crate::routing::TopicPath;
 use crate::services::{
     NodeRequestHandler, RequestContext, ServiceRequest, ServiceResponse,
     SubscriptionOptions, ResponseStatus,
@@ -25,7 +22,7 @@ use crate::services::{
 use crate::services::types::ValueType;
 use crate::services::service_registry::ServiceRegistry;
 use crate::services::node_info::NodeInfoService;
-use runar_common::utils::logging::{Component, debug_log, debug_log_with_data, info_log, error_log, warn_log, set_node_id};
+use runar_common::utils::logging::{Component, debug_log, debug_log_with_data, info_log, error_log, warn_log};
 
 /// Configuration for a Node
 /// Encapsulates all configuration options for a node in one place
@@ -147,7 +144,7 @@ impl NodeRequestHandlerImpl {
 #[async_trait::async_trait]
 impl NodeRequestHandler for NodeRequestHandlerImpl {
     async fn request(&self, path: String, params: ValueType) -> Result<ServiceResponse> {
-        debug_log(Component::Node, &format!("NodeRequestHandlerImpl::request - Path: {}", path));
+        debug_log(Component::Node, &format!("NodeRequestHandlerImpl::request - Path: {}", path)).await;
         debug_log_with_data(
             Component::Node,
             "NodeRequestHandlerImpl::request - Params",
@@ -303,7 +300,7 @@ impl Node {
 
     /// Initialize the node
     pub async fn init(&mut self) -> Result<()> {
-        info_log(Component::Node, "Initializing node");
+        info_log(Component::Node, "Initializing node").await;
 
         // Set state to initializing
         *self.state.write().await = ServiceState::Initialized;
@@ -344,14 +341,14 @@ impl Node {
         *self.state.write().await = ServiceState::Running;
         self.initialized = true;
 
-        info_log(Component::Node, "Node initialized");
+        info_log(Component::Node, "Node initialized").await;
 
         Ok(())
     }
 
     /// Initialize the P2P subsystem
     pub async fn init_p2p(&mut self, fixed_id_ref: Option<&str>) -> Result<()> {
-        info_log(Component::Node, "Initializing P2P functionality");
+        info_log(Component::Node, "Initializing P2P functionality").await;
 
         // Create transport config
         let transport_config = TransportConfig {
@@ -408,13 +405,13 @@ impl Node {
             }
         }
 
-        info_log(Component::Node, "P2P functionality initialized");
+        info_log(Component::Node, "P2P functionality initialized").await;
         Ok(())
     }
 
     /// Initialize built-in services
     pub async fn init_services(&mut self) -> Result<()> {
-        info_log(Component::Node, "Initializing services");
+        info_log(Component::Node, "Initializing services").await;
 
         // Initialize the node info service
         let node_info_service =
@@ -854,7 +851,7 @@ where {
         let mut p2p_delegate = (*self.p2p_delegate).clone();
         p2p_delegate.start().await?;
 
-        info_log(Component::Node, &format!("Node started: {}", self.config.get_or_generate_node_id()));
+        info_log(Component::Node, &format!("Node started: {}", self.config.get_or_generate_node_id())).await;
         
         Ok(())
     }

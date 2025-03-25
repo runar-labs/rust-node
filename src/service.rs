@@ -225,7 +225,7 @@ impl P2PRemoteServiceDelegate {
 
     /// Start the P2P delegate
     pub async fn start(&mut self) -> Result<()> {
-        info_log(Component::P2P, "Starting P2P delegate");
+        info_log(Component::P2P, "Starting P2P delegate").await;
 
         *self.state.lock().unwrap() = ServiceState::Running;
 
@@ -238,7 +238,7 @@ impl P2PRemoteServiceDelegate {
 
     /// Stop the P2P delegate
     pub async fn stop(&mut self) -> Result<()> {
-        info_log(Component::P2P, "Stopping P2P delegate");
+        info_log(Component::P2P, "Stopping P2P delegate").await;
 
         *self.state.lock().unwrap() = ServiceState::Stopped;
 
@@ -492,7 +492,7 @@ impl P2PRemoteServiceDelegate {
 
     /// Broadcast a message to all connected peers
     pub async fn broadcast_message(&self, message: String) -> Result<()> {
-        debug_log(Component::P2P, "Broadcasting message to all peers");
+        debug_log(Component::P2P, "Broadcasting message to all peers").await;
 
         // Get the list of peer IDs
         let peers = {

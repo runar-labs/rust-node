@@ -1,6 +1,5 @@
 use crate::p2p::crypto::{AccessToken, Crypto, NetworkId, PeerId};
 use crate::p2p::peer::{NetworkInfo, Peer};
-use crate::p2p::stun::get_public_endpoint;
 use crate::services::remote::P2PTransport as P2PTransportTrait;
 use crate::services::ServiceResponse;
 use crate::services::types::ValueType;
@@ -8,15 +7,11 @@ use runar_common::utils::logging::{debug_log, error_log, info_log, warn_log, Com
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use futures::future::BoxFuture;
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::any::Any;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, RwLock};
-use tokio::time::timeout;
-use tracing::{debug, error, info, warn};
 use uuid;
 
 /// Configuration for P2P transport

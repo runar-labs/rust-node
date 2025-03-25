@@ -8,14 +8,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::UnixListener;
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use log::{info, error};
-use uuid::Uuid;
 
-use crate::db::SqliteDatabase;
-use crate::services::service_registry::ServiceRegistry;
-use crate::services::types::ValueType;
-use crate::services::{ServiceRequest, ServiceResponse};
 use serde::{Serialize, Deserialize};
 use serde_json::Value;
 

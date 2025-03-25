@@ -1,5 +1,4 @@
 use anyhow::{anyhow, Result};
-use async_trait::async_trait;
 use log::info;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -9,7 +8,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid;
 
-use crate::routing::{TopicPath, PathType};
+use crate::routing::TopicPath;
 
 use crate::db::SqliteDatabase;
 use crate::node::NodeConfig;
