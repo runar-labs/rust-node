@@ -1,3 +1,6 @@
+// Legacy test utilities from the old test_utils/mod.rs
+// This provides backward compatibility while we migrate to the new structure
+
 use anyhow::Result;
 use async_trait::async_trait;
 use runar_node::services::abstract_service::{AbstractService, ServiceMetadata, ServiceState, ActionMetadata, EventMetadata};
@@ -552,4 +555,4 @@ pub async fn create_test_node() -> Result<(
     node.init().await?;
 
     Ok((node, temp_dir, node_config))
-}
+} 
