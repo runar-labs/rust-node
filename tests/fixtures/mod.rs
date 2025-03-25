@@ -1,4 +1,3 @@
-// Export test fixtures for direct API implementations
-pub mod events;
+// Export test fixtures needed for simple_actions.rs and simple_events.rs
 pub mod direct_api;
-pub mod services;  // Consolidated service fixtures
+pub mod events;

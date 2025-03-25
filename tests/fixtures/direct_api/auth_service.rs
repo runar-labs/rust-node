@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use runar_node::services::abstract_service::{AbstractService, ServiceState};
+use runar_node::services::abstract_service::{AbstractService, ServiceState, ActionMetadata};
 use runar_node::services::ResponseStatus;
 use runar_node::{RequestContext, ServiceRequest, ServiceResponse, ValueType, vmap};
 use serde_json::json;
@@ -73,28 +73,44 @@ impl AuthService {
         };
         
         if let Some(user_value) = user_value {
-            // Extract password and check it
-            if let ValueType::Json(user_data) = user_value {
-                let stored_password = user_data.get("password").and_then(|v| v.as_str());
-                if let Some(pwd) = stored_password {
-                    if pwd == password {
-                        // Generate token
-                        let token = Uuid::new_v4().to_string();
-                        
-                        // Store token
-                        let mut tokens = self.tokens.write().unwrap();
-                        tokens.insert(token.clone(), username.to_string());
-                        
-                        // Return success with token
-                        return Ok(ServiceResponse {
-                            status: ResponseStatus::Success,
-                            message: "Login successful".to_string(),
-                            data: Some(ValueType::Json(json!({
-                                "token": token
-                            }))),
-                        });
+            // Check password based on the user data format
+            let password_matches = match &user_value {
+                // Handle when users are stored as Map (from vmap! macro)
+                ValueType::Map(user_map) => {
+                    if let Some(ValueType::String(stored_password)) = user_map.get("password") {
+                        stored_password == password
+                    } else {
+                        false
                     }
-                }
+                },
+                // Handle when users are stored as Json
+                ValueType::Json(user_data) => {
+                    if let Some(stored_password) = user_data.get("password").and_then(|v| v.as_str()) {
+                        stored_password == password
+                    } else {
+                        false
+                    }
+                },
+                // Any other format - not supported
+                _ => false
+            };
+            
+            if password_matches {
+                // Generate token
+                let token = Uuid::new_v4().to_string();
+                
+                // Store token
+                let mut tokens = self.tokens.write().unwrap();
+                tokens.insert(token.clone(), username.to_string());
+                
+                // Return success with token
+                return Ok(ServiceResponse {
+                    status: ResponseStatus::Success,
+                    message: "Login successful".to_string(),
+                    data: Some(vmap! {
+                        "token" => token
+                    }),
+                });
             }
         }
         
@@ -136,9 +152,9 @@ impl AuthService {
             return Ok(ServiceResponse {
                 status: ResponseStatus::Success,
                 message: "Token is valid".to_string(),
-                data: Some(ValueType::Json(json!({
-                    "username": username
-                }))),
+                data: Some(vmap! {
+                    "username" => username.clone()
+                }),
             });
         }
         
@@ -173,8 +189,12 @@ impl AbstractService for AuthService {
         "1.0"
     }
     
-    fn operations(&self) -> Vec<String> {
-        vec!["login".to_string(), "validateToken".to_string(), "logout".to_string()]
+    fn actions(&self) -> Vec<ActionMetadata> {
+        vec![
+            ActionMetadata { name: "login".to_string() },
+            ActionMetadata { name: "validateToken".to_string() },
+            ActionMetadata { name: "logout".to_string() }
+        ]
     }
 
     async fn init(&mut self, _context: &RequestContext) -> Result<()> {
@@ -200,75 +220,129 @@ impl AbstractService for AuthService {
         match action.as_str() {
             "login" => {
                 if let Some(data) = &request.data {
-                    // Try to extract username and password from Map type
-                    if let ValueType::Map(map) = data {
-                        if let (Some(ValueType::String(username)), Some(ValueType::String(password))) = 
-                            (map.get("username"), map.get("password")) {
-                            return self.login(username, password).await;
-                        }
-                    } else if let ValueType::Json(json_value) = data {
-                        // Also support JSON parameters
-                        let username = json_value.get("username")
-                            .and_then(|v| v.as_str())
-                            .ok_or_else(|| anyhow!("Missing username"))?;
-                        let password = json_value.get("password")
-                            .and_then(|v| v.as_str())
-                            .ok_or_else(|| anyhow!("Missing password"))?;
-                        return self.login(username, password).await;
+                    // Extract username and password
+                    let username = match data {
+                        ValueType::Map(map) => {
+                            if let Some(ValueType::String(username)) = map.get("username") {
+                                username.clone()
+                            } else {
+                                String::new()
+                            }
+                        },
+                        ValueType::Json(json) => {
+                            json.get("username").and_then(|v| v.as_str()).unwrap_or("").to_string()
+                        },
+                        _ => String::new()
+                    };
+                    
+                    let password = match data {
+                        ValueType::Map(map) => {
+                            if let Some(ValueType::String(password)) = map.get("password") {
+                                password.clone()
+                            } else {
+                                String::new()
+                            }
+                        },
+                        ValueType::Json(json) => {
+                            json.get("password").and_then(|v| v.as_str()).unwrap_or("").to_string()
+                        },
+                        _ => String::new()
+                    };
+                    
+                    if username.is_empty() || password.is_empty() {
+                        return Ok(ServiceResponse {
+                            status: ResponseStatus::Error,
+                            message: "Missing username or password".to_string(),
+                            data: None,
+                        });
                     }
-                }
-                // Return a proper error response instead of an Err
-                Ok(ServiceResponse {
-                    status: ResponseStatus::Error,
-                    message: "Invalid username or password".to_string(),
-                    data: None,
-                })
-            },
-            "validateToken" => {
-                if let Some(data) = &request.data {
-                    if let ValueType::Map(map) = data {
-                        if let Some(ValueType::String(token)) = map.get("token") {
-                            return self.validate_token(token).await;
-                        }
-                    } else if let ValueType::Json(json_value) = data {
-                        let token = json_value.get("token")
-                            .and_then(|v| v.as_str())
-                            .ok_or_else(|| anyhow!("Missing token"))?;
-                        return self.validate_token(token).await;
-                    }
+                    
+                    return self.login(&username, &password).await;
                 }
                 
                 Ok(ServiceResponse {
                     status: ResponseStatus::Error,
-                    message: "Invalid token".to_string(),
+                    message: "Missing parameters".to_string(),
                     data: None,
                 })
             },
             "logout" => {
                 if let Some(data) = &request.data {
-                    if let ValueType::Map(map) = data {
-                        if let Some(ValueType::String(token)) = map.get("token") {
-                            return self.logout(token).await;
-                        }
-                    } else if let ValueType::Json(json_value) = data {
-                        let token = json_value.get("token")
-                            .and_then(|v| v.as_str())
-                            .ok_or_else(|| anyhow!("Missing token"))?;
-                        return self.logout(token).await;
+                    // Extract token
+                    let token = match data {
+                        ValueType::Map(map) => {
+                            if let Some(ValueType::String(token)) = map.get("token") {
+                                token.clone()
+                            } else {
+                                String::new()
+                            }
+                        },
+                        ValueType::Json(json) => {
+                            json.get("token").and_then(|v| v.as_str()).unwrap_or("").to_string()
+                        },
+                        ValueType::String(token_str) => token_str.clone(),
+                        _ => String::new()
+                    };
+                    
+                    if token.is_empty() {
+                        return Ok(ServiceResponse {
+                            status: ResponseStatus::Error,
+                            message: "Missing token".to_string(),
+                            data: None,
+                        });
                     }
+                    
+                    return self.logout(&token).await;
                 }
                 
                 Ok(ServiceResponse {
                     status: ResponseStatus::Error,
-                    message: "Invalid token".to_string(),
+                    message: "Missing parameters".to_string(),
                     data: None,
                 })
             },
-            _ => Ok(ServiceResponse {
-                status: ResponseStatus::Error,
-                message: format!("Unknown action: {}", action),
-                data: None,
-            }),
+            "validateToken" => {
+                if let Some(data) = &request.data {
+                    // Extract token
+                    let token = match data {
+                        ValueType::Map(map) => {
+                            if let Some(ValueType::String(token)) = map.get("token") {
+                                token.clone()
+                            } else {
+                                String::new()
+                            }
+                        },
+                        ValueType::Json(json) => {
+                            json.get("token").and_then(|v| v.as_str()).unwrap_or("").to_string()
+                        },
+                        ValueType::String(token_str) => token_str.clone(),
+                        _ => String::new()
+                    };
+                    
+                    if token.is_empty() {
+                        return Ok(ServiceResponse {
+                            status: ResponseStatus::Error,
+                            message: "Missing token".to_string(),
+                            data: None,
+                        });
+                    }
+                    
+                    return self.validate_token(&token).await;
+                }
+                
+                Ok(ServiceResponse {
+                    status: ResponseStatus::Error,
+                    message: "Missing parameters".to_string(),
+                    data: None,
+                })
+            },
+            _ => {
+                Ok(ServiceResponse {
+                    status: ResponseStatus::Error,
+                    message: format!("Unknown action: {}", action),
+                    data: None,
+                })
+            }
         }
     }
 }

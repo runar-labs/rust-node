@@ -2,7 +2,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 use runar_node::services::abstract_service::{AbstractService, ServiceState, ActionMetadata};
 use runar_node::services::ResponseStatus;
-use runar_node::{ServiceRequest, ServiceResponse, ValueType, vmap_extract_f64};
+use runar_node::{ServiceRequest, ServiceResponse};
+use runar_common::types::ValueType;
+use runar_common::vmap_extract_f64;
 
 /// A simple math service for testing purposes
 #[derive(Clone)]
@@ -22,8 +24,14 @@ impl MathService {
     
     /// Handle add operation: adds two numbers
     async fn handle_add(&self, request: ServiceRequest) -> Result<ServiceResponse> {
-        let a = vmap_extract_f64!(request.data, "a", 0.0);
-        let b = vmap_extract_f64!(request.data, "b", 0.0);
+        let a = match &request.data {
+            Some(data) => vmap_extract_f64!(data, "a", 0.0),
+            None => 0.0,
+        };
+        let b = match &request.data {
+            Some(data) => vmap_extract_f64!(data, "b", 0.0),
+            None => 0.0,
+        };
         let result = a + b;
         
         Ok(ServiceResponse {
@@ -35,8 +43,14 @@ impl MathService {
     
     /// Handle subtract operation: subtracts second number from first
     async fn handle_subtract(&self, request: ServiceRequest) -> Result<ServiceResponse> {
-        let a = vmap_extract_f64!(request.data, "a", 0.0);
-        let b = vmap_extract_f64!(request.data, "b", 0.0);
+        let a = match &request.data {
+            Some(data) => vmap_extract_f64!(data, "a", 0.0),
+            None => 0.0,
+        };
+        let b = match &request.data {
+            Some(data) => vmap_extract_f64!(data, "b", 0.0),
+            None => 0.0,
+        };
         let result = a - b;
         
         Ok(ServiceResponse {
@@ -48,8 +62,14 @@ impl MathService {
     
     /// Handle multiply operation: multiplies two numbers
     async fn handle_multiply(&self, request: ServiceRequest) -> Result<ServiceResponse> {
-        let a = vmap_extract_f64!(request.data, "a", 0.0);
-        let b = vmap_extract_f64!(request.data, "b", 0.0);
+        let a = match &request.data {
+            Some(data) => vmap_extract_f64!(data, "a", 0.0),
+            None => 0.0,
+        };
+        let b = match &request.data {
+            Some(data) => vmap_extract_f64!(data, "b", 0.0),
+            None => 0.0,
+        };
         let result = a * b;
         
         Ok(ServiceResponse {
@@ -61,8 +81,14 @@ impl MathService {
     
     /// Handle divide operation: divides first number by second
     async fn handle_divide(&self, request: ServiceRequest) -> Result<ServiceResponse> {
-        let a = vmap_extract_f64!(request.data, "a", 0.0);
-        let b = vmap_extract_f64!(request.data, "b", 1.0);
+        let a = match &request.data {
+            Some(data) => vmap_extract_f64!(data, "a", 0.0),
+            None => 0.0,
+        };
+        let b = match &request.data {
+            Some(data) => vmap_extract_f64!(data, "b", 1.0),
+            None => 1.0,
+        };
         
         if b == 0.0 {
             return Ok(ServiceResponse {

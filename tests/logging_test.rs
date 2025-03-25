@@ -1,9 +1,7 @@
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
-    use runar_node::{RequestContext, ValueType};
     use runar_node::util::logging::{Component, debug_log, info_log, warn_log, error_log};
-    use runar_node::node::DummyNodeRequestHandler;
     use std::sync::Arc;
     use tokio::sync::Mutex;
     use std::collections::HashMap;
@@ -25,16 +23,6 @@ mod tests {
             }
         }
 
-        async fn log(&self, level: &str, message: &str, fields: HashMap<String, String>) {
-            let mut logs = self.logs.lock().await;
-            logs.push((level.to_string(), message.to_string(), fields));
-        }
-
-        async fn get_logs(&self) -> Vec<(String, String, HashMap<String, String>)> {
-            let logs = self.logs.lock().await;
-            logs.clone()
-        }
-
         async fn clear_logs(&self) {
             let mut logs = self.logs.lock().await;
             logs.clear();
@@ -47,6 +35,7 @@ mod tests {
         network_id: String,
         node_id: String,
         peer_id: Option<String>,
+        path: String,
     }
 
     impl TestContext {
@@ -56,6 +45,7 @@ mod tests {
                 network_id: network_id.to_string(),
                 node_id: node_id.to_string(),
                 peer_id: None,
+                path: "test/path".to_string(),
             }
         }
 
@@ -101,13 +91,8 @@ mod tests {
     async fn test_context_aware_logging() -> Result<()> {
         let _logger = setup_test_environment().await;
         
-        // Create a request context with a dummy node handler
-        let node_handler = Arc::new(DummyNodeRequestHandler {});
-        let context = RequestContext::new(
-            "test/path",
-            ValueType::Map(HashMap::new()),
-            node_handler
-        );
+        // Create a simplified test context
+        let context = TestContext::new("req-12345", "net-67890", "node-abcde");
         
         // Log with context information
         info_log(Component::Test, &format!("Context-aware message with path: {}", 

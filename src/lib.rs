@@ -14,7 +14,6 @@ pub mod services;
 pub mod tests;
 pub mod util;
 pub mod web;
-pub mod vmap_macros;
 
 // Import common types from runar_common
 pub use runar_common::types::ValueType;
@@ -53,10 +52,13 @@ pub use crate::init::{Initializer, INITIALIZERS};
 // Re-export macros
 // Use macros from runar_common
 pub use runar_common::implement_from_for_valuetype;
+// Re-export all vmap macros from rust-common
+pub use runar_common::vmap;
+pub use runar_common::vmap_opt;
 pub use runar_common::vmap_extract;
 pub use runar_common::vmap_extract_string;
 pub use runar_common::vmap_extract_i32;
-// pub use runar_common::vmap_extract_f64; // Comment out to use our local implementation
+pub use runar_common::vmap_extract_f64;
 pub use runar_common::vmap_extract_bool;
 
 // Re-export distributed slice attribute if enabled
