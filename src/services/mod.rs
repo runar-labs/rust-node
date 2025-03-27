@@ -16,10 +16,6 @@ use crate::node::NodeConfig;
 // Import types from runar_common
 use runar_common::types::{ValueType, SerializableStruct};
 
-// Import the vmap_opt macro
-#[allow(unused_imports)]
-use crate::vmap_opt;
-
 // Export the abstract service module
 pub mod abstract_service;
 // Export the sqlite service module
@@ -445,7 +441,7 @@ impl ServiceManager {
         // Create a request context for initialization
         let request_context = Arc::new(RequestContext::new_with_option(
             "service_manager".to_string(),
-            vmap_opt! {},
+            None,
             node_handler,
         ));
 
@@ -692,14 +688,6 @@ pub fn to_value_type<T: Serialize>(value: T) -> ValueType {
 /// Helper function to check if a value can be cast to a specific type
 fn option_as<U: 'static>(value: &dyn Any) -> Option<&U> {
     value.downcast_ref::<U>()
-}
-
-/// Utility macro for creating a ValueType from a json! macro
-#[macro_export]
-macro_rules! vjson {
-    ($($json:tt)+) => {
-        runar_common::types::ValueType::from(serde_json::json!($($json)+))
-    };
 }
 
 /// Request context for service requests

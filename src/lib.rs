@@ -48,17 +48,11 @@ pub use crate::p2p::transport::P2PTransport;
 // Re-export initializer types
 pub use crate::init::{Initializer, INITIALIZERS};
 
-// Re-export macros
-// Use macros from runar_common
-pub use runar_common::implement_from_for_valuetype;
-// Re-export all vmap macros from rust-common
+// Re-export common types and macros
+pub use runar_common::types::*;
+pub use runar_common::utils::*;
 pub use runar_common::vmap;
-pub use runar_common::vmap_opt;
-pub use runar_common::vmap_extract;
-pub use runar_common::vmap_extract_string;
-pub use runar_common::vmap_extract_i32;
-pub use runar_common::vmap_extract_f64;
-pub use runar_common::vmap_extract_bool;
+pub use runar_common::vjson;
 
 // Re-export distributed slice attribute if enabled
 #[cfg(feature = "distributed_slice")]
@@ -161,3 +155,7 @@ impl Node {
 pub struct EventType {
     pub data: serde_json::Value,
 }
+
+// Re-export node types
+pub use node::*;
+pub use services::*;

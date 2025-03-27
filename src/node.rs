@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
-use log::info;
+use log::{debug, error, info, warn};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::Path;
@@ -8,7 +9,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use uuid;
 use uuid::Uuid;
-use crate::vmap_opt;
+
 
 use crate::db::SqliteDatabase;
 use crate::p2p::service::P2PRemoteServiceDelegate;
@@ -19,10 +20,11 @@ use crate::services::{
     NodeRequestHandler, RequestContext, ServiceRequest, ServiceResponse,
     SubscriptionOptions, ResponseStatus,
 };
-use crate::services::types::ValueType;
 use crate::services::service_registry::ServiceRegistry;
 use crate::services::node_info::NodeInfoService;
 use runar_common::utils::logging::{Component, debug_log, debug_log_with_data, info_log, error_log, warn_log};
+use runar_common::types::ValueType;
+use runar_common::vmap;
 
 /// Configuration for a Node
 /// Encapsulates all configuration options for a node in one place
@@ -182,7 +184,7 @@ impl NodeRequestHandler for NodeRequestHandlerImpl {
             request_id: None,
             context: Arc::new(RequestContext::new_with_option(
                 format!("{}/{}", service_name, operation),
-                vmap_opt! {},
+                None,
                 Arc::new(NodeRequestHandlerImpl::new(self.service_registry.clone()))
             )),
             metadata: None,
@@ -439,7 +441,7 @@ impl Node {
         // Create a request context for initialization
         let request_context = Arc::new(RequestContext::new_with_option(
             service.name().to_string(),
-            vmap_opt! {},
+            None,
             node_handler,
         ));
 
@@ -513,7 +515,7 @@ impl Node {
         // Create a request context for the request
         let _request_context = Arc::new(RequestContext::new_with_option(
             format!("node_request_{}", uuid::Uuid::new_v4()),
-            vmap_opt! {},
+            None,
             Arc::new(NodeRequestHandlerImpl::new(self.service_registry.clone())),
         ));
         
@@ -562,7 +564,7 @@ impl Node {
         // Create a request context for the request
         let _request_context = Arc::new(RequestContext::new_with_option(
             format!("node_request_{}", uuid::Uuid::new_v4()),
-            vmap_opt! {},
+            None,
             Arc::new(NodeRequestHandlerImpl::new(self.service_registry.clone())),
         ));
         
@@ -616,7 +618,7 @@ impl Node {
         // Create a request context
         let request_context = Arc::new(RequestContext::new_with_option(
             format!("{}/{}", service_name, event_name),
-            vmap_opt! {},
+            None,
             node_handler.clone(),
         ));
 
@@ -651,7 +653,7 @@ impl Node {
         // Create a request context
         let request_context = Arc::new(RequestContext::new_with_option(
             format!("{}/{}", service_name, event_name),
-            vmap_opt! {},
+            None,
             node_handler.clone(),
         ));
 
@@ -711,7 +713,7 @@ impl Node {
         // Create a request context
         let request_context = Arc::new(RequestContext::new_with_option(
             format!("{}/{}", service_name, event_name),
-            vmap_opt! {},
+            None,
             node_handler.clone(),
         ));
 
@@ -885,7 +887,7 @@ where {
                         // Create a request context
                         let _request_context = Arc::new(RequestContext::new_with_option(
                             format!("{}/get_info", service.name()),
-                            vmap_opt! {},
+                            None,
                             node_handler.clone(),
                         ));
 
@@ -896,7 +898,7 @@ where {
                             request_id: Some(Uuid::new_v4().to_string()),
                             path: service_path,
                             action: "get_info".to_string(),
-                            data: vmap_opt! {},
+                            data: None,
                             context: _request_context,
                             metadata: None,
                             topic_path: Some(action_path),
@@ -945,7 +947,7 @@ where {
                                                 request_id: Some(uuid::Uuid::new_v4().to_string()),
                                                 context: Arc::new(RequestContext::new_with_option(
                                                     format!("{}/stop", name),
-                                                    vmap_opt! {},
+                                                    None,
                                                     Arc::new(NodeRequestHandlerImpl::new(registry.clone())),
                                                 )),
                                                 metadata: None,
