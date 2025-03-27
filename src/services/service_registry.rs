@@ -22,7 +22,7 @@ use crate::services::{
     NodeRequestHandler, RequestContext, ServiceRequest, ServiceResponse, ValueType,
 };
 use crate::services::SubscriptionOptions;
-use runar_common::utils::logging::{debug_log, error_log, info_log, Component};
+use runar_common::utils::logging::{debug_log, error_log, info_log, warn_log, Component};
 use crate::p2p::peer_id_convert::CryptoToLibP2pPeerId;
 // Remove the common module imports
 // use crate::common::async_cache::AsyncCache;
@@ -1311,12 +1311,12 @@ impl ServiceRegistry {
             return Err(anyhow!("Invalid path format: {}. Expected service/action", request.path));
         }
         
-        let service_name = path_parts[0];
+        let service_path = path_parts[0];
         let action_name = path_parts[1];
         
         debug_log(
             Component::Registry,
-            &format!("Processing request for service '{}', action '{}'", service_name, action_name)
+            &format!("Processing request for service '{}', action '{}'", service_path, action_name)
         ).await;
         
         // Extract the context and parameters
@@ -1327,12 +1327,12 @@ impl ServiceRegistry {
         // Check if we have a registered action handler
         {
             let action_handlers = self.action_handlers.read().await;
-            let key = (service_name.to_string(), action_name.to_string());
+            let key = (service_path.to_string(), action_name.to_string());
             
             if let Some(entry) = action_handlers.get(&key) {
                 debug_log(
                     Component::Registry,
-                    &format!("Found direct action handler for '{}' in service '{}'", action_name, service_name)
+                    &format!("Found direct action handler for '{}' in service '{}'", action_name, service_path)
                 ).await;
                 
                 // Use the direct handler
@@ -1342,7 +1342,7 @@ impl ServiceRegistry {
                         error_log(
                             Component::Registry,
                             &format!("Action handler '{}' for service '{}' timed out after {:?}", 
-                                action_name, service_name, entry.timeout)
+                                action_name, service_path, entry.timeout)
                         ).await;
                         
                         Err(anyhow!("Action handler timed out"))
@@ -1355,10 +1355,10 @@ impl ServiceRegistry {
         {
             let process_handlers = self.process_handlers.read().await;
             
-            if let Some(entry) = process_handlers.get(service_name) {
+            if let Some(entry) = process_handlers.get(service_path) {
                 debug_log(
             Component::Registry,
-                    &format!("Found direct process handler for service '{}'", service_name)
+                    &format!("Found direct process handler for service '{}'", service_path)
                 ).await;
                 
                 // Use the direct handler
@@ -1368,7 +1368,7 @@ impl ServiceRegistry {
             error_log(
                 Component::Registry,
                             &format!("Process handler for service '{}' operation '{}' timed out after {:?}", 
-                                service_name, action_name, entry.timeout)
+                                service_path, action_name, entry.timeout)
                         ).await;
                         
                         Err(anyhow!("Process handler timed out"))
@@ -1380,17 +1380,17 @@ impl ServiceRegistry {
         // If no direct handler found, fall back to the traditional service lookup
         debug_log(
                                     Component::Registry,
-            &format!("No direct handler found, falling back to service lookup for '{}'", service_name)
+            &format!("No direct handler found, falling back to service lookup for '{}'", service_path)
                                 ).await;
         
         // Get the service from the registry
-        if let Some(service) = self.get_service(service_name).await {
+        if let Some(service) = self.get_service(service_path).await {
             // Call handle_request on the service
             // Extract action from path
             let action = request.path.split('/').collect::<Vec<&str>>().get(1).unwrap_or(&"").to_string();
             
             // Create a proper action path for routing
-            let action_path = TopicPath::new_action(&self.network_id, service_name, &action);
+            let action_path = TopicPath::new_action(&self.network_id, service_path, &action);
             
             let result = Handle::current().block_on(service.handle_request(ServiceRequest {
                 request_id: request.request_id.clone(),
@@ -1406,62 +1406,90 @@ impl ServiceRegistry {
             // Service not found
                                 error_log(
                                     Component::Registry,
-                &format!("Service not found: {}", service_name)
+                &format!("Service not found: {}", service_path)
                                 ).await;
             
-            Err(anyhow!("Service not found: {}", service_name))
+            Err(anyhow!("Service not found: {}", service_path))
         }
     }
 
-    /// Get a service by name
-    pub async fn get_service(&self, name: &str) -> Option<Arc<dyn AbstractService>> {
+    /// Get a service by name or path
+    pub async fn get_service(&self, name_or_path: &str) -> Option<Arc<dyn AbstractService>> {
         // First check our cache
-        if let Some(service) = self.services_cache.get(&name.to_string()).await {
+        if let Some(service) = self.services_cache.get(&name_or_path.to_string()).await {
             return Some(service);
         }
         
         // Then check our registry
         let services = self.services.read().await;
-        if let Some(service) = services.get(name) {
+        
+        // First check if name_or_path is a path in our registry
+        if let Some(service) = services.get(name_or_path) {
             // Cache this for future lookups
-            self.services_cache.set(name.to_string(), service.clone()).await;
+            self.services_cache.set(name_or_path.to_string(), service.clone()).await;
             return Some(service.clone());
+        }
+        
+        // For backward compatibility, check if any service has this as name
+        for (_, service) in services.iter() {
+            if service.name() == name_or_path {
+                // Cache this for future lookups
+                self.services_cache.set(name_or_path.to_string(), service.clone()).await;
+                return Some(service.clone());
+            }
         }
         
         None
     }
-
+    
     /// Get a service by path
     pub async fn get_service_by_path(&self, path: &str) -> Option<Arc<dyn AbstractService>> {
-        // Split the path and get the first part as the service name
+        // Split the path and get the first part as the service path
         let parts: Vec<&str> = path.split('/').collect();
         if parts.is_empty() {
             return None;
         }
         
-        self.get_service(parts[0]).await
+        let service_path = parts[0];
+        self.get_service(service_path).await
     }
+    
+    /// Register a service
+    pub async fn register_service(&self, service: Arc<dyn AbstractService>) -> Result<()> {
+        let service_name = service.name().to_string();
+        let service_path = service.path().to_string();
+        
+        debug_log(
+            Component::Registry,
+            &format!("Registering service: name='{}', path='{}'", service_name, service_path)
+        ).await;
+        
+        // Check for path uniqueness
+        {
+            let services = self.services.read().await;
+            for (existing_path, existing_service) in services.iter() {
+                if existing_path == &service_path && existing_service.name() != service.name() {
+                    warn_log(
+                        Component::Registry,
+                        &format!("Service path conflict: '{}' already used by service '{}', now being registered with '{}'", 
+                                service_path, existing_service.name(), service_name)
+                    ).await;
+                    // Don't fail, just warn for now to maintain backward compatibility
+                }
+            }
+        }
+        
+        // Store in our services map using path as key
+        let mut services = self.services.write().await;
+        services.insert(service_path, service);
 
+        Ok(())
+    }
+    
     /// Get all services in the registry
     pub async fn get_all_services(&self) -> Vec<Arc<dyn AbstractService>> {
         let services = self.services.read().await;
         services.values().cloned().collect()
-    }
-
-    /// Register a remote Service
-    pub async fn register_service(&self, service: Arc<dyn AbstractService>) -> Result<()> {
-        let service_name = service.name().to_string();
-        
-            debug_log(
-            Component::Registry,
-            &format!("Registering service: {}", service_name)
-        ).await;
-        
-        // Store in our services map
-        let mut services = self.services.write().await;
-        services.insert(service_name, service);
-
-        Ok(())
     }
 
     /// Handle a Service Message (from P2P)
@@ -1483,10 +1511,10 @@ impl ServiceRegistry {
                     return Err(anyhow!("Invalid path format: {}", path));
                 }
                 
-                let service = parts[0].to_string();
+                let service_path = parts[0].to_string();
                 let operation = parts[1].to_string();
                 
-                if let Some(service_obj) = self.get_service(&service).await {
+                if let Some(service_obj) = self.get_service_by_path(&service_path).await {
                     // Create a context for the request
                     let context = RequestContext::new_with_option(
                         path.clone(),
@@ -1496,7 +1524,7 @@ impl ServiceRegistry {
                     
                     // Create a service request with metadata and proper topic_path
                     // Create action path for routing
-                    let action_path = TopicPath::new_action(&self.network_id, &service, &operation);
+                    let action_path = TopicPath::new_action(&self.network_id, &service_path, &operation);
                     let request = ServiceRequest {
                         request_id: Some(request_id.clone()),
                         context: Arc::new(context),
@@ -1539,7 +1567,7 @@ impl ServiceRegistry {
                     // Service not found
                     let error_response = ServiceResponse {
                         status: crate::services::ResponseStatus::Error,
-                        message: format!("Service not found: {}", path),
+                        message: format!("Service not found for path: {}", service_path),
                         data: None,
                     };
                     
