@@ -78,7 +78,7 @@ impl RemoteService {
         operations: Vec<String>,
         p2p_transport: Arc<dyn P2PTransport>,
     ) -> Self {
-        info_log(
+        let _ = info_log(
             Component::Service,
             &format!(
                 "Creating RemoteService: name={}, peer_id={:?}",
@@ -153,7 +153,7 @@ impl AbstractService for RemoteService {
     }
 
     async fn handle_request(&self, request: ServiceRequest) -> Result<ServiceResponse> {
-        debug_log(
+        let _ = debug_log(
             Component::Service,
             &format!(
                 "RemoteService processing request: service={}, path={}",

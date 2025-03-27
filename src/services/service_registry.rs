@@ -475,8 +475,8 @@ impl NodeRequestHandler for ServiceRegistry {
             let mut subscribers = self.event_subscribers.write().await;
             
             // Add for the normalized topic path only
-            let normalized_subscribers = subscribers.entry(normalized_topic.clone()).or_insert_with(Vec::new);
-            normalized_subscribers.push(service_name.clone());
+            let normalized_subscribersc = subscribers.entry(normalized_topic.clone()).or_insert_with(Vec::new);
+            normalized_subscribersc.push(service_name.clone());
             
             // We no longer store subscribers for the original topic format
             // since we now enforce strict path formats throughout the system
@@ -1452,6 +1452,13 @@ impl ServiceRegistry {
         
         let service_path = parts[0];
         self.get_service(service_path).await
+    }
+    
+    /// Get a service by TopicPath
+    /// This provides a more structured way to look up services using the TopicPath object
+    /// which already handles proper parsing of network, service, and action/event
+    pub async fn get_service_by_topic_path(&self, topic_path: &TopicPath) -> Option<Arc<dyn AbstractService>> {
+        self.get_service(&topic_path.service_path).await
     }
     
     /// Register a service

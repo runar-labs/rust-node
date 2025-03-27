@@ -2,6 +2,9 @@ use anyhow::{anyhow, Result};
 use base64;
 use rusqlite::{Connection, Row, ToSql};
 use serde_json::Value;
+use crate::services::{ServiceResponse, ValueType};
+use runar_common::errors::{ServiceError, DatabaseError, NetworkError, ConfigError, ConversionError};
+use log::{error, debug};
 
 /// Convert a serde_json::Value to a rusqlite::ToSql implementor
 pub fn json_value_to_sql_value(value: &Value) -> Result<Box<dyn ToSql>> {
@@ -290,4 +293,133 @@ pub fn json_filter_to_sql_where(
     }
 
     Ok((where_clause, params))
+}
+
+/// Extensions to ServiceResponse for better error handling
+pub trait ServiceResponseExt {
+    /// Create an error response from a domain-specific error
+    fn from_error<E: std::fmt::Display + std::fmt::Debug>(err: E) -> Self;
+    
+    /// Create an error response from a domain-specific error with an error code
+    fn from_error_with_code<E: std::fmt::Display + std::fmt::Debug>(err: E, code: i32) -> Self;
+    
+    /// Create an error response from a ServiceError
+    fn from_service_error(err: ServiceError) -> Self;
+    
+    /// Create an error response from a DatabaseError
+    fn from_database_error(err: DatabaseError) -> Self;
+    
+    /// Create an error response from a NetworkError
+    fn from_network_error(err: NetworkError) -> Self;
+    
+    /// Create an error response from a ConfigError
+    fn from_config_error(err: ConfigError) -> Self;
+    
+    /// Create an error response from a ConversionError
+    fn from_conversion_error(err: ConversionError) -> Self;
+    
+    /// Convert a Result<T> to Result<ServiceResponse> using from_error for the Err case
+    fn from_result<T, E>(result: Result<T, E>) -> Result<Self>
+    where
+        T: Into<ValueType>,
+        E: std::fmt::Display + std::fmt::Debug,
+        Self: Sized;
+}
+
+impl ServiceResponseExt for ServiceResponse {
+    fn from_error<E: std::fmt::Display + std::fmt::Debug>(err: E) -> Self {
+        // Log the error with debug information
+        error!("Service error: {}", err);
+        debug!("Error details: {:?}", err);
+        
+        // Create an error response with the display message
+        ServiceResponse::error(err.to_string())
+    }
+    
+    fn from_error_with_code<E: std::fmt::Display + std::fmt::Debug>(err: E, code: i32) -> Self {
+        // Log the error with debug information
+        error!("Service error (code {}): {}", code, err);
+        debug!("Error details: {:?}", err);
+        
+        // Create error data with code
+        let mut error_data = std::collections::HashMap::new();
+        error_data.insert("message".to_string(), ValueType::String(err.to_string()));
+        error_data.insert("code".to_string(), ValueType::Number(code as f64));
+        
+        ServiceResponse {
+            status: crate::services::ResponseStatus::Error,
+            message: err.to_string(),
+            data: Some(ValueType::Map(error_data)),
+        }
+    }
+    
+    fn from_service_error(err: ServiceError) -> Self {
+        // Get an appropriate error code for the service error type
+        let code = match &err {
+            ServiceError::ServiceNotFound(_) => 404,
+            ServiceError::UnsupportedOperation(_, _) => 400,
+            ServiceError::AuthorizationFailed(_, _) => 403,
+            ServiceError::InvalidRequest(_) => 400,
+            ServiceError::Database(_) => 500,
+            ServiceError::Network(_) => 503,
+            ServiceError::Internal(_) => 500,
+            ServiceError::ServiceError(_, _) => 500,
+        };
+        
+        Self::from_error_with_code(err, code)
+    }
+    
+    fn from_database_error(err: DatabaseError) -> Self {
+        // Get an appropriate error code for the database error type
+        let code = match &err {
+            DatabaseError::ConnectionError(_) => 500,
+            DatabaseError::QueryError(_) => 500,
+            DatabaseError::MigrationError(_) => 500,
+            DatabaseError::NotFound(_) => 404,
+            DatabaseError::ConstraintViolation(_) => 409, // Conflict
+            DatabaseError::TransactionError(_) => 500,
+        };
+        
+        Self::from_error_with_code(err, code)
+    }
+    
+    fn from_network_error(err: NetworkError) -> Self {
+        // Get an appropriate error code for the network error type
+        let code = match &err {
+            NetworkError::ConnectionError(_) => 503, // Service Unavailable
+            NetworkError::Timeout(_) => 504, // Gateway Timeout
+            NetworkError::PeerNotFound(_) => 404,
+            NetworkError::ProtocolError(_) => 500,
+            NetworkError::MessageDeliveryError(_) => 500,
+        };
+        
+        Self::from_error_with_code(err, code)
+    }
+    
+    fn from_config_error(err: ConfigError) -> Self {
+        // Get an appropriate error code for the config error type
+        let code = match &err {
+            ConfigError::MissingValue(_) => 500,
+            ConfigError::InvalidValue(_, _) => 500,
+            ConfigError::FileError(_) => 500,
+        };
+        
+        Self::from_error_with_code(err, code)
+    }
+    
+    fn from_conversion_error(err: ConversionError) -> Self {
+        // Always use 400 for conversion errors
+        Self::from_error_with_code(err, 400)
+    }
+    
+    fn from_result<T, E>(result: Result<T, E>) -> Result<Self>
+    where
+        T: Into<ValueType>,
+        E: std::fmt::Display + std::fmt::Debug
+    {
+        match result {
+            Ok(value) => Ok(ServiceResponse::success("Success".to_string(), Some(value.into()))),
+            Err(err) => Ok(Self::from_error(err)),
+        }
+    }
 }

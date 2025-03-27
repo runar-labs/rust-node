@@ -1,5 +1,6 @@
 // Module for path routing components
-mod topic_path;
+pub mod topic_path;
+pub mod path_utils;
 
 // Re-export key components
 pub use topic_path::*;

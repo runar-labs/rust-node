@@ -36,6 +36,8 @@ pub mod anonymous_subscriber;
 pub mod manager;
 // Export the distributed registry module (for macros)
 pub mod distributed_registry;
+// Export the error handling demo module
+pub mod error_handling_demo;
 
 // Re-export service types
 pub use abstract_service::{AbstractService, ServiceMetadata, ServiceState};
@@ -43,6 +45,8 @@ pub use anonymous_subscriber::AnonymousSubscriberService;
 pub use node_info::NodeInfoService;
 pub use remote::{P2PTransport, RemoteService};
 pub use sqlite::SqliteService;
+pub use utils::ServiceResponseExt;
+pub use error_handling_demo::ErrorHandlingDemoService;
 
 // Re-export common types (safely)
 pub mod types {
@@ -604,91 +608,8 @@ impl ServiceManager {
     }
 }
 
-/// Wrapper type for external types to allow implementing traits for them
-pub struct ValueWrapper<T>(pub T);
-
-/// Trait for types that can be converted to ValueType, defined in our crate
-pub trait IntoValueType {
-    /// Convert to ValueType
-    fn into_value_type(self) -> ValueType;
-}
-
-// Implement for primitive types to avoid orphan rule violations
-impl IntoValueType for &str {
-    fn into_value_type(self) -> ValueType {
-        ValueType::String(self.to_string())
-    }
-}
-
-impl IntoValueType for String {
-    fn into_value_type(self) -> ValueType {
-        ValueType::String(self)
-    }
-}
-
-impl IntoValueType for i64 {
-    fn into_value_type(self) -> ValueType {
-        ValueType::Number(self as f64)
-    }
-}
-
-impl IntoValueType for f64 {
-    fn into_value_type(self) -> ValueType {
-        ValueType::Number(self)
-    }
-}
-
-impl IntoValueType for bool {
-    fn into_value_type(self) -> ValueType {
-        ValueType::Bool(self)
-    }
-}
-
-/// Helper function to convert a value to ValueType
-/// This is used by the vmap! macro
-pub fn to_value_type<T: Serialize>(value: T) -> ValueType {
-    // Convert the value to a JSON Value first
-    let json_value = match serde_json::to_value(&value) {
-        Ok(v) => v,
-        Err(_) => return ValueType::Null,
-    };
-    
-    // Then convert to ValueType
-    match json_value {
-        serde_json::Value::Null => ValueType::Null,
-        serde_json::Value::Bool(b) => ValueType::Bool(b),
-        serde_json::Value::Number(n) => {
-            if let Some(f) = n.as_f64() {
-                ValueType::Number(f)
-            } else {
-                ValueType::Null
-            }
-        },
-        serde_json::Value::String(s) => ValueType::String(s),
-        serde_json::Value::Array(arr) => {
-            let values: Vec<ValueType> = arr.into_iter()
-                .map(|v| {
-                    // Convert each element recursively
-                    to_value_type(v)
-                })
-                .collect();
-            ValueType::Array(values)
-        },
-        serde_json::Value::Object(obj) => {
-            let mut map = HashMap::new();
-            for (k, v) in obj {
-                // Convert each value recursively
-                map.insert(k, to_value_type(v));
-            }
-            ValueType::Map(map)
-        },
-    }
-}
-
-/// Helper function to check if a value can be cast to a specific type
-fn option_as<U: 'static>(value: &dyn Any) -> Option<&U> {
-    value.downcast_ref::<U>()
-}
+// Re-export value conversion utilities from rust-common
+pub use runar_common::utils::to_value_type;
 
 /// Request context for service requests
 ///

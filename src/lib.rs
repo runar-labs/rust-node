@@ -31,7 +31,7 @@ use crate::services::service_registry::ServiceRegistry;
 pub use crate::ipc::init_ipc_server;
 
 // Re-export important types and traits for macros and external use
-pub use crate::node::NodeConfig;
+pub use crate::node::{Node, NodeConfig};
 pub use crate::routing::{TopicPath, PathType};
 pub use crate::services::{
     RequestContext, ResponseStatus, ServiceRequest, ServiceResponse,
@@ -49,7 +49,6 @@ pub use crate::p2p::transport::P2PTransport;
 pub use crate::init::{Initializer, INITIALIZERS};
 
 // Re-export common types and macros
-pub use runar_common::types::*;
 pub use runar_common::utils::*;
 pub use runar_common::vmap;
 pub use runar_common::vjson;
@@ -78,7 +77,8 @@ pub async fn init_node(config_dir: PathBuf) -> Result<Arc<node::Node>> {
         config_dir.to_str().unwrap_or("."),
         config_dir.to_str().unwrap_or("."),
     );
-    let node = node::Node::new(node_config).await?;
+    let mut node = node::Node::new(node_config).await?;
+    node.init().await?;
 
     Ok(Arc::new(node))
 }
@@ -118,44 +118,14 @@ pub async fn start_node(config: node::NodeConfig) -> Result<node::Node> {
     Ok(node)
 }
 
-pub struct Node {
-    db: Arc<SqliteDatabase>,
-    network_id: String,
-    service_registry: Arc<ServiceRegistry>,
-}
-
-impl Node {
-    pub async fn new(db_path: impl Into<PathBuf>, network_id: impl Into<String>) -> Result<Self> {
-        let db = Arc::new(SqliteDatabase::new(db_path.into().to_str().unwrap_or(":memory:")).await?);
-        let network_id = network_id.into();
-        let service_registry = Arc::new(ServiceRegistry::new(&network_id));
-
-        Ok(Self {
-            db,
-            network_id,
-            service_registry,
-        })
-    }
-
-    pub fn db(&self) -> Arc<SqliteDatabase> {
-        self.db.clone()
-    }
-
-    pub fn network_id(&self) -> &str {
-        &self.network_id
-    }
-
-    pub fn service_registry(&self) -> Arc<ServiceRegistry> {
-        self.service_registry.clone()
-    }
-}
-
 // EventType definition for macro tests
 #[derive(Clone, Debug)]
 pub struct EventType {
     pub data: serde_json::Value,
 }
 
-// Re-export node types
-pub use node::*;
-pub use services::*;
+// Re-export remaining node types
+pub use crate::node::NodeRequestHandlerImpl;
+// Be selective about what to re-export from services to avoid conflicts
+pub use crate::services::ServiceManager;
+pub use crate::services::NodeRequestHandler;

@@ -1,6 +1,5 @@
 use anyhow::{anyhow, Result};
-use log::{debug, error, info, warn};
-use serde::{Deserialize, Serialize};
+use log::info;
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::Path;
@@ -24,7 +23,6 @@ use crate::services::service_registry::ServiceRegistry;
 use crate::services::node_info::NodeInfoService;
 use runar_common::utils::logging::{Component, debug_log, debug_log_with_data, info_log, error_log, warn_log};
 use runar_common::types::ValueType;
-use runar_common::vmap;
 
 /// Configuration for a Node
 /// Encapsulates all configuration options for a node in one place
@@ -141,6 +139,46 @@ impl NodeRequestHandlerImpl {
     pub fn new(service_registry: Arc<ServiceRegistry>) -> Self {
         Self { service_registry }
     }
+
+    async fn request(&self, service_name: String, operation: String, params: Option<ValueType>) -> Result<ServiceResponse> {
+        let _ = debug_log(
+            Component::Node,
+            &format!(
+                "NodeRequestHandlerImpl::request - Service: {}, Operation: {}",
+                service_name, operation
+            ),
+        );
+        
+        // Get a reference to the service with fallback to error
+        let service = match self.service_registry.get_service(&service_name).await {
+            Some(service) => service,
+            None => {
+                return Ok(ServiceResponse::error(format!("Service not found: {}", service_name)));
+            }
+        };
+        
+        // Create a simple topic path for the request (without using network_id)
+        let action_path = TopicPath::new_action("", &service_name, &operation); // Network ID not needed here
+        
+        // Create the request
+        let request = ServiceRequest {
+            path: service_name.clone(),
+            action: operation.clone(),
+            data: params,
+            request_id: None,
+            // Create RequestContext with proper parameters
+            context: Arc::new(RequestContext::new(
+                format!("{}/{}", service_name, operation),
+                ValueType::Map(HashMap::new()),
+                Arc::new(NodeRequestHandlerImpl::new(self.service_registry.clone()))
+            )),
+            metadata: None,
+            topic_path: Some(action_path),
+        };
+        
+        // Handle the request
+        service.handle_request(request).await
+    }
 }
 
 #[async_trait::async_trait]
@@ -165,7 +203,7 @@ impl NodeRequestHandler for NodeRequestHandlerImpl {
         let service_name = parts[0].to_string();
         let operation = parts[1].to_string();
 
-        debug_log(
+        let _ = debug_log(
             Component::Node,
             &format!(
                 "NodeRequestHandlerImpl::request - Service: {}, Operation: {}",
@@ -377,7 +415,7 @@ impl Node {
         // If bootstrap nodes are configured, connect to them automatically
         if let Some(bootstrap_nodes) = &self.config.bootstrap_nodes {
             for bootstrap_addr in bootstrap_nodes {
-                debug_log(
+                let _ = debug_log(
                     Component::Node,
                     &format!("Connecting to bootstrap node: {}", bootstrap_addr),
                 );
@@ -386,7 +424,7 @@ impl Node {
                 let connect_result = p2p_transport.connect(bootstrap_addr).await;
                 match connect_result {
                     Ok(_) => {
-                        info_log(
+                        let _ = info_log(
                             Component::Node,
                             &format!(
                                 "Successfully connected to bootstrap node: {}",
@@ -395,7 +433,7 @@ impl Node {
                         );
                     }
                     Err(e) => {
-                        warn_log(
+                        let _ = warn_log(
                             Component::Node,
                             &format!(
                                 "Failed to connect to bootstrap node {}: {}",
@@ -449,6 +487,9 @@ impl Node {
         info!("Initializing service: {}", service.name());
         service.init(&request_context).await?;
 
+        //TODO: service start shuold only happen after node starts is complete.; 
+        //so if a service is added before node starts,. which is possible, we need to handle this scenarion.
+        //they shuold be registered, but not started until the node starts.
         info!("Starting service: {}", service.name());
         service.start().await?;
 
@@ -513,44 +554,30 @@ impl Node {
         let action = topic_path.action_or_event.clone();
         
         // Create a request context for the request
-        let _request_context = Arc::new(RequestContext::new_with_option(
+        let request_context = Arc::new(RequestContext::new_with_option(
             format!("node_request_{}", uuid::Uuid::new_v4()),
             None,
             Arc::new(NodeRequestHandlerImpl::new(self.service_registry.clone())),
         ));
         
-        // Handle direct data values (non-Map ValueType)
-        let processed_data = match &data_value {
-            ValueType::Map(_) => {
-                // Already a map, use as is
-                data_value
-            },
-            _ => {
-                // For any other ValueType, we need to wrap it in a data map
-                let param_name = "data".to_string(); // Convert to String for correct HashMap key type
-                
-                // Create a map with the single parameter
-                let mut data_map = HashMap::new();
-                data_map.insert(param_name, data_value);
-                ValueType::Map(data_map)
-            }
-        };
+        // Handle ValueTypes properly without unnecessary wrapping
+        // We don't need to wrap ValueType variants in a map
+        let processed_data = data_value;
         
         let request = ServiceRequest {
             path: service_name.clone(),
             action: action.clone(),
-            data: Some(processed_data.clone()),
+            data: Some(processed_data),
             //TODO: we need request_id, should not be None here
             request_id: None,
-            context: _request_context,
+            context: request_context,
             metadata: None,
-            topic_path: Some(topic_path),
+            topic_path: Some(topic_path.clone()),
         };
         
         // Find the target service
-        //TODO: get_service_by_path shuod take topic_path as the parameter.. not the service name.
-        //ergistry needs to us the topic_path to find the service
-        if let Some(_service) = self.service_registry.get_service_by_path(&service_name).await {
+        // Use the TopicPath directly instead of extracting service_name
+        if let Some(_service) = self.service_registry.get_service_by_topic_path(&topic_path).await {
             // Call the service
             _service.handle_request(request).await
         } else {
@@ -562,7 +589,7 @@ impl Node {
     /// Make a node request with any parameters
     pub async fn node_request(&self, params: ValueType) -> Result<ServiceResponse> {
         // Create a request context for the request
-        let _request_context = Arc::new(RequestContext::new_with_option(
+        let request_context = Arc::new(RequestContext::new_with_option(
             format!("node_request_{}", uuid::Uuid::new_v4()),
             None,
             Arc::new(NodeRequestHandlerImpl::new(self.service_registry.clone())),
@@ -575,7 +602,7 @@ impl Node {
             action: "info".to_string(),
             data: Some(params),
             request_id: None,
-            context: _request_context,
+            context: request_context,
             metadata: None,
             topic_path: Some(action_path),
         };
@@ -599,28 +626,12 @@ impl Node {
         let topic_str = topic.into();
         let data_value = data.into();
 
-        // Parse the topic into service name and event name (similar to request path)
-        // Format should be "serviceName/eventName"
-        let parts: Vec<&str> = topic_str.split('/').collect();
-
-        if parts.is_empty() {
-            return Err(anyhow!(
-                "Invalid topic format. Expected 'serviceName/eventName'"
-            ));
-        }
-
-        let service_name = parts[0];
-        let event_name = if parts.len() > 1 { parts[1] } else { "" };
-
+        // Parse topic to validate it, but we don't need to use the result
+        // Adding underscore prefix to indicate it's intentionally unused
+        let _topic_path = crate::routing::path_utils::parse_topic(&topic_str, &self.config.network_id)?;
+        
         // Create a node handler reference for the request context with the correct network ID
         let node_handler = Arc::new(NodeRequestHandlerImpl::new(self.service_registry.clone()));
-
-        // Create a request context
-        let request_context = Arc::new(RequestContext::new_with_option(
-            format!("{}/{}", service_name, event_name),
-            None,
-            node_handler.clone(),
-        ));
 
         // Delegate to the node handler's publish method
         node_handler.publish(topic_str, data_value).await
@@ -634,25 +645,15 @@ impl Node {
         let topic_str = topic.into();
         let callback_box = Box::new(callback);
 
-        // Parse the topic into service name and event name (similar to request path)
-        // Format should be "serviceName/eventName"
-        let parts: Vec<&str> = topic_str.split('/').collect();
-
-        if parts.is_empty() {
-            return Err(anyhow!(
-                "Invalid topic format. Expected 'serviceName/eventName'"
-            ));
-        }
-
-        let service_name = parts[0];
-        let event_name = if parts.len() > 1 { parts[1] } else { "" };
-
+        // Use utility function to parse topic into TopicPath
+        let topic_path = crate::routing::path_utils::parse_topic(&topic_str, &self.config.network_id)?;
+        
         // Create a node handler reference for the request context with the correct network ID
         let node_handler = Arc::new(NodeRequestHandlerImpl::new(self.service_registry.clone()));
 
         // Create a request context
         let request_context = Arc::new(RequestContext::new_with_option(
-            format!("{}/{}", service_name, event_name),
+            format!("{}/{}", topic_path.service_path, topic_path.action_or_event),
             None,
             node_handler.clone(),
         ));
@@ -694,25 +695,15 @@ impl Node {
         let topic_str = topic.into();
         let callback_box = Box::new(callback);
 
-        // Parse the topic into service name and event name (similar to request path)
-        // Format should be "serviceName/eventName"
-        let parts: Vec<&str> = topic_str.split('/').collect();
-
-        if parts.is_empty() {
-            return Err(anyhow!(
-                "Invalid topic format. Expected 'serviceName/eventName'"
-            ));
-        }
-
-        let service_name = parts[0];
-        let event_name = if parts.len() > 1 { parts[1] } else { "" };
-
+        // Use utility function to parse topic into TopicPath
+        let topic_path = crate::routing::path_utils::parse_topic(&topic_str, &self.config.network_id)?;
+        
         // Create a node handler reference for the request context with the correct network ID
         let node_handler = Arc::new(NodeRequestHandlerImpl::new(self.service_registry.clone()));
 
         // Create a request context
         let request_context = Arc::new(RequestContext::new_with_option(
-            format!("{}/{}", service_name, event_name),
+            format!("{}/{}", topic_path.service_path, topic_path.action_or_event),
             None,
             node_handler.clone(),
         ));
@@ -964,7 +955,7 @@ where {
                                             }
 
                                             // Log the cleanup
-                                            info_log(
+                                            let _ = info_log(
                                                 Component::Node,
                                                 &format!(
                                                     "Cleaned up expired anonymous service: {}",
@@ -979,7 +970,7 @@ where {
                             }
                             Err(e) => {
                                 // Log the error but continue processing other services
-                                error_log(
+                                let _ = error_log(
                                     Component::Node,
                                     &format!("Error checking anonymous service status: {}", e),
                                 ).await;
@@ -989,7 +980,7 @@ where {
                 }
 
                 if removed_count > 0 {
-                    info_log(
+                    let _ = info_log(
                         Component::Node,
                         &format!("Cleaned up {} expired anonymous services", removed_count),
                     ).await;

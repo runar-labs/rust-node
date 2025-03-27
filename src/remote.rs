@@ -1,7 +1,7 @@
 use crate::p2p::crypto::PeerId;
 use crate::services::abstract_service::{AbstractService, ServiceMetadata, ServiceState};
 use crate::services::{RequestContext, ServiceRequest, ServiceResponse, ValueType};
-use crate::logging::{debug, info, warn, error};
+use runar_common::utils::logging::{Component, debug_log, info_log, warn_log, error_log};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde_json::json;
@@ -61,10 +61,10 @@ impl RemoteService {
         operations: Vec<String>,
         p2p_transport: Arc<dyn P2PTransport>,
     ) -> Self {
-        info!("Creating RemoteService", context = None,
-            "name" => &name,
-            "peer_id" => format!("{:?}", peer_id)
-        );
+        info_log(
+            Component::Service,
+            &format!("Creating RemoteService: name={}, peer_id={:?}", name, peer_id)
+        ).unwrap_or_default();
 
         RemoteService {
             name,
@@ -112,61 +112,68 @@ impl AbstractService for RemoteService {
         }
     }
 
-    async fn init(&mut self, context: &RequestContext) -> Result<()> {
-        info!("Initializing RemoteService", context,
-            "name" => &self.name,
-            "peer_id" => format!("{:?}", self.peer_id)
-        );
+    async fn init(&mut self, _context: &RequestContext) -> Result<()> {
+        info_log(
+            Component::Service,
+            &format!("Initializing RemoteService: name={}, peer_id={:?}", self.name, self.peer_id)
+        ).await;
+        
         *self.state.lock().unwrap() = ServiceState::Initialized;
         Ok(())
     }
 
     async fn start(&mut self) -> Result<()> {
-        info!("Starting RemoteService", context = None,
-            "name" => &self.name,
-            "peer_id" => format!("{:?}", self.peer_id)
-        );
+        info_log(
+            Component::Service,
+            &format!("Starting RemoteService: name={}, peer_id={:?}", self.name, self.peer_id)
+        ).await;
+        
         *self.state.lock().unwrap() = ServiceState::Running;
         Ok(())
     }
 
     async fn stop(&mut self) -> Result<()> {
-        info!("Stopping RemoteService", context = None,
-            "name" => &self.name,
-            "peer_id" => format!("{:?}", self.peer_id)
-        );
+        info_log(
+            Component::Service,
+            &format!("Stopping RemoteService: name={}, peer_id={:?}", self.name, self.peer_id)
+        ).await;
+        
         *self.state.lock().unwrap() = ServiceState::Stopped;
         Ok(())
     }
 
     async fn handle_request(&self, request: ServiceRequest) -> Result<ServiceResponse> {
-        debug!("Forwarding request to remote peer", &request.context, 
-            "service" => &self.name,
-            "path" => &request.path,
-            "action" => &request.action,
-            "peer_id" => format!("{:?}", self.peer_id)
-        );
+        debug_log(
+            Component::Service,
+            &format!(
+                "RemoteService processing request: service={}, path={}",
+                self.name, request.path
+            )
+        ).await;
 
         // Forward the request to the remote peer via P2P
         let result = self.p2p_transport.send_request(
             self.peer_id.clone(),
-            request.path,
+            request.path.clone(),
             request.data.unwrap_or(ValueType::Null),
         ).await;
         
         if let Err(ref e) = result {
-            error!("Failed to forward request to remote peer", &request.context,
-                "service" => &self.name,
-                "path" => &request.path,
-                "peer_id" => format!("{:?}", self.peer_id),
-                "error" => e.to_string()
-            );
+            error_log(
+                Component::Service,
+                &format!(
+                    "Failed to forward request to remote peer: service={}, path={}, peer_id={:?}, error={}",
+                    self.name, request.path, self.peer_id, e
+                )
+            ).await;
         } else {
-            debug!("Successfully forwarded request to remote peer", &request.context,
-                "service" => &self.name,
-                "path" => &request.path,
-                "peer_id" => format!("{:?}", self.peer_id)
-            );
+            debug_log(
+                Component::Service,
+                &format!(
+                    "Successfully forwarded request to remote peer: service={}, path={}, peer_id={:?}",
+                    self.name, request.path, self.peer_id
+                )
+            ).await;
         }
         
         result
