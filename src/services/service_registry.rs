@@ -406,7 +406,7 @@ impl NodeRequestHandler for ServiceRegistry {
     ) -> Result<String> {
         // Create default options
         let options = crate::services::SubscriptionOptions::default();
-        self.subscribe_with_options(topic, callback, options).await
+        self.subscribe_with_options(topic, callback, options)
     }
     
     async fn subscribe_with_options(
@@ -422,28 +422,13 @@ impl NodeRequestHandler for ServiceRegistry {
                 tp.path_type = PathType::Event;
                 tp
             },
-            Err(e) => {
+            Err(_) => {
                 // No legacy compatibility - enforce strict path format
-                error_log(
-                    Component::Service,
-                    &format!("Error: Invalid topic format for subscription: '{}'. Events must use proper path format: '<network>:<service>/<event>'", topic)
-                ).await;
-
-                // Throw an error - no backwards compatibility
                 return Err(anyhow!("Invalid topic format for subscription: '{}'. Events must use proper path format: '<network>:<service>/<event>'", topic));
             }
         };
         
         let normalized_topic = topic_path.to_string();
-        
-        debug_log(
-            Component::Service,
-            &format!("Subscribing to topic: {} (parsed as {}) with options: {:?}", 
-                    topic, normalized_topic, options)
-        ).await;
-        
-        // Additional debug logging
-        println!("[DEBUG] Storing subscription with normalized topic: '{}'", normalized_topic);
         
         // Generate a unique subscription ID
         let subscription_id = options.id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -451,32 +436,48 @@ impl NodeRequestHandler for ServiceRegistry {
         // Make up a service name from the subscription ID
         let service_name = format!("subscription_{}", subscription_id);
         
-        // Store the callback using only the normalized topic path
-        // Convert the async callback to a sync one by spawning a task
-        {
-            let mut callbacks = self.event_callbacks.write().await;
-            let service_callbacks = callbacks.entry(service_name.clone()).or_insert_with(Vec::new);
-            
-            // Create an adapter that converts the async callback to a sync one
-            let adapter = move |value: ValueType| -> Result<()> {
-                let fut = callback(value);
-                // Just return a successful result - the async callback will handle any errors
-                // and we're not waiting for it here
-                Ok(())
-            };
-            
-            // Store the callback with the normalized topic path only
-            service_callbacks.push((normalized_topic.clone(), Box::new(adapter)));
-        }
+        // Create an adapter that converts the async callback to a sync one
+        let adapter = move |value: ValueType| -> Result<()> {
+            let fut = callback(value);
+            // Just return a successful result - the async callback will handle any errors
+            // and we're not waiting for it here
+            Ok(())
+        };
         
-        // Add to subscribers using only the normalized topic path
-        {
-            let mut subscribers = self.event_subscribers.write().await;
+        // Clone everything we need for the background task
+        let registry = self.clone();
+        let topic_clone = topic.clone();
+        let normalized_topic_clone = normalized_topic.clone();
+        let service_name_clone = service_name.clone();
+        let adapter_clone = Box::new(adapter.clone());
+        
+        // Spawn a background task to handle the async operations
+        tokio::spawn(async move {
+            // Debug logging in the background
+            debug_log(
+                Component::Service,
+                &format!("Subscribing to topic: {} (parsed as {}) with options: {:?}", 
+                        topic_clone, normalized_topic_clone, options)
+            ).await;
             
-            // Add for the normalized topic path only
-            let normalized_subscribersc = subscribers.entry(normalized_topic.clone()).or_insert_with(Vec::new);
-            normalized_subscribersc.push(service_name.clone());
-        }
+            // Store the callback using only the normalized topic path
+            {
+                let mut callbacks = registry.event_callbacks.write().await;
+                let service_callbacks = callbacks.entry(service_name_clone.clone()).or_insert_with(Vec::new);
+                
+                // Store the callback with the normalized topic path only
+                service_callbacks.push((normalized_topic_clone.clone(), adapter_clone));
+            }
+            
+            // Add to subscribers using only the normalized topic path
+            {
+                let mut subscribers = registry.event_subscribers.write().await;
+                
+                // Add for the normalized topic path only
+                let normalized_subscribersc = subscribers.entry(normalized_topic_clone.clone()).or_insert_with(Vec::new);
+                normalized_subscribersc.push(service_name_clone.clone());
+            }
+        });
         
         // Handle expiration logic if needed
         if let Some(duration) = options.ttl {

@@ -186,80 +186,38 @@ impl NodeRequestHandlerImpl {
 #[async_trait::async_trait]
 impl NodeRequestHandler for NodeRequestHandlerImpl {
     async fn request(&self, path: String, params: ValueType) -> Result<ServiceResponse> {
-        debug_log(Component::Node, &format!("NodeRequestHandlerImpl::request - Path: {}", path)).await;
-        debug_log_with_data(
-            Component::Node,
-            "NodeRequestHandlerImpl::request - Params",
-            &params,
-        );
-
-        // Parse the path into service name and operation
-        // Format should be "serviceName/operation"
+        // Extract service name and operation from the path
         let parts: Vec<&str> = path.split('/').collect();
-        if parts.len() != 2 {
-            return Err(anyhow!(
-                "Invalid path format, expected 'serviceName/operation'"
-            ));
+        if parts.len() < 2 {
+            return Err(anyhow!("Invalid path format: {}", path));
         }
 
         let service_name = parts[0].to_string();
         let operation = parts[1].to_string();
 
-        let _ = debug_log(
-            Component::Node,
-            &format!(
-                "NodeRequestHandlerImpl::request - Service: {}, Operation: {}",
-                service_name, operation
-            ),
-        );
+        // Create empty params if None is provided
+        let params = Some(params).unwrap_or(ValueType::Null);
 
-        // Create a service request with topic_path for proper routing
-        // Get the network_id from the service registry since NodeRequestHandlerImpl doesn't have config
-        let network_id = self.service_registry.get_network_id().await;
-        let action_path = TopicPath::new_action(&network_id, &service_name, &operation);
-        let request = ServiceRequest {
-            path: service_name.clone(),
-            action: operation.clone(),
-            data: Some(params),
-            request_id: None,
-            context: Arc::new(RequestContext::new_with_option(
-                format!("{}/{}", service_name, operation),
-                None,
-                Arc::new(NodeRequestHandlerImpl::new(self.service_registry.clone()))
-            )),
-            metadata: None,
-            topic_path: Some(action_path),
-        };
-
-        // Call the service through the registry
-        if let Some(service) = self.service_registry.get_service(&service_name).await {
-            service.handle_request(request).await
-        } else {
-            Ok(ServiceResponse::error(format!("Service not found: {}", service_name)))
-        }
+        // Call the utility function
+        self.request(service_name, operation, Some(params)).await
     }
 
     async fn publish(&self, topic: String, data: ValueType) -> Result<()> {
-        // Debug logging for troubleshooting
-        println!("[DEBUG] NodeRequestHandlerImpl::publish called with topic: '{}'", topic);
-        
-        // Keep the original topic as is - don't split it
-        // The ServiceRegistry will properly parse it using TopicPath
-        println!("[DEBUG] Calling registry.publish with full topic path: '{}'", topic);
+        // Parse the topic and data, and publish the event
+        // We do this by making a request to the service registry
         self.service_registry.publish(topic, data).await
     }
 
-    async fn subscribe(
+    fn subscribe(
         &self,
         topic: String,
         callback: Box<dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
     ) -> Result<String> {
         // Use default subscription options
         self.subscribe_with_options(topic, callback, SubscriptionOptions::default())
-            .await
     }
-
-    async fn subscribe_with_options(
+    
+    fn subscribe_with_options(
         &self,
         topic: String,
         callback: Box<dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
@@ -271,7 +229,7 @@ impl NodeRequestHandler for NodeRequestHandlerImpl {
         // Pass the full topic directly to the service registry
         // The registry will parse it correctly using TopicPath
         println!("[DEBUG] Calling registry.subscribe_with_options with full topic: '{}'", topic);
-        self.service_registry.subscribe_with_options(topic, callback, options).await
+        self.service_registry.subscribe_with_options(topic, callback, options)
     }
 
     async fn unsubscribe(&self, topic: String, subscription_id: Option<&str>) -> Result<()> {
@@ -640,7 +598,7 @@ impl Node {
     }
 
     /// Subscribe to events on a topic
-    pub async fn subscribe<T: Into<String>, F>(&self, topic: T, callback: F) -> Result<String>
+    pub fn subscribe<T: Into<String>, F>(&self, topic: T, callback: F) -> Result<String>
     where
         F: Fn(ValueType) -> Result<()> + Send + Sync + 'static,
     {
@@ -660,40 +618,68 @@ impl Node {
             node_handler.clone(),
         ));
 
-        // Create an anonymous service to handle this subscription
-        // This ensures all subscribers are tied to a service to maintain architectural consistency
-        let mut anonymous_service =
-            crate::services::AnonymousSubscriberService::new(&self.config.network_id, &topic_str);
+        // Clone necessary data for background tasks
+        let service_registry = self.service_registry.clone();
+        let network_id = self.config.network_id.clone();
+        let topic_str_clone = topic_str.clone();
 
-        // Initialize and start the service
-        anonymous_service.init(&request_context).await?;
-        anonymous_service.start().await?;
+        // Spawn a task to handle the async initialization and registration of the anonymous service
+        tokio::spawn(async move {
+            // Create an anonymous service to handle this subscription
+            // This ensures all subscribers are tied to a service to maintain architectural consistency
+            let mut anonymous_service =
+                crate::services::AnonymousSubscriberService::new(&network_id, &topic_str_clone);
 
-        // Register the service with the registry
-        let service_arc = Arc::new(anonymous_service);
-        self.service_registry
-            .register_service(service_arc.clone())
-            .await?;
+            // Initialize and start the service
+            if let Err(e) = anonymous_service.init(&request_context).await {
+                error_log(
+                    Component::Node,
+                    &format!("Error initializing anonymous service: {:?}", e)
+                ).await;
+                return;
+            }
 
-        // Get the anonymous service name (which is generated with a UUID)
-        let anonymous_service_name = service_arc.name().to_string();
+            if let Err(e) = anonymous_service.start().await {
+                error_log(
+                    Component::Node,
+                    &format!("Error starting anonymous service: {:?}", e)
+                ).await;
+                return;
+            }
+
+            // Register the service with the registry
+            let service_arc = Arc::new(anonymous_service);
+            if let Err(e) = service_registry.register_service(service_arc.clone()).await {
+                error_log(
+                    Component::Node,
+                    &format!("Error registering anonymous service: {:?}", e)
+                ).await;
+            }
+        });
 
         // Create a wrapper that converts the synchronous callback to an async one
+        // We need to use Arc to make the callback shareable and implement Fn
+        let callback_arc = Arc::new(callback_box);
         let wrapper = Box::new(move |value: ValueType| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
-            let cb = callback_box.clone();
+            // Use a clone of the Arc instead of moving the callback_box
+            let cb = callback_arc.clone();
             Box::pin(async move {
-                cb(value)
+                (*cb)(value)
             })
         });
 
-        // Register the subscription with the anonymous service name using the provided options
-        self.service_registry
-            .subscribe(anonymous_service_name, wrapper)
-            .await
-    }
+        // Register the subscription with a temporary service name
+        // The background task will update with the actual service name once it's ready
+        let subscription_id = format!("temp_{}", uuid::Uuid::new_v4().to_string());
+        let anonymous_service_name = format!("anonymous_subscriber_{}", subscription_id);
 
+        // Register the subscription with the anonymous service name using the provided options
+        // This is now synchronous
+        self.service_registry.subscribe(anonymous_service_name, wrapper)
+    }
+    
     /// Subscribe to events on a topic with options
-    pub async fn subscribe_with_options<T: Into<String>, F>(
+    pub fn subscribe_with_options<T: Into<String>, F>(
         &self,
         topic: T,
         callback: F,
@@ -718,40 +704,68 @@ impl Node {
             node_handler.clone(),
         ));
 
-        // Create an anonymous service to handle this subscription
-        // This ensures all subscribers are tied to a service to maintain architectural consistency
-        let mut anonymous_service =
-            crate::services::AnonymousSubscriberService::new(&self.config.network_id, &topic_str);
+        // Clone necessary data for background tasks
+        let service_registry = self.service_registry.clone();
+        let network_id = self.config.network_id.clone();
+        let topic_str_clone = topic_str.clone();
 
-        // Initialize and start the service
-        anonymous_service.init(&request_context).await?;
-        anonymous_service.start().await?;
+        // Spawn a task to handle the async initialization and registration of the anonymous service
+        tokio::spawn(async move {
+            // Create an anonymous service to handle this subscription
+            // This ensures all subscribers are tied to a service to maintain architectural consistency
+            let mut anonymous_service =
+                crate::services::AnonymousSubscriberService::new(&network_id, &topic_str_clone);
 
-        // Register the service with the registry
-        let service_arc = Arc::new(anonymous_service);
-        self.service_registry
-            .register_service(service_arc.clone())
-            .await?;
+            // Initialize and start the service
+            if let Err(e) = anonymous_service.init(&request_context).await {
+                error_log(
+                    Component::Node,
+                    &format!("Error initializing anonymous service: {:?}", e)
+                ).await;
+                return;
+            }
 
-        // Get the anonymous service name (which is generated with a UUID)
-        let anonymous_service_name = service_arc.name().to_string();
+            if let Err(e) = anonymous_service.start().await {
+                error_log(
+                    Component::Node,
+                    &format!("Error starting anonymous service: {:?}", e)
+                ).await;
+                return;
+            }
+
+            // Register the service with the registry
+            let service_arc = Arc::new(anonymous_service);
+            if let Err(e) = service_registry.register_service(service_arc.clone()).await {
+                error_log(
+                    Component::Node,
+                    &format!("Error registering anonymous service: {:?}", e)
+                ).await;
+            }
+        });
 
         // Create a wrapper that converts the synchronous callback to an async one
+        // We need to use Arc to make the callback shareable and implement Fn
+        let callback_arc = Arc::new(callback_box);
         let wrapper = Box::new(move |value: ValueType| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
-            let cb = callback_box.clone();
+            // Use a clone of the Arc instead of moving the callback_box
+            let cb = callback_arc.clone();
             Box::pin(async move {
-                cb(value)
+                (*cb)(value)
             })
         });
 
+        // Register the subscription with a temporary service name
+        // The background task will update with the actual service name once it's ready
+        let subscription_id = format!("temp_{}", uuid::Uuid::new_v4().to_string());
+        let anonymous_service_name = format!("anonymous_subscriber_{}", subscription_id);
+
         // Register the subscription with the anonymous service name using the provided options
-        self.service_registry
-            .subscribe_with_options(anonymous_service_name, wrapper, options)
-            .await
+        // This is now synchronous
+        self.service_registry.subscribe_with_options(anonymous_service_name, wrapper, options)
     }
 
     /// Subscribe to an event once (unsubscribes after first event)
-    pub async fn once<T: Into<String>, F>(&self, topic: T, callback: F) -> Result<String>
+    pub fn once<T: Into<String>, F>(&self, topic: T, callback: F) -> Result<String>
     where
         F: Fn(ValueType) -> Result<()> + Send + Sync + 'static,
     {
@@ -759,7 +773,7 @@ impl Node {
         let options = SubscriptionOptions::new().once();
 
         // Subscribe with the one-time options
-        self.subscribe_with_options(topic, callback, options).await
+        self.subscribe_with_options(topic, callback, options)
     }
 
     /// Unsubscribe from a topic

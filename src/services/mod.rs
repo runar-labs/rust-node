@@ -95,14 +95,14 @@ pub trait NodeRequestHandler: Send + Sync {
     async fn publish(&self, topic: String, data: ValueType) -> Result<()>;
 
     /// Subscribe to events on a topic with an async callback
-    async fn subscribe(
+    fn subscribe(
         &self,
         topic: String,
         callback: Box<dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
     ) -> Result<String>;
     
     /// Subscribe to events with options and an async callback
-    async fn subscribe_with_options(
+    fn subscribe_with_options(
         &self,
         topic: String,
         callback: Box<dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
@@ -763,7 +763,7 @@ impl RequestContext {
     }
 
     /// Subscribe to events on a topic with an async callback
-    pub async fn subscribe<T: Into<String>, F, Fut>(&self, topic: T, callback: F) -> Result<String>
+    pub fn subscribe<T: Into<String>, F, Fut>(&self, topic: T, callback: F) -> Result<String>
     where
         F: Fn(ValueType) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<()>> + Send + 'static,
@@ -778,11 +778,11 @@ impl RequestContext {
         self.node_handler.subscribe(
             topic_str,
             wrapper,
-        ).await
+        )
     }
 
     /// Subscribe to events with additional options
-    pub async fn subscribe_with_options<T: Into<String>, F, Fut>(
+    pub fn subscribe_with_options<T: Into<String>, F, Fut>(
         &self, 
         topic: T,
         callback: F,
@@ -803,7 +803,7 @@ impl RequestContext {
             topic_str,
             wrapper,
             options,
-        ).await
+        )
     }
 
     /// Unsubscribe from events
@@ -812,12 +812,12 @@ impl RequestContext {
     }
 
     /// Subscribe to an event once (auto-unsubscribes after first trigger)
-    pub async fn once<T: Into<String>, F, Fut>(&self, topic: T, callback: F) -> Result<String>
+    pub fn once<T: Into<String>, F, Fut>(&self, topic: T, callback: F) -> Result<String>
     where
         F: Fn(ValueType) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<()>> + Send + 'static,
     {
         let options = SubscriptionOptions::new().once();
-        self.subscribe_with_options(topic, callback, options).await
+        self.subscribe_with_options(topic, callback, options)
     }
 }
