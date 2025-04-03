@@ -983,60 +983,63 @@ impl ServiceRegistry {
 
     /// Register all event subscriptions from the runtime registry
     pub async fn register_runtime_subscriptions(&self) -> Result<()> {
-        // Get all event subscriptions from the runtime registry
-        let subscriptions = crate::init::get_subscriptions();
+        log::info!("Registering runtime subscriptions");
         
-        info_log(
-            Component::Registry,
-            &format!("Registering {} runtime subscriptions", subscriptions.len())
-        ).await;
+        #[cfg(not(feature = "distributed_slice"))]
+        {
+            // Add any runtime subscription registrations here
+        }
         
-        for subscription in subscriptions {
-        debug_log(
-                Component::Registry,
-                &format!(
-                    "Registering runtime subscription for topic '{}' in service '{}'",
-                    subscription.topic, subscription.service
-                )
-            ).await;
+        let registrations = crate::init::get_subscriptions();
+        
+        for subscription in registrations {
+            let service_name = subscription.service.clone();
+            log::info!("Registering subscription handler for {}: {}", service_name, subscription.topic);
             
-            // Convert the async handler to a synchronous callback
-            let handler_fn = subscription.handler;
+            // Create a context for this operation
+            let node_handler = match self.node_handler_lock.read().await.clone() {
+                Some(handler) => handler,
+                None => {
+                    // Create a fallback node handler
+                    Arc::new(crate::node::NodeRequestHandlerImpl::new(Arc::new(self.clone())))
+                }
+            };
             
-            // Create a callback that correctly handles async
-            let callback = Box::new(move |payload: ValueType| -> Result<()> {
-                // Create a new runtime to execute the future
-                let rt = tokio::runtime::Runtime::new()?;
+            let context = Arc::new(crate::services::RequestContext::new_with_option(
+                "registry/register_subscriptions".to_string(),
+                None,
+                node_handler
+            ));
+            
+            // Get the service instance from the registry
+            let service_instance = match self.get_service(&service_name).await {
+                Some(service) => service,
+                None => {
+                    warn_log(
+                        Component::Service, 
+                        &format!("Service '{}' not found for subscription", service_name)
+                    ).await;
+                    continue;
+                }
+            };
+            
+            // Create a subscription handler that will pass events to the handler
+            let handler = subscription.handler.clone();
+            
+            // Create a callback function
+            let service_instance_clone = service_instance.clone();
+            let callback = Box::new(move |value: ValueType| -> Result<()> {
+                let service_ref = service_instance_clone.clone();
+                let handler_ref = handler.clone();
                 
-                // Execute the future using the runtime
-                rt.block_on(async {
-                    let fut = handler_fn(payload);
-                    fut.await
-                })
-            }) as Box<dyn Fn(ValueType) -> Result<()> + Send + Sync>;
+                if let Ok(result) = handler_ref(&value) {
+                    Ok(())
+                } else {
+                    Err(anyhow!("Error handling subscription event"))
+                }
+            });
             
-            // Store the handler reference separately for later use
-            {
-                let mut subscription_handlers = self.subscription_handlers.write().await;
-                let key = (subscription.service.clone(), subscription.topic.clone());
-                
-                // Can't store the callback directly as it's not clonable
-                // Instead, we'll create a wrapper function that recreates the logic
-                let wrapper = Arc::new(move |payload: ValueType| -> Result<()> {
-                    // Create a new runtime to execute the future
-                    let rt = tokio::runtime::Runtime::new()?;
-                    
-                    // Execute the future using the runtime  
-                    rt.block_on(async {
-                        let fut = handler_fn(payload);
-                        fut.await
-                    })
-                });
-                
-                subscription_handlers.insert(key, wrapper);
-            }
-            
-            // Create subscription options
+            // Create options for the subscription
             let options = SubscriptionOptions {
                 ttl: None,
                 max_triggers: None,
@@ -1044,26 +1047,31 @@ impl ServiceRegistry {
                 id: None,
             };
             
-            // Also subscribe to the topic so we receive events
+            // Create a wrapper that converts the synchronous callback to an async one
+            let wrapper = Box::new(move |value: ValueType| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
+                let cb = callback.clone();
+                Box::pin(async move {
+                    cb(value)
+                })
+            });
+            
+            // Subscribe to the topic
             self.subscribe_with_options(
                 subscription.topic.clone(), 
-                callback,
+                wrapper,
                 options
             ).await?;
             
-            debug_log(
-                Component::Registry,
-                &format!(
-                    "Successfully registered subscription for topic '{}' in service '{}'",
-                    subscription.topic, subscription.service
-                )
-            ).await;
+            // Record the subscription
+            let mut subscription_handlers = self.subscription_handlers.write().await;
+            
+            subscription_handlers.insert(
+                (service_name.clone(), subscription.topic.clone()),
+                handler.clone()
+            );
+            
+            log::info!("Registered subscription handler for {}: {}", service_name, subscription.topic);
         }
-        
-        info_log(
-            Component::Registry,
-            "Completed registering runtime subscriptions"
-        ).await;
         
         Ok(())
     }

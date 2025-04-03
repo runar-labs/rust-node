@@ -678,9 +678,17 @@ impl Node {
         // Get the anonymous service name (which is generated with a UUID)
         let anonymous_service_name = service_arc.name().to_string();
 
+        // Create a wrapper that converts the synchronous callback to an async one
+        let wrapper = Box::new(move |value: ValueType| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
+            let cb = callback_box.clone();
+            Box::pin(async move {
+                cb(value)
+            })
+        });
+
         // Register the subscription with the anonymous service name using the provided options
         self.service_registry
-            .subscribe_with_options(anonymous_service_name, callback_box, SubscriptionOptions::default())
+            .subscribe(anonymous_service_name, wrapper)
             .await
     }
 
@@ -728,9 +736,17 @@ impl Node {
         // Get the anonymous service name (which is generated with a UUID)
         let anonymous_service_name = service_arc.name().to_string();
 
+        // Create a wrapper that converts the synchronous callback to an async one
+        let wrapper = Box::new(move |value: ValueType| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
+            let cb = callback_box.clone();
+            Box::pin(async move {
+                cb(value)
+            })
+        });
+
         // Register the subscription with the anonymous service name using the provided options
         self.service_registry
-            .subscribe_with_options(anonymous_service_name, callback_box, options)
+            .subscribe_with_options(anonymous_service_name, wrapper, options)
             .await
     }
 
