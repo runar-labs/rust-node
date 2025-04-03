@@ -762,7 +762,7 @@ impl RequestContext {
         self.node_handler.publish(topic.into(), data.into()).await
     }
 
-    /// Subscribe to events on a topic
+    /// Subscribe to events on a topic with an async callback
     pub async fn subscribe<T: Into<String>, F, Fut>(&self, topic: T, callback: F) -> Result<String>
     where
         F: Fn(ValueType) -> Fut + Send + Sync + 'static,
@@ -773,30 +773,6 @@ impl RequestContext {
         // Create a wrapper function that returns a Pin<Box<dyn Future>>
         let wrapper = Box::new(move |value: ValueType| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
             Box::pin(callback(value))
-        });
-        
-        self.node_handler.subscribe(
-            topic_str,
-            wrapper,
-        ).await
-    }
-
-    /// Subscribe to events on a topic with a synchronous callback
-    pub async fn subscribe_sync<T: Into<String>, F>(&self, topic: T, callback: F) -> Result<String>
-    where
-        F: Fn(ValueType) -> Result<()> + Send + Sync + 'static,
-    {
-        let topic_str = topic.into();
-        
-        // Create the Arc outside the closure so the callback is not moved
-        let callback_arc = Arc::new(callback);
-        
-        // Create a wrapper function that converts a sync callback to an async one
-        let wrapper = Box::new(move |value: ValueType| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
-            let cb = callback_arc.clone();
-            Box::pin(async move {
-                (*cb)(value)
-            })
         });
         
         self.node_handler.subscribe(
@@ -829,36 +805,6 @@ impl RequestContext {
             options,
         ).await
     }
-    
-    /// Subscribe to events with options using a synchronous callback
-    pub async fn subscribe_with_options_sync<T: Into<String>, F>(
-        &self, 
-        topic: T,
-        callback: F,
-        options: SubscriptionOptions,
-    ) -> Result<String>
-    where
-        F: Fn(ValueType) -> Result<()> + Send + Sync + 'static,
-    {
-        let topic_str = topic.into();
-        
-        // Create the Arc outside the closure so the callback is not moved
-        let callback_arc = Arc::new(callback);
-        
-        // Create a wrapper function that converts a sync callback to an async one
-        let wrapper = Box::new(move |value: ValueType| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
-            let cb = callback_arc.clone();
-            Box::pin(async move {
-                (*cb)(value)
-            })
-        });
-        
-        self.node_handler.subscribe_with_options(
-            topic_str,
-            wrapper,
-            options,
-        ).await
-    }
 
     /// Unsubscribe from events
     pub async fn unsubscribe<T: Into<String>>(&self, topic: T, subscription_id: Option<&str>) -> Result<()> {
@@ -873,14 +819,5 @@ impl RequestContext {
     {
         let options = SubscriptionOptions::new().once();
         self.subscribe_with_options(topic, callback, options).await
-    }
-    
-    /// Subscribe to an event once with a synchronous callback
-    pub async fn once_sync<T: Into<String>, F>(&self, topic: T, callback: F) -> Result<String>
-    where
-        F: Fn(ValueType) -> Result<()> + Send + Sync + 'static,
-    {
-        let options = SubscriptionOptions::new().once();
-        self.subscribe_with_options_sync(topic, callback, options).await
     }
 }
