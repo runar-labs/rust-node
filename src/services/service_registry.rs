@@ -67,6 +67,22 @@ pub struct ProcessHandlerEntry {
     pub handler: Arc<dyn Fn(&RequestContext, &str, &ValueType) -> Pin<Box<dyn Future<Output = Result<ServiceResponse>> + Send>> + Send + Sync>,
 }
 
+/// Information about a subscription
+struct SubscriptionInfo {
+    /// Unique ID for this subscription
+    id: String,
+    /// Callback function to be invoked when event occurs - updated to handle async callbacks
+    callback: Arc<dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
+    /// Options for this subscription
+    options: SubscriptionOptions,
+    /// When the subscription was created
+    created_at: chrono::DateTime<chrono::Utc>,
+    /// When the subscription was last triggered (if ever)
+    last_triggered: Option<chrono::DateTime<chrono::Utc>>,
+    /// How many times this subscription has been triggered
+    trigger_count: usize,
+}
+
 /// ServiceRegistry is responsible for registering, discovering, and managing services
 /// It combines the functionality of the previous ServiceRegistry and ServiceManager
 pub struct ServiceRegistry {
@@ -404,15 +420,8 @@ impl NodeRequestHandler for ServiceRegistry {
         topic: String,
         callback: Box<dyn Fn(ValueType) -> Result<()> + Send + Sync>,
     ) -> Result<String> {
-        // Default options
-        let options = SubscriptionOptions {
-            ttl: None,
-            max_triggers: None,
-            once: false,
-            id: None,
-        };
-        
-        // Use the options version
+        // Create default options
+        let options = crate::services::SubscriptionOptions::default();
         self.subscribe_with_options(topic, callback, options).await
     }
     
@@ -435,7 +444,7 @@ impl NodeRequestHandler for ServiceRegistry {
                     Component::Service,
                     &format!("Error: Invalid topic format for subscription: '{}'. Events must use proper path format: '<network>:<service>/<event>'", topic)
                 ).await;
-                
+
                 // Throw an error - no backwards compatibility
                 return Err(anyhow!("Invalid topic format for subscription: '{}'. Events must use proper path format: '<network>:<service>/<event>'", topic));
             }
@@ -453,8 +462,8 @@ impl NodeRequestHandler for ServiceRegistry {
         println!("[DEBUG] Storing subscription with normalized topic: '{}'", normalized_topic);
         
         // Generate a unique subscription ID
-        let subscription_id = options.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        
+        let subscription_id = options.id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
         // Make up a service name from the subscription ID
         let service_name = format!("subscription_{}", subscription_id);
         
@@ -465,9 +474,6 @@ impl NodeRequestHandler for ServiceRegistry {
             
             // Store the callback with the normalized topic path only
             service_callbacks.push((normalized_topic.clone(), callback));
-            
-            // We no longer store callbacks for the original topic format
-            // since we now enforce strict path formats throughout the system
         }
         
         // Add to subscribers using only the normalized topic path
@@ -477,9 +483,6 @@ impl NodeRequestHandler for ServiceRegistry {
             // Add for the normalized topic path only
             let normalized_subscribersc = subscribers.entry(normalized_topic.clone()).or_insert_with(Vec::new);
             normalized_subscribersc.push(service_name.clone());
-            
-            // We no longer store subscribers for the original topic format
-            // since we now enforce strict path formats throughout the system
         }
         
         // Handle expiration logic if needed
@@ -491,27 +494,13 @@ impl NodeRequestHandler for ServiceRegistry {
             // Spawn a task to expire the subscription
             tokio::spawn(async move {
                 tokio::time::sleep(duration).await;
-                if let Err(e) = registry.unsubscribe_wrapper(topic_clone, sub_id).await {
+                if let Err(e) = registry.unsubscribe(topic_clone, Some(&sub_id)).await {
                     error_log(
                         Component::Service,
                         &format!("Error unsubscribing expired subscription: {:?}", e)
                     ).await;
                 }
             });
-        }
-        
-        // Handle one-time subscriptions
-        if options.once {
-            // No need to do anything here - we'll unsubscribe after the first event
-        }
-        
-        // Handle max triggers
-        if let Some(max_triggers) = options.max_triggers {
-            // Could track this with a counter, but for now we'll just log it
-            debug_log(
-                Component::Service,
-                &format!("Subscription has max_triggers set to {}", max_triggers)
-            ).await;
         }
         
         Ok(subscription_id)
@@ -587,6 +576,93 @@ impl NodeRequestHandler for ServiceRegistry {
         }
         
         Ok(())
+    }
+    
+    async fn subscribe_async(
+        &self,
+        topic: String,
+        callback: Box<dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
+    ) -> Result<String> {
+        // Create default options
+        let options = crate::services::SubscriptionOptions::default();
+        self.subscribe_async_with_options(topic, callback, options).await
+    }
+    
+    async fn subscribe_async_with_options(
+        &self,
+        topic: String,
+        callback: Box<dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
+        options: SubscriptionOptions,
+    ) -> Result<String> {
+        // Parse the topic string into a TopicPath for consistent handling
+        let topic_path = match TopicPath::parse(&topic, &self.network_id) {
+            Ok(mut tp) => {
+                // Convert action paths to event paths automatically
+                tp.path_type = PathType::Event;
+                tp
+            },
+            Err(e) => {
+                // No legacy compatibility - enforce strict path format
+                error_log(
+                    Component::Service,
+                    &format!("Error: Invalid topic format for subscription: '{}'. Events must use proper path format: '<network>:<service>/<event>'", topic)
+                ).await;
+
+                // Throw an error - no backwards compatibility
+                return Err(anyhow!("Invalid topic format for subscription: '{}'. Events must use proper path format: '<network>:<service>/<event>'", topic));
+            }
+        };
+        
+        let normalized_topic = topic_path.to_string();
+        
+        debug_log(
+            Component::Service,
+            &format!("Subscribing to topic asynchronously: {} (parsed as {}) with options: {:?}", 
+                    topic, normalized_topic, options)
+        ).await;
+        
+        // Generate a unique subscription ID
+        let subscription_id = options.id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+        // Make up a service name from the subscription ID
+        let service_name = format!("subscription_{}", subscription_id);
+        
+        // Store the callback using only the normalized topic path
+        // Convert the async callback to a sync one by spawning a task
+        {
+            let mut callbacks = self.event_callbacks.write().await;
+            let service_callbacks = callbacks.entry(service_name.clone()).or_insert_with(Vec::new);
+            
+            // Create an adapter that converts the async callback to a sync one
+            let adapter = move |value: ValueType| -> Result<()> {
+                let fut = callback(value.clone());
+                tokio::spawn(async move {
+                    if let Err(e) = fut.await {
+                        eprintln!("Error in async subscription handler: {}", e);
+                    }
+                });
+                Ok(())
+            };
+            
+            // Store the callback with the normalized topic path only
+            service_callbacks.push((normalized_topic.clone(), Box::new(adapter)));
+        }
+        
+        // Add to subscribers using only the normalized topic path
+        {
+            let mut subscribers = self.event_subscribers.write().await;
+            
+            // Add for the normalized topic path only
+            let normalized_subscribersc = subscribers.entry(normalized_topic.clone()).or_insert_with(Vec::new);
+            normalized_subscribersc.push(service_name.clone());
+        }
+        
+        // Handle options
+        let mut options_mut = options.clone();
+        options_mut.ensure_id();
+        
+        // Return the subscription ID
+        Ok(subscription_id)
     }
     
     fn list_services(&self) -> Vec<String> {

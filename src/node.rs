@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use uuid;
 use uuid::Uuid;
+use std::pin::Pin;
+use std::future::Future;
 
 
 use crate::db::SqliteDatabase;
@@ -270,6 +272,30 @@ impl NodeRequestHandler for NodeRequestHandlerImpl {
         // The registry will parse it correctly using TopicPath
         println!("[DEBUG] Calling registry.subscribe_with_options with full topic: '{}'", topic);
         self.service_registry.subscribe_with_options(topic, callback, options).await
+    }
+
+    async fn subscribe_async(
+        &self,
+        topic: String,
+        callback: Box<dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
+    ) -> Result<String> {
+        // Use default subscription options
+        self.subscribe_async_with_options(topic, callback, SubscriptionOptions::default())
+            .await
+    }
+
+    async fn subscribe_async_with_options(
+        &self,
+        topic: String,
+        callback: Box<dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
+        options: SubscriptionOptions,
+    ) -> Result<String> {
+        // Debug logging
+        println!("[DEBUG] NodeRequestHandlerImpl::subscribe_async_with_options called with topic: '{}'", topic);
+        
+        // Pass the full topic directly to the service registry
+        println!("[DEBUG] Calling registry.subscribe_async_with_options with full topic: '{}'", topic);
+        self.service_registry.subscribe_async_with_options(topic, callback, options).await
     }
 
     async fn unsubscribe(&self, topic: String, subscription_id: Option<&str>) -> Result<()> {
@@ -638,10 +664,7 @@ impl Node {
     }
 
     /// Subscribe to events on a topic
-    pub async fn subscribe<T: Into<String>, F>(&self, topic: T, callback: F) -> Result<String>
-    where
-        F: Fn(ValueType) -> Result<()> + Send + Sync + 'static,
-    {
+    pub async fn subscribe<T: Into<String>>(&self, topic: T, callback: impl Fn(ValueType) -> Result<()> + Send + Sync + 'static) -> Result<String> {
         let topic_str = topic.into();
         let callback_box = Box::new(callback);
 
@@ -683,15 +706,12 @@ impl Node {
     }
 
     /// Subscribe to events on a topic with options
-    pub async fn subscribe_with_options<T: Into<String>, F>(
+    pub async fn subscribe_with_options<T: Into<String>>(
         &self,
         topic: T,
-        callback: F,
+        callback: impl Fn(ValueType) -> Result<()> + Send + Sync + 'static,
         options: SubscriptionOptions,
-    ) -> Result<String>
-    where
-        F: Fn(ValueType) -> Result<()> + Send + Sync + 'static,
-    {
+    ) -> Result<String> {
         let topic_str = topic.into();
         let callback_box = Box::new(callback);
 

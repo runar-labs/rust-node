@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid;
+use std::pin::Pin;
+use std::future::Future;
 
 use crate::routing::TopicPath;
 
@@ -74,6 +76,18 @@ pub use distributed_registry::{
 /// Handler for node requests - used to make service calls and handle events
 #[async_trait::async_trait]
 pub trait NodeRequestHandler: Send + Sync {
+    /// Make a request to a service with timeout
+    async fn request_with_timeout(&self, path: String, params: ValueType, timeout_ms: u64) -> Result<ServiceResponse> {
+        // Default implementation wraps the regular request with a timeout
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(timeout_ms),
+            self.request(path, params)
+        ).await {
+            Ok(result) => result,
+            Err(_) => Ok(ServiceResponse::error("Request timed out")),
+        }
+    }
+
     /// Make a request to a service
     async fn request(&self, path: String, params: ValueType) -> Result<ServiceResponse>;
 
@@ -92,6 +106,23 @@ pub trait NodeRequestHandler: Send + Sync {
         &self,
         topic: String,
         callback: Box<dyn Fn(ValueType) -> Result<()> + Send + Sync>,
+        options: SubscriptionOptions,
+    ) -> Result<String>;
+    
+    /// Subscribe to events on a topic with an async callback
+    /// This is a new method to support async handlers
+    async fn subscribe_async(
+        &self,
+        topic: String,
+        callback: Box<dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
+    ) -> Result<String>;
+    
+    /// Subscribe to events with options and an async callback
+    /// This is a new method to support async handlers with options
+    async fn subscribe_async_with_options(
+        &self,
+        topic: String,
+        callback: Box<dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
         options: SubscriptionOptions,
     ) -> Result<String>;
 
@@ -662,6 +693,14 @@ impl Default for RequestContext {
             async fn unsubscribe(&self, _topic: String, _subscription_id: Option<&str>) -> Result<()> {
                 Ok(())
             }
+            
+            async fn subscribe_async(&self, _topic: String, _callback: Box<dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>) -> Result<String> {
+                Ok("default-subscription".to_string())
+            }
+            
+            async fn subscribe_async_with_options(&self, _topic: String, _callback: Box<dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>, _options: SubscriptionOptions) -> Result<String> {
+                Ok("default-subscription".to_string())
+            }
         }
         
         RequestContext {
@@ -760,6 +799,50 @@ impl RequestContext {
             options,
         ).await
     }
+    
+    /// Subscribe to events on a topic with an async callback
+    pub async fn subscribe_async<T: Into<String>, F, Fut>(&self, topic: T, callback: F) -> Result<String>
+    where
+        F: Fn(ValueType) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        let topic_str = topic.into();
+        
+        // Create a wrapper function that returns a Pin<Box<dyn Future>>
+        let wrapper = Box::new(move |value: ValueType| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
+            Box::pin(callback(value))
+        });
+        
+        self.node_handler.subscribe_async(
+            topic_str,
+            wrapper,
+        ).await
+    }
+
+    /// Subscribe to events with additional options and an async callback
+    pub async fn subscribe_async_with_options<T: Into<String>, F, Fut>(
+        &self, 
+        topic: T,
+        callback: F,
+        options: SubscriptionOptions,
+    ) -> Result<String>
+    where
+        F: Fn(ValueType) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        let topic_str = topic.into();
+        
+        // Create a wrapper function that returns a Pin<Box<dyn Future>>
+        let wrapper = Box::new(move |value: ValueType| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
+            Box::pin(callback(value))
+        });
+        
+        self.node_handler.subscribe_async_with_options(
+            topic_str,
+            wrapper,
+            options,
+        ).await
+    }
 
     /// Unsubscribe from events
     pub async fn unsubscribe<T: Into<String>>(&self, topic: T, subscription_id: Option<&str>) -> Result<()> {
@@ -770,5 +853,15 @@ impl RequestContext {
     pub async fn once<T: Into<String>>(&self, topic: T, callback: impl Fn(ValueType) -> Result<()> + Send + Sync + 'static) -> Result<String> {
         let options = SubscriptionOptions::new().once();
         self.subscribe_with_options(topic, callback, options).await
+    }
+    
+    /// Subscribe to an event once with an async callback (auto-unsubscribes after first trigger)
+    pub async fn once_async<T: Into<String>, F, Fut>(&self, topic: T, callback: F) -> Result<String>
+    where
+        F: Fn(ValueType) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        let options = SubscriptionOptions::new().once();
+        self.subscribe_async_with_options(topic, callback, options).await
     }
 }
