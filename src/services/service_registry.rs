@@ -67,22 +67,6 @@ pub struct ProcessHandlerEntry {
     pub handler: Arc<dyn Fn(&RequestContext, &str, &ValueType) -> Pin<Box<dyn Future<Output = Result<ServiceResponse>> + Send>> + Send + Sync>,
 }
 
-/// Information about a subscription
-struct SubscriptionInfo {
-    /// Unique ID for this subscription
-    id: String,
-    /// Callback function to be invoked when event occurs - updated to handle async callbacks
-    callback: Arc<dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
-    /// Options for this subscription
-    options: SubscriptionOptions,
-    /// When the subscription was created
-    created_at: chrono::DateTime<chrono::Utc>,
-    /// When the subscription was last triggered (if ever)
-    last_triggered: Option<chrono::DateTime<chrono::Utc>>,
-    /// How many times this subscription has been triggered
-    trigger_count: usize,
-}
-
 /// ServiceRegistry is responsible for registering, discovering, and managing services
 /// It combines the functionality of the previous ServiceRegistry and ServiceManager
 pub struct ServiceRegistry {
@@ -418,7 +402,7 @@ impl NodeRequestHandler for ServiceRegistry {
     async fn subscribe(
         &self,
         topic: String,
-        callback: Box<dyn Fn(ValueType) -> Result<()> + Send + Sync>,
+        callback: Box<dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
     ) -> Result<String> {
         // Create default options
         let options = crate::services::SubscriptionOptions::default();
@@ -428,7 +412,7 @@ impl NodeRequestHandler for ServiceRegistry {
     async fn subscribe_with_options(
         &self,
         topic: String,
-        callback: Box<dyn Fn(ValueType) -> Result<()> + Send + Sync>,
+        callback: Box<dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
         options: SubscriptionOptions,
     ) -> Result<String> {
         // Parse the topic string into a TopicPath for consistent handling
@@ -468,12 +452,24 @@ impl NodeRequestHandler for ServiceRegistry {
         let service_name = format!("subscription_{}", subscription_id);
         
         // Store the callback using only the normalized topic path
+        // Convert the async callback to a sync one by spawning a task
         {
             let mut callbacks = self.event_callbacks.write().await;
             let service_callbacks = callbacks.entry(service_name.clone()).or_insert_with(Vec::new);
             
+            // Create an adapter that converts the async callback to a sync one
+            let adapter = move |value: ValueType| -> Result<()> {
+                let fut = callback(value.clone());
+                tokio::spawn(async move {
+                    if let Err(e) = fut.await {
+                        eprintln!("Error in async subscription handler: {}", e);
+                    }
+                });
+                Ok(())
+            };
+            
             // Store the callback with the normalized topic path only
-            service_callbacks.push((normalized_topic.clone(), callback));
+            service_callbacks.push((normalized_topic.clone(), Box::new(adapter)));
         }
         
         // Add to subscribers using only the normalized topic path
@@ -576,93 +572,6 @@ impl NodeRequestHandler for ServiceRegistry {
         }
         
         Ok(())
-    }
-    
-    async fn subscribe_async(
-        &self,
-        topic: String,
-        callback: Box<dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
-    ) -> Result<String> {
-        // Create default options
-        let options = crate::services::SubscriptionOptions::default();
-        self.subscribe_async_with_options(topic, callback, options).await
-    }
-    
-    async fn subscribe_async_with_options(
-        &self,
-        topic: String,
-        callback: Box<dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
-        options: SubscriptionOptions,
-    ) -> Result<String> {
-        // Parse the topic string into a TopicPath for consistent handling
-        let topic_path = match TopicPath::parse(&topic, &self.network_id) {
-            Ok(mut tp) => {
-                // Convert action paths to event paths automatically
-                tp.path_type = PathType::Event;
-                tp
-            },
-            Err(e) => {
-                // No legacy compatibility - enforce strict path format
-                error_log(
-                    Component::Service,
-                    &format!("Error: Invalid topic format for subscription: '{}'. Events must use proper path format: '<network>:<service>/<event>'", topic)
-                ).await;
-
-                // Throw an error - no backwards compatibility
-                return Err(anyhow!("Invalid topic format for subscription: '{}'. Events must use proper path format: '<network>:<service>/<event>'", topic));
-            }
-        };
-        
-        let normalized_topic = topic_path.to_string();
-        
-        debug_log(
-            Component::Service,
-            &format!("Subscribing to topic asynchronously: {} (parsed as {}) with options: {:?}", 
-                    topic, normalized_topic, options)
-        ).await;
-        
-        // Generate a unique subscription ID
-        let subscription_id = options.id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-
-        // Make up a service name from the subscription ID
-        let service_name = format!("subscription_{}", subscription_id);
-        
-        // Store the callback using only the normalized topic path
-        // Convert the async callback to a sync one by spawning a task
-        {
-            let mut callbacks = self.event_callbacks.write().await;
-            let service_callbacks = callbacks.entry(service_name.clone()).or_insert_with(Vec::new);
-            
-            // Create an adapter that converts the async callback to a sync one
-            let adapter = move |value: ValueType| -> Result<()> {
-                let fut = callback(value.clone());
-                tokio::spawn(async move {
-                    if let Err(e) = fut.await {
-                        eprintln!("Error in async subscription handler: {}", e);
-                    }
-                });
-                Ok(())
-            };
-            
-            // Store the callback with the normalized topic path only
-            service_callbacks.push((normalized_topic.clone(), Box::new(adapter)));
-        }
-        
-        // Add to subscribers using only the normalized topic path
-        {
-            let mut subscribers = self.event_subscribers.write().await;
-            
-            // Add for the normalized topic path only
-            let normalized_subscribersc = subscribers.entry(normalized_topic.clone()).or_insert_with(Vec::new);
-            normalized_subscribersc.push(service_name.clone());
-        }
-        
-        // Handle options
-        let mut options_mut = options.clone();
-        options_mut.ensure_id();
-        
-        // Return the subscription ID
-        Ok(subscription_id)
     }
     
     fn list_services(&self) -> Vec<String> {
