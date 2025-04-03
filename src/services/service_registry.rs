@@ -459,12 +459,9 @@ impl NodeRequestHandler for ServiceRegistry {
             
             // Create an adapter that converts the async callback to a sync one
             let adapter = move |value: ValueType| -> Result<()> {
-                let fut = callback(value.clone());
-                tokio::spawn(async move {
-                    if let Err(e) = fut.await {
-                        eprintln!("Error in async subscription handler: {}", e);
-                    }
-                });
+                let fut = callback(value);
+                // Just return a successful result - the async callback will handle any errors
+                // and we're not waiting for it here
                 Ok(())
             };
             
@@ -1023,21 +1020,8 @@ impl ServiceRegistry {
                 }
             };
             
-            // Create a subscription handler that will pass events to the handler
+            // Use the handler directly - it's already async from the SubscriptionHandlerFn type
             let handler = subscription.handler.clone();
-            
-            // Create a callback function
-            let service_instance_clone = service_instance.clone();
-            let callback = Box::new(move |value: ValueType| -> Result<()> {
-                let service_ref = service_instance_clone.clone();
-                let handler_ref = handler.clone();
-                
-                if let Ok(result) = handler_ref(&value) {
-                    Ok(())
-                } else {
-                    Err(anyhow!("Error handling subscription event"))
-                }
-            });
             
             // Create options for the subscription
             let options = SubscriptionOptions {
@@ -1047,27 +1031,37 @@ impl ServiceRegistry {
                 id: None,
             };
             
-            // Create a wrapper that converts the synchronous callback to an async one
-            let wrapper = Box::new(move |value: ValueType| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
-                let cb = callback.clone();
-                Box::pin(async move {
-                    cb(value)
-                })
+            // Properly box the handler to match the expected type
+            let boxed_handler = Box::new(move |value: ValueType| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
+                handler(value)
             });
             
-            // Subscribe to the topic
+            // Subscribe to the topic using the async handler directly
             self.subscribe_with_options(
                 subscription.topic.clone(), 
-                wrapper,
+                boxed_handler,
                 options
             ).await?;
             
-            // Record the subscription
+            // Record the subscription in the handlers map
             let mut subscription_handlers = self.subscription_handlers.write().await;
             
+            // Create a wrapper for storing in the subscription_handlers map
+            let handler_for_map = Arc::new(move |value: ValueType| -> Result<()> {
+                // Spawn the async handler to execute it
+                let handler_clone = subscription.handler.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = handler_clone(value).await {
+                        log::error!("Error in subscription handler: {:?}", e);
+                    }
+                });
+                Ok(())
+            });
+            
+            // Since SubscriptionHandlerFn is now fully async, we store it directly
             subscription_handlers.insert(
                 (service_name.clone(), subscription.topic.clone()),
-                handler.clone()
+                handler_for_map
             );
             
             log::info!("Registered subscription handler for {}: {}", service_name, subscription.topic);
