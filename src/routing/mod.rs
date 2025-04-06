@@ -77,12 +77,15 @@ impl TopicPath {
     /// // Network ID will be set to the default value
     /// assert_eq!(service_path.service_path(), "auth");
     /// ```
-    pub fn new(path: &str, default_network: &str) -> Result<Self, String> {
+    pub fn new(path: impl Into<String>, default_network: impl Into<String>) -> Result<Self, String> {
+        let path_string = path.into();
+        let default_network_string = default_network.into();
+
         // Check if we have a network_id prefix
-        if path.contains(':') {
-            let parts: Vec<&str> = path.split(':').collect();
+        if path_string.contains(':') {
+            let parts: Vec<&str> = path_string.split(':').collect();
             if parts.len() != 2 {
-                return Err(format!("Invalid path format - should be 'network_id:service_path' or 'service_path': {}", path));
+                return Err(format!("Invalid path format - should be 'network_id:service_path' or 'service_path': {}", path_string));
             }
             
             let network_id = parts[0].to_string();
@@ -122,12 +125,12 @@ impl TopicPath {
         
         // No network_id prefix - treat as service path with default network
         // If topic already has a network prefix, error out
-        if path.contains(':') {
-            return Err(format!("Topic already contains network ID prefix: {}", path));
+        if path_string.contains(':') {
+            return Err(format!("Topic already contains network ID prefix: {}", path_string));
         }
         
         // Split the topic string into service path and action/event
-        let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        let parts: Vec<&str> = path_string.split('/').filter(|s| !s.is_empty()).collect();
         if parts.is_empty() {
             return Err("Topic must have at least a service path".to_string());
         }
@@ -135,7 +138,7 @@ impl TopicPath {
         // Store just the service name (first segment)
         let service_path = parts[0].to_string();
         // Store the full path
-        let full_path = path.to_string();
+        let full_path = path_string.to_string();
         
         let action_or_event = if parts.len() > 1 {
             Some(parts[parts.len() - 1].to_string())
@@ -143,11 +146,11 @@ impl TopicPath {
             None
         };
         
-        let full_path_str = format!("{}:{}", default_network, full_path);
+        let full_path_str = format!("{}:{}", default_network_string, full_path);
         
         Ok(Self {
             path: full_path_str,
-            network_id: default_network.to_string(),
+            network_id: default_network_string,
             service_path,
             full_path,
             action_or_event,
@@ -242,13 +245,16 @@ impl TopicPath {
     /// let path = TopicPath::new_service("main", "auth");
     /// assert_eq!(path.as_str(), "main:auth");
     /// ```
-    pub fn new_service(network_id: &str, service_name: &str) -> Self {
-        let path = format!("{}:{}", network_id, service_name);
+    pub fn new_service(network_id: impl Into<String>, service_name: impl Into<String>) -> Self {
+        let network_id_string = network_id.into();
+        let service_name_string = service_name.into();
+        
+        let path = format!("{}:{}", network_id_string, service_name_string);
         Self {
             path,
-            network_id: network_id.to_string(),
-            service_path: service_name.to_string(),
-            full_path: service_name.to_string(),
+            network_id: network_id_string,
+            service_path: service_name_string.clone(),
+            full_path: service_name_string,
             action_or_event: None,
         }
     }
@@ -289,16 +295,18 @@ impl TopicPath {
     ///
     /// assert_eq!(child.as_str(), "main:auth/login");
     /// ```
-    pub fn child(&self, segment: &str) -> Result<Self, String> {
+    pub fn child(&self, segment: impl Into<String>) -> Result<Self, String> {
+        let segment_string = segment.into();
+        
         // Ensure segment doesn't contain slashes
-        if segment.contains('/') {
-            return Err(format!("Child segment cannot contain slashes: {}", segment));
+        if segment_string.contains('/') {
+            return Err(format!("Child segment cannot contain slashes: {}", segment_string));
         }
 
         let new_full_path = if self.full_path.is_empty() {
-            segment.to_string()
+            segment_string.clone()
         } else {
-            format!("{}/{}", self.full_path, segment)
+            format!("{}/{}", self.full_path, segment_string)
         };
         
         let new_path = format!("{}:{}", self.network_id, new_full_path);
@@ -308,7 +316,7 @@ impl TopicPath {
             network_id: self.network_id.clone(),
             service_path: self.service_path.clone(),
             full_path: new_full_path,
-            action_or_event: Some(segment.to_string()),
+            action_or_event: Some(segment_string),
         })
     }
 
@@ -377,7 +385,7 @@ impl TopicPath {
     /// let path = TopicPath::test_default("auth/login");
     /// assert_eq!(path.as_str(), "default:auth/login");
     /// ```
-    pub fn test_default(path: &str) -> Self {
+    pub fn test_default(path: impl Into<String>) -> Self {
         Self::new(path, "default").unwrap()
     }
 
@@ -467,10 +475,10 @@ impl TopicPath {
         Ok(params)
     }
 
-    /// Check if this path matches a template pattern
+    /// Check if a path matches a template pattern
     ///
-    /// INTENTION: Quickly determine if a path matches a template pattern
-    /// without extracting parameters. Useful for route matching.
+    /// INTENTION: Quickly determine if a path can be processed by a particular
+    /// template, without needing to extract parameters.
     ///
     /// Example:
     /// ```
@@ -484,34 +492,43 @@ impl TopicPath {
     /// let non_matching = TopicPath::new("main:users/profile", "default").expect("Valid path");
     /// assert!(!non_matching.matches_template(template));
     /// ```
-    pub fn matches_template(&self, template: &str) -> bool {
-        self.extract_params(template).is_ok()
+    pub fn matches_template(&self, template: impl Into<String>) -> bool {
+        let template_string = template.into();
+        self.extract_params(&template_string).is_ok()
     }
 
-    /// Create a new TopicPath by filling in a template with parameters
+    /// Create a TopicPath from a template and parameter values
     ///
-    /// INTENTION: Provide a way to generate a path from a template and parameters,
-    /// useful for constructing specific paths based on a pattern.
+    /// INTENTION: Allow dynamic construction of TopicPaths from templates with
+    /// parameter placeholders, similar to route templates in web frameworks.
     ///
     /// Example:
     /// ```
     /// use runar_node::routing::TopicPath;
     /// use std::collections::HashMap;
     ///
-    /// let template = "services/{service_path}/state";
     /// let mut params = HashMap::new();
     /// params.insert("service_path".to_string(), "math".to_string());
+    /// params.insert("action".to_string(), "add".to_string());
     ///
-    /// let path = TopicPath::from_template(template, params, "main").expect("Valid template");
-    /// assert_eq!(path.as_str(), "main:services/math/state");
+    /// let path = TopicPath::from_template(
+    ///     "services/{service_path}/{action}", 
+    ///     params,
+    ///     "main"
+    /// ).expect("Valid template");
+    ///
+    /// assert_eq!(path.as_str(), "main:services/math/add");
     /// ```
     pub fn from_template(
-        template: &str, 
+        template: impl Into<String>, 
         params: std::collections::HashMap<String, String>,
-        network_id: &str
+        network_id: impl Into<String>
     ) -> Result<Self, String> {
+        let template_string = template.into();
+        let network_id_string = network_id.into();
+        
         // Get segments from the template
-        let template_segments: Vec<&str> = template.split('/')
+        let template_segments: Vec<&str> = template_string.split('/')
             .filter(|s| !s.is_empty())
             .collect();
             
@@ -536,6 +553,6 @@ impl TopicPath {
         
         // Construct the final path
         let path_str = path_segments.join("/");
-        Self::new(&path_str, network_id)
+        Self::new(path_str, network_id_string)
     }
 } 

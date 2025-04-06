@@ -146,15 +146,17 @@ impl LifecycleContext {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn register_action(&self, action_name: &str, handler: ActionHandler) -> Result<()> {
+    pub async fn register_action(&self, action_name: impl Into<String>, handler: ActionHandler) -> Result<()> {
         // Get the node delegate
         let delegate = match &self.node_delegate {
             Some(d) => d,
             None => return Err(anyhow!("No node delegate available")),
         };
         
+        let action_name_string = action_name.into();
+        
         // Create a topic path for this action
-        let action_path = format!("{}/{}", self.service_path, action_name);
+        let action_path = format!("{}/{}", self.service_path, action_name_string);
         let topic_path = TopicPath::new(&action_path, &self.network_id)
             .map_err(|e| anyhow!("Invalid action path: {}", e))?;
         
@@ -200,13 +202,15 @@ impl LifecycleContext {
     /// ```
     pub async fn register_action_with_options(
         &self,
-        action_name: &str,
+        action_name: impl Into<String>,
         handler: ActionHandler,
         options: ActionRegistrationOptions,
     ) -> Result<()> {
+        let action_name_string = action_name.into();
+        
         // Create action metadata from the options
         let metadata = ActionMetadata {
-            name: action_name.to_string(),
+            name: action_name_string.clone(),
             description: options.description.unwrap_or_default(),
             parameters_schema: options.params_schema.map(|v| v),
             return_schema: options.return_schema.map(|v| v),
@@ -219,7 +223,7 @@ impl LifecycleContext {
         };
         
         // Create a topic path for this action
-        let action_path = format!("{}/{}", self.service_path, action_name);
+        let action_path = format!("{}/{}", self.service_path, action_name_string);
         let topic_path = TopicPath::new(&action_path, &self.network_id)
             .map_err(|e| anyhow!("Invalid action path: {}", e))?;
         
@@ -234,12 +238,14 @@ impl LifecycleContext {
     /// for documentation and validation.
     pub async fn register_event_with_options(
         &self,
-        event_name: &str,
+        event_name: impl Into<String>,
         options: EventRegistrationOptions,
     ) -> Result<()> {
+        let event_name_string = event_name.into();
+        
         // Create event metadata
         let metadata = EventMetadata {
-            name: event_name.to_string(),
+            name: event_name_string.clone(),
             description: options.description.unwrap_or_default(),
             data_schema: options.data_schema.map(|v| v),
         };
@@ -247,7 +253,7 @@ impl LifecycleContext {
         // Log event registration with metadata
         self.logger.debug(&format!(
             "Registered event '{}' with metadata: description='{}', has_schema={}",
-            event_name,
+            event_name_string,
             metadata.description,
             metadata.data_schema.is_some()
         ));
@@ -299,7 +305,7 @@ impl LifecycleContext {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn register_action_pattern<F, Fut>(&self, template: &str, handler: F) -> Result<()>
+    pub async fn register_action_pattern<F, Fut>(&self, template: impl Into<String>, handler: F) -> Result<()>
     where
         F: Fn(Option<ValueType>, RequestContext, std::collections::HashMap<String, String>) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future<Output = Result<ServiceResponse>> + Send + 'static,
@@ -311,10 +317,10 @@ impl LifecycleContext {
         };
         
         // Store template as String for move into closure
-        let template_str = template.to_string();
+        let template_str = template.into();
         
         // Create a topic path for this template
-        let topic_path = TopicPath::new(template, &self.network_id)
+        let topic_path = TopicPath::new(&template_str, &self.network_id)
             .map_err(|e| anyhow!("Invalid template path: {}", e))?;
         
         // Create a wrapper for the handler that extracts parameters
@@ -402,13 +408,15 @@ impl ServiceRequest {
     /// }
     /// ```
     pub fn new(
-        service_path: &str,
-        action_or_event: &str,
+        service_path: impl Into<String>,
+        action_or_event: impl Into<String>,
         data: ValueType,
         context: Arc<RequestContext>,
     ) -> Self {
         // Create a path string combining service path and action
-        let path_string = format!("{}/{}", service_path, action_or_event);
+        let service_path_string = service_path.into();
+        let action_or_event_string = action_or_event.into();
+        let path_string = format!("{}/{}", service_path_string, action_or_event_string);
         
         // Parse the path using the context's network_id method
         let topic_path = TopicPath::new(&path_string, &context.network_id())
@@ -480,13 +488,15 @@ impl ServiceRequest {
     /// }
     /// ```
     pub fn new_with_optional(
-        service_path: &str,
-        action_or_event: &str,
+        service_path: impl Into<String>,
+        action_or_event: impl Into<String>,
         data: Option<ValueType>,
         context: Arc<RequestContext>,
     ) -> Self {
         // Create a TopicPath from the service path and action
-        let path_string = format!("{}/{}", service_path, action_or_event);
+        let service_path_string = service_path.into();
+        let action_or_event_string = action_or_event.into();
+        let path_string = format!("{}/{}", service_path_string, action_or_event_string);
         
         // Parse the path using the context's network_id method
         let topic_path = TopicPath::new(&path_string, &context.network_id())
@@ -608,11 +618,11 @@ impl ServiceResponse {
     ///     ServiceResponse::error(403, "Insufficient permissions to access resource")
     /// }
     /// ```
-    pub fn error(status: i32, message: &str) -> Self {
+    pub fn error(status: i32, message: impl Into<String>) -> Self {
         Self {
             status,
             data: None,
-            error: Some(message.to_string()),
+            error: Some(message.into()),
         }
     }
 
