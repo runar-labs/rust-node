@@ -77,9 +77,16 @@ impl EventContext {
     ///
     /// This is the primary constructor that takes the minimum required parameters.
     pub fn new(topic_path: &TopicPath, logger: Logger) -> Self {
+        // Add event path to logger if available from topic_path
+        let event_logger = if !topic_path.get_last_segment().is_empty() {
+            logger.with_event_path(format!("{}/{}", topic_path.service_path(), topic_path.get_last_segment()))
+        } else {
+            logger
+        };
+        
         Self {
             topic_path: topic_path.clone(),
-            logger,
+            logger: event_logger,
             node_delegate: None,
             delivery_options: None,
         }
@@ -205,6 +212,11 @@ impl LoggingContext for EventContext {
         // Convert the owned String to a string slice that lives as long as self
         let path = self.topic_path.service_path();
         Some(Box::leak(path.into_boxed_str()))
+    }
+    
+    fn event_path(&self) -> Option<&str> {
+        // Get from logger's event_path
+        self.logger.event_path()
     }
     
     fn logger(&self) -> &Logger {

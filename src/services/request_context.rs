@@ -12,10 +12,14 @@
 // deriving values from the TopicPath when needed.
 
 use std::fmt;
+use std::sync::Arc;
 use std::collections::HashMap;
+use anyhow::{Result, anyhow};
 use crate::routing::TopicPath;
+use crate::services::NodeDelegate;
 use runar_common::logging::{Logger, LoggingContext, Component};
 use runar_common::types::ValueType;
+use crate::services::ServiceResponse;
 
 /// Context for handling service requests
 ///
@@ -86,10 +90,17 @@ impl RequestContext {
     ///
     /// This is the primary constructor that takes the minimum required parameters.
     pub fn new(topic_path: &TopicPath, logger: Logger) -> Self {
+        // Add action path to logger if available from topic_path
+        let action_logger = if !topic_path.get_last_segment().is_empty() {
+            logger.with_action_path(format!("{}/{}", topic_path.service_path(), topic_path.get_last_segment()))
+        } else {
+            logger
+        };
+        
         Self {
             topic_path: Some(topic_path.clone()),
             metadata: None,
-            logger,
+            logger: action_logger,
             path_params: HashMap::new(),
         }
     }
@@ -165,6 +176,11 @@ impl LoggingContext for RequestContext {
         } else {
             None
         }
+    }
+    
+    fn action_path(&self) -> Option<&str> {
+        // Get from logger's action_path
+        self.logger.action_path()
     }
     
     fn logger(&self) -> &Logger {
