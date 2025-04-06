@@ -76,15 +76,114 @@ pub use distributed_registry::{
 /// Handler for node requests - used to make service calls and handle events
 #[async_trait::async_trait]
 pub trait NodeRequestHandler: Send + Sync {
-    /// Make a request to a service with timeout
-    async fn request_with_timeout(&self, path: String, params: ValueType, timeout_ms: u64) -> Result<ServiceResponse> {
-        // Default implementation wraps the regular request with a timeout
-        match tokio::time::timeout(
-            std::time::Duration::from_millis(timeout_ms),
-            self.request(path, params)
-        ).await {
-            Ok(result) => result,
-            Err(_) => Ok(ServiceResponse::error("Request timed out")),
+    /// Make a request to a service with additional options
+    /// 
+    /// This method provides a flexible API for making service requests with various options
+    /// such as timeout, retries, custom request IDs, and additional metadata.
+    /// 
+    /// # Examples
+    /// 
+    /// Basic request with timeout:
+    /// ```
+    /// let options = RequestOptions::with_timeout(5000); // 5 second timeout
+    /// node.request_with_options("service/action", params, options).await?;
+    /// ```
+    /// 
+    /// Request with retry:
+    /// ```
+    /// let options = RequestOptions::new()
+    ///     .timeout(5000)
+    ///     .with_retry(3, 500); // retry up to 3 times with 500ms delay
+    /// node.request_with_options("service/action", params, options).await?;
+    /// ```
+    /// 
+    /// Request with custom ID and metadata:
+    /// ```
+    /// let mut metadata = HashMap::new();
+    /// metadata.insert("source".to_string(), ValueType::String("user_interface".to_string()));
+    /// 
+    /// let options = RequestOptions::new()
+    ///     .with_request_id("custom-request-123".to_string())
+    ///     .with_metadata(metadata);
+    /// node.request_with_options("service/action", params, options).await?;
+    /// ```
+    async fn request_with_options(&self, path: String, params: ValueType, options: RequestOptions) -> Result<ServiceResponse> {
+        // Handle retries if enabled
+        if options.retry && options.max_retries.is_some() {
+            let max_retries = options.max_retries.unwrap();
+            let retry_delay = options.retry_delay_ms.unwrap_or(500);
+            
+            // Attempt the request multiple times
+            let mut attempt = 0;
+            let mut last_error = None;
+            
+            while attempt <= max_retries {
+                attempt += 1;
+                
+                // For each attempt, try with timeout if specified
+                let result = if let Some(timeout_ms) = options.timeout_ms {
+                    match tokio::time::timeout(
+                        std::time::Duration::from_millis(timeout_ms),
+                        self.request(path.clone(), params.clone())
+                    ).await {
+                        Ok(result) => result,
+                        Err(_) => Err(anyhow::anyhow!("Request timed out")),
+                    }
+                } else {
+                    // No timeout, just make the request
+                    self.request(path.clone(), params.clone()).await
+                };
+                
+                // Check the result
+                match result {
+                    Ok(response) => {
+                        // Check if it's an error response that should be retried
+                        if response.status == ResponseStatus::Error {
+                            // Store the error and retry if we haven't exceeded max retries
+                            last_error = Some(anyhow::anyhow!("Service error: {}", response.message));
+                            
+                            if attempt <= max_retries {
+                                // Wait before retrying
+                                tokio::time::sleep(std::time::Duration::from_millis(retry_delay)).await;
+                                continue;
+                            } else {
+                                // Return the error response on the last attempt
+                                return Ok(response);
+                            }
+                        } else {
+                            // Success response, return it
+                            return Ok(response);
+                        }
+                    },
+                    Err(err) => {
+                        // Store the error and retry if we haven't exceeded max retries
+                        last_error = Some(err);
+                        
+                        if attempt <= max_retries {
+                            // Wait before retrying
+                            tokio::time::sleep(std::time::Duration::from_millis(retry_delay)).await;
+                            continue;
+                        }
+                    }
+                }
+            }
+            
+            // If we get here, all retries failed
+            return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Request failed after retries")));
+        } else {
+            // No retries, just handle timeout if specified
+            if let Some(timeout_ms) = options.timeout_ms {
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(timeout_ms),
+                    self.request(path, params)
+                ).await {
+                    Ok(result) => result,
+                    Err(_) => Ok(ServiceResponse::error("Request timed out")),
+                }
+            } else {
+                // No timeout or retries, just forward the request
+                self.request(path, params).await
+            }
         }
     }
 
@@ -95,14 +194,14 @@ pub trait NodeRequestHandler: Send + Sync {
     async fn publish(&self, topic: String, data: ValueType) -> Result<()>;
 
     /// Subscribe to events on a topic with an async callback
-    fn subscribe(
+    async fn subscribe(
         &self,
         topic: String,
         callback: Box<dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
     ) -> Result<String>;
     
     /// Subscribe to events with options and an async callback
-    fn subscribe_with_options(
+    async fn subscribe_with_options(
         &self,
         topic: String,
         callback: Box<dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
@@ -115,6 +214,12 @@ pub trait NodeRequestHandler: Send + Sync {
     /// List available services
     fn list_services(&self) -> Vec<String> {
         Vec::new()
+    }
+    
+    /// Get the current request context, if available
+    /// This is used for determining the caller's identity in certain operations
+    fn current_context(&self) -> Option<RequestContext> {
+        None
     }
 }
 
@@ -133,6 +238,9 @@ pub struct SubscriptionOptions {
 
     /// A unique ID for this subscription (auto-generated if not provided)
     pub id: Option<String>,
+    
+    /// Context for the subscriber (automatically set)
+    pub context: RequestContext,
 }
 
 impl Default for SubscriptionOptions {
@@ -142,14 +250,21 @@ impl Default for SubscriptionOptions {
             max_triggers: None,
             once: false,
             id: None,
+            context: RequestContext::default(),
         }
     }
 }
 
 impl SubscriptionOptions {
     /// Create a new set of subscription options
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(context: RequestContext) -> Self {
+        Self {
+            ttl: None,
+            max_triggers: None,
+            once: false,
+            id: None,
+            context,
+        }
     }
 
     /// Set a time-to-live for the subscription
@@ -167,7 +282,6 @@ impl SubscriptionOptions {
     /// Set this subscription to trigger only once
     pub fn once(mut self) -> Self {
         self.once = true;
-        self.max_triggers = Some(1);
         self
     }
 
@@ -181,6 +295,88 @@ impl SubscriptionOptions {
     pub fn ensure_id(&mut self) {
         if self.id.is_none() {
             self.id = Some(uuid::Uuid::new_v4().to_string());
+        }
+    }
+}
+
+/// Options for request management
+#[derive(Debug, Clone)]
+pub struct RequestOptions {
+    /// Optional timeout for the request in milliseconds
+    pub timeout_ms: Option<u64>,
+    
+    /// Optional request ID (auto-generated if not provided)
+    pub request_id: Option<String>,
+    
+    /// Optional metadata for additional context
+    pub metadata: Option<HashMap<String, ValueType>>,
+    
+    /// Whether to retry the request on failure
+    pub retry: bool,
+    
+    /// Maximum number of retries
+    pub max_retries: Option<usize>,
+    
+    /// Delay between retries in milliseconds
+    pub retry_delay_ms: Option<u64>,
+}
+
+impl Default for RequestOptions {
+    fn default() -> Self {
+        Self {
+            timeout_ms: None,
+            request_id: None,
+            metadata: None,
+            retry: false,
+            max_retries: None,
+            retry_delay_ms: None,
+        }
+    }
+}
+
+impl RequestOptions {
+    /// Create new request options
+    pub fn new() -> Self {
+        Self::default()
+    }
+    
+    /// Create request options with a timeout
+    pub fn with_timeout(timeout_ms: u64) -> Self {
+        let mut options = Self::default();
+        options.timeout_ms = Some(timeout_ms);
+        options
+    }
+    
+    /// Set a timeout for the request
+    pub fn timeout(mut self, timeout_ms: u64) -> Self {
+        self.timeout_ms = Some(timeout_ms);
+        self
+    }
+    
+    /// Set a custom request ID
+    pub fn with_request_id(mut self, request_id: String) -> Self {
+        self.request_id = Some(request_id);
+        self
+    }
+    
+    /// Set metadata for the request
+    pub fn with_metadata(mut self, metadata: HashMap<String, ValueType>) -> Self {
+        self.metadata = Some(metadata);
+        self
+    }
+    
+    /// Enable retries for the request
+    pub fn with_retry(mut self, max_retries: usize, retry_delay_ms: u64) -> Self {
+        self.retry = true;
+        self.max_retries = Some(max_retries);
+        self.retry_delay_ms = Some(retry_delay_ms);
+        self
+    }
+    
+    /// Generate a random request ID if one is not already set
+    pub fn ensure_request_id(&mut self) {
+        if self.request_id.is_none() {
+            self.request_id = Some(uuid::Uuid::new_v4().to_string());
         }
     }
 }
@@ -631,13 +827,21 @@ pub use runar_common::utils::to_value_type;
 /// without having direct access to the node instance.
 #[derive(Clone)]
 pub struct RequestContext {
-    /// The service making the request (source)
+    /// The path of the request
     pub path: String,
     /// Data associated with the request
     pub data: ValueType,
     /// Node handler for making requests to other services
     #[doc(hidden)]
     pub node_handler: Arc<dyn NodeRequestHandler + Send + Sync>,
+    /// Explicit service path for the caller (extracted from path)
+    /// Note: This field is currently populated automatically from the path
+    /// but will require explicit initialization in a future version.
+    service_path: String,
+    /// Explicit network ID for the caller (extracted from path)
+    /// Note: This field is currently populated automatically from the path
+    /// but will require explicit initialization in a future version.
+    network_id: String,
 }
 
 impl std::fmt::Debug for RequestContext {
@@ -646,6 +850,8 @@ impl std::fmt::Debug for RequestContext {
             .field("path", &self.path)
             .field("data", &self.data)
             .field("node_handler", &"<node_handler>")
+            .field("service_path", &self.service_path)
+            .field("network_id", &self.network_id)
             .finish()
     }
 }
@@ -685,54 +891,116 @@ impl Default for RequestContext {
             async fn unsubscribe(&self, _topic: String, _subscription_id: Option<&str>) -> Result<()> {
                 Ok(())
             }
+            
+            fn current_context(&self) -> Option<RequestContext> {
+                None
+            }
         }
         
         RequestContext {
             path: "default-context".to_string(),
             data: ValueType::Map(HashMap::new()),
             node_handler: Arc::new(MinimalDefaultHandler),
+            service_path: "default".to_string(),
+            network_id: "default".to_string(),
         }
     }
 }
 
 impl RequestContext {
-    /// Create a new RequestContext
-    pub fn new<P: Into<String>, V: Into<ValueType>>(
+    /// Create a new RequestContext with explicit service path and network ID
+    /// 
+    /// This is the preferred constructor that allows specifying exact service path and network ID.
+    /// In a future version, this will become the primary constructor and the 3-parameter version
+    /// will be deprecated.
+    pub fn new_with_option_v2<P: AsRef<str>>(
         path: P,
-        data: V,
+        data: Option<ValueType>,
         node_handler: Arc<dyn NodeRequestHandler + Send + Sync>,
+        service_path: String,
+        network_id: String,
     ) -> Self {
         RequestContext {
-            path: path.into(),
-            data: data.into(),
+            path: path.as_ref().to_string(),
+            data: data.unwrap_or_else(|| ValueType::Map(HashMap::new())),
             node_handler,
+            service_path,
+            network_id,
         }
     }
 
     /// Create a new RequestContext with optional ValueType
-    pub fn new_with_option<P: Into<String>>(
+    /// 
+    /// Note: This method signature will change in a future version to require
+    /// explicit service_path and network_id parameters. This version automatically
+    /// extracts those values from the path.
+    pub fn new_with_option<P: AsRef<str>>(
         path: P,
         data: Option<ValueType>,
         node_handler: Arc<dyn NodeRequestHandler + Send + Sync>,
     ) -> Self {
-        RequestContext {
-            path: path.into(),
-            data: data.unwrap_or_else(|| ValueType::Map(HashMap::new())),
-            node_handler,
-        }
+        // Extract service path and network ID from path if possible
+        let path_str = path.as_ref();
+        let (service_path, network_id) = match crate::routing::TopicPath::parse(path_str, "") {
+            Ok(tp) => (tp.service_path.clone(), tp.network_id.clone()),
+            Err(_) => {
+                // Fallback to extracting just the service part
+                let parts: Vec<&str> = path_str.split('/').collect();
+                if !parts.is_empty() {
+                    (parts[0].to_string(), "".to_string())
+                } else {
+                    ("".to_string(), "".to_string())
+                }
+            }
+        };
+        
+        Self::new_with_option_v2(path, data, node_handler, service_path, network_id)
+    }
+
+    /// Create a new RequestContext
+    pub fn new<P: AsRef<str>, V: Into<ValueType>>(
+        path: P,
+        data: V,
+        node_handler: Arc<dyn NodeRequestHandler + Send + Sync>,
+    ) -> Self {
+        Self::new_with_option(path, Some(data.into()), node_handler)
     }
 
     /// Create a RequestContext for a child request
-    pub fn new_child<P: Into<String>, V: Into<ValueType>>(&self, path: P, data: V) -> Self {
+    pub fn new_child<P: AsRef<str>, V: Into<ValueType>>(&self, path: P, data: V) -> Self {
+        // Extract service path and network ID from the new path
+        let path_str = path.as_ref();
+        let (service_path, network_id) = match crate::routing::TopicPath::parse(path_str, &self.network_id) {
+            Ok(tp) => (tp.service_path.clone(), tp.network_id.clone()),
+            Err(_) => {
+                // Fallback to extracting just the service part
+                let parts: Vec<&str> = path_str.split('/').collect();
+                if !parts.is_empty() {
+                    (parts[0].to_string(), self.network_id.clone())
+                } else {
+                    (self.service_path.clone(), self.network_id.clone())
+                }
+            }
+        };
+        
         RequestContext {
-            path: path.into(),
+            path: path.as_ref().to_string(),
             data: data.into(),
             node_handler: self.node_handler.clone(),
+            service_path,
+            network_id,
         }
     }
     
-    // The for_tests() method has been removed and moved to the test_helpers module
-    // to keep test utilities separate from production code
+    /// Get the service path of the caller (now direct field access)
+    pub fn service_path(&self) -> &str {
+        &self.service_path
+    }
+    
+    /// Get the network ID (now direct field access)
+    pub fn network_id(&self) -> &str {
+        &self.network_id
+    }
 
     /// Get a context value
     pub fn get(&self, key: &str) -> Option<ValueType> {
@@ -763,7 +1031,7 @@ impl RequestContext {
     }
 
     /// Subscribe to events on a topic with an async callback
-    pub fn subscribe<T: Into<String>, F, Fut>(&self, topic: T, callback: F) -> Result<String>
+    pub async fn subscribe<T: Into<String>, F, Fut>(&self, topic: T, callback: F) -> Result<String>
     where
         F: Fn(ValueType) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<()>> + Send + 'static,
@@ -778,15 +1046,15 @@ impl RequestContext {
         self.node_handler.subscribe(
             topic_str,
             wrapper,
-        )
+        ).await
     }
 
     /// Subscribe to events with additional options
-    pub fn subscribe_with_options<T: Into<String>, F, Fut>(
+    pub async fn subscribe_with_options<T: Into<String>, F, Fut>(
         &self, 
         topic: T,
         callback: F,
-        options: SubscriptionOptions,
+        mut options: SubscriptionOptions,
     ) -> Result<String>
     where
         F: Fn(ValueType) -> Fut + Send + Sync + 'static,
@@ -799,25 +1067,151 @@ impl RequestContext {
             Box::pin(callback(value))
         });
         
+        // Set the context in the options if not already set
+        options.context = self.clone();
+        
         self.node_handler.subscribe_with_options(
             topic_str,
             wrapper,
             options,
-        )
+        ).await
     }
 
-    /// Unsubscribe from events
+    /// Unsubscribe from events on a topic
     pub async fn unsubscribe<T: Into<String>>(&self, topic: T, subscription_id: Option<&str>) -> Result<()> {
         self.node_handler.unsubscribe(topic.into(), subscription_id).await
     }
 
-    /// Subscribe to an event once (auto-unsubscribes after first trigger)
-    pub fn once<T: Into<String>, F, Fut>(&self, topic: T, callback: F) -> Result<String>
+    /// Subscribe once to an event - automatically unsubscribes after first notification
+    pub async fn once<T: Into<String>, F, Fut>(&self, topic: T, callback: F) -> Result<String>
     where
         F: Fn(ValueType) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<()>> + Send + 'static,
     {
-        let options = SubscriptionOptions::new().once();
-        self.subscribe_with_options(topic, callback, options)
+        let mut options = SubscriptionOptions::new(self.clone());
+        options.once = true;
+        self.subscribe_with_options(topic, callback, options).await
+    }
+
+    /// Get the request path
+    pub fn path(&self) -> &str {
+        &self.path
     }
 }
+
+#[cfg(test)]
+mod request_context_tests {
+    use super::*;
+    use crate::routing::TopicPath;
+    
+    #[test]
+    fn test_request_context_with_explicit_path() {
+        let handler = Arc::new(create_test_handler());
+        
+        // Create context with explicit service path and network ID
+        let context = RequestContext::new_with_option_v2(
+            "service/action",
+            None,
+            handler.clone(),
+            "custom_service".to_string(),
+            "test_network".to_string()
+        );
+        
+        // Verify the explicit values were used
+        assert_eq!(context.service_path(), "custom_service");
+        assert_eq!(context.network_id(), "test_network");
+        
+        // Verify that path was preserved as-is
+        assert_eq!(context.path, "service/action");
+    }
+    
+    #[test]
+    fn test_request_context_path_extraction() {
+        let handler = Arc::new(create_test_handler());
+        
+        // Test with service/action format
+        let context = RequestContext::new_with_option(
+            "service/action",
+            None,
+            handler.clone()
+        );
+        
+        // Verify extraction worked correctly
+        assert_eq!(context.service_path(), "service");
+        assert_eq!(context.network_id(), "");
+        
+        // Test with network:service/action format
+        let context2 = RequestContext::new_with_option(
+            "network:service/action",
+            None,
+            handler.clone()
+        );
+        
+        // Verify extraction parsed the network ID
+        assert_eq!(context2.service_path(), "service");
+        assert_eq!(context2.network_id(), "network");
+    }
+    
+    #[test]
+    fn test_request_context_child() {
+        let handler = Arc::new(create_test_handler());
+        
+        // Create parent context with explicit network
+        let parent = RequestContext::new_with_option_v2(
+            "parent/action",
+            None,
+            handler.clone(),
+            "parent".to_string(),
+            "test_network".to_string()
+        );
+        
+        // Create child context
+        let child = parent.new_child("child/action", "test_data");
+        
+        // Verify child inherited network ID
+        assert_eq!(child.service_path(), "child");
+        assert_eq!(child.network_id(), "test_network");
+        assert_eq!(child.path, "child/action");
+    }
+    
+    // Helper function to create a test handler
+    fn create_test_handler() -> impl NodeRequestHandler {
+        // Simplified implementation for testing
+        struct TestHandler;
+        
+        #[async_trait::async_trait]
+        impl NodeRequestHandler for TestHandler {
+            async fn request(&self, _path: String, _params: ValueType) -> Result<ServiceResponse> {
+                Ok(ServiceResponse::success("Test".to_string(), None::<ValueType>))
+            }
+            
+            async fn publish(&self, _topic: String, _data: ValueType) -> Result<()> {
+                Ok(())
+            }
+            
+            async fn subscribe(
+                &self,
+                _topic: String,
+                _callback: Box<dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
+            ) -> Result<String> {
+                Ok("test-id".to_string())
+            }
+            
+            async fn subscribe_with_options(
+                &self,
+                _topic: String,
+                _callback: Box<dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
+                _options: SubscriptionOptions,
+            ) -> Result<String> {
+                Ok("test-id".to_string())
+            }
+            
+            async fn unsubscribe(&self, _topic: String, _subscription_id: Option<&str>) -> Result<()> {
+                Ok(())
+            }
+        }
+        
+        TestHandler
+    }
+}
+

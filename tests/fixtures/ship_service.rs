@@ -13,7 +13,6 @@ pub struct ShipService {
     name: String,
     path: String,
     state: ServiceState,
-    context: Option<RequestContext>,
     flight_status: Arc<Mutex<String>>,
 }
 
@@ -23,7 +22,6 @@ impl Clone for ShipService {
             name: self.name.clone(),
             path: self.path.clone(),
             state: self.state,
-            context: self.context.clone(),
             flight_status: Arc::clone(&self.flight_status),
         }
     }
@@ -36,7 +34,6 @@ impl ShipService {
             name: name.to_string(),
             path: "ship".to_string(),
             state: ServiceState::Created,
-            context: None,
             flight_status: Arc::new(Mutex::new("airborne".to_string())),
         }
     }
@@ -58,6 +55,9 @@ impl ShipService {
         event_data.insert("timestamp".to_string(), ValueType::Number(
             SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as f64
         ));
+
+        // Log the registry to check for subscribers
+        println!("[ShipService] DEBUG: About to publish to topic with context ID: {:?}", ctx as *const _);
 
         // Publish using the full path format (serviceName/eventName)
         let topic = format!("{}/landed", self.path);
@@ -85,6 +85,9 @@ impl ShipService {
         event_data.insert("timestamp".to_string(), ValueType::Number(
             SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as f64
         ));
+
+        // Log the registry to check for subscribers
+        println!("[ShipService] DEBUG: About to publish to topic with context ID: {:?}", ctx as *const _);
 
         // Publish using the full path format (serviceName/eventName)
         let topic = format!("{}/tookOff", self.path);
@@ -134,12 +137,12 @@ impl AbstractService for ShipService {
             ActionMetadata { name: "land".to_string() },
             ActionMetadata { name: "takeOff".to_string() },
             ActionMetadata { name: "status".to_string() },
+            ActionMetadata { name: "handle_event".to_string() },
         ]
     }
     
-    async fn init(&mut self, ctx: &RequestContext) -> Result<()> {
+    async fn init(&mut self, _ctx: &RequestContext) -> Result<()> {
         println!("ShipService init called");
-        self.context = Some(ctx.clone());
         self.state = ServiceState::Initialized;
         Ok(())
     }
@@ -179,6 +182,24 @@ impl AbstractService for ShipService {
                 })
             },
             "status" => self.handle_status(request).await,
+            "handle_event" => {
+                println!("[ShipService] Received event notification");
+                
+                // Extract event data
+                if let Some(data) = &request.data {
+                    println!("[ShipService] Event data: {:?}", data);
+                    
+                    // You can add additional handling logic here if needed
+                    // The ShipService doesn't need to act on its own events,
+                    // but this demonstrates proper event handling
+                }
+                
+                Ok(ServiceResponse {
+                    status: ResponseStatus::Success,
+                    message: "Event processed by ShipService".to_string(),
+                    data: None,
+                })
+            },
             _ => {
                 println!("  → Error: unknown action '{}'", request.action);
                 Ok(ServiceResponse {

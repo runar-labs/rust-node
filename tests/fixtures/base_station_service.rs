@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use runar_node::services::abstract_service::{AbstractService, ServiceState, ActionMetadata};
 use runar_node::services::ResponseStatus;
 use runar_node::{RequestContext, ServiceRequest, ServiceResponse, ValueType};
-use runar_node::logging::{info_log, Component};
+use runar_node::logging::{debug_log, info_log, Component};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::collections::HashMap;
@@ -13,8 +13,7 @@ pub struct BaseStationService {
     name: String,
     path: String,
     state: ServiceState,
-    context: Option<RequestContext>,
-    events: Arc<Mutex<Vec<ValueType>>>, // Store all received events
+    pub events: Arc<Mutex<Vec<ValueType>>>, // Store all received events
 }
 
 impl Clone for BaseStationService {
@@ -23,7 +22,6 @@ impl Clone for BaseStationService {
             name: self.name.clone(),
             path: self.path.clone(),
             state: self.state,
-            context: self.context.clone(),
             events: Arc::clone(&self.events),
         }
     }
@@ -37,31 +35,55 @@ impl BaseStationService {
             name: name.to_string(),
             path: "base".to_string(),
             state: ServiceState::Created,
-            context: None,
             events: Arc::new(Mutex::new(Vec::new())),
         }
     }
     
     /// Handle get_events action: returns all collected events
     async fn handle_get_events(&self, _request: ServiceRequest) -> Result<ServiceResponse> {
+        println!("[BaseStationService] handle_request: {} / get_events", self.path);
+        
         // Get all stored events
         let events = self.events.lock().unwrap().clone();
+        println!("Total events received: {}", events.len());
         
         // Create response data with counts by type
         let mut landed_count = 0;
         let mut took_off_count = 0;
         
-        for event in &events {
+        // Debug each event in detail
+        println!("\n[DEBUG] Examining each event for status:");
+        for (i, event) in events.iter().enumerate() {
+            println!("[DEBUG] Event {}: {:?}", i+1, event);
+            
+            // Only expect Map type events for consistent internal handling
             if let ValueType::Map(map) = event {
-                if let Some(ValueType::String(status)) = map.get("status") {
-                    if status == "landed" {
-                        landed_count += 1;
-                    } else if status == "airborne" {
-                        took_off_count += 1;
+                // Handle Map type (internal HashMap)
+                if let Some(status_value) = map.get("status") {
+                    println!("[DEBUG]   - Status value from Map: {:?}", status_value);
+                    if let ValueType::String(status) = status_value {
+                        println!("[DEBUG]   - Status string: '{}'", status);
+                        if status == "landed" {
+                            println!("[DEBUG]   - COUNTED as LANDED");
+                            landed_count += 1;
+                        } else if status == "airborne" {
+                            println!("[DEBUG]   - COUNTED as AIRBORNE");
+                            took_off_count += 1;
+                        } else {
+                            println!("[DEBUG]   - UNKNOWN status value");
+                        }
+                    } else {
+                        println!("[DEBUG]   - Status is not a string value");
                     }
+                } else {
+                    println!("[DEBUG]   - No 'status' field found in Map event");
                 }
+            } else {
+                println!("[DEBUG]   - Event is not a Map type: {:?}", event);
             }
         }
+        
+        println!("\n[DEBUG] TOTALS: landed={}, took_off={}", landed_count, took_off_count);
         
         // Build response with counts and full events
         let mut data = HashMap::new();
@@ -77,66 +99,70 @@ impl BaseStationService {
         })
     }
     
-    /// Set up subscriptions to ship events
+    /// Helper method to directly process an event without going through the handle_event flow
+    fn directly_process_event(&self, payload: ValueType) -> Result<()> {
+        println!("[BaseStationService] Directly processing event: {:?}", payload);
+        
+        // Store the event
+        let mut events = self.events.lock().unwrap();
+        events.push(payload.clone());
+        
+        println!("[BaseStationService] Event stored directly. Total count: {}", events.len());
+        Ok(())
+    }
+    
+    /// Set up subscriptions to various ship events
     async fn setup_subscriptions(&self, ctx: &RequestContext) -> Result<()> {
-        info_log(Component::Service, "About to set up subscriptions").await;
-        info_log(Component::Service, "Setting up subscriptions").await;
-
-        // Using shorthand format without network ID for subscriptions, matching how ShipService publishes
-        println!("[BaseStationService] DEBUG: Using shorthand formats (without network ID)");
-
-        // Test a simple subscription 
-        info_log(Component::Service, "Testing simple subscription to 'debug/test'").await;
-        match ctx.subscribe("debug/test", |_payload| {
-            // This is just a test subscription
-            Ok(())
-        }).await {
-            Ok(_) => info_log(Component::Service, "Debug subscription succeeded").await,
-            Err(e) => info_log(Component::Service, &format!("Debug subscription failed: {}", e)).await,
-        }
-
-        // Test with just the service name (should fail because it lacks the event name)
-        info_log(Component::Service, "Experimenting with 'ship' alone to see what happens").await;
-        match ctx.subscribe("ship", |_payload| {
-            Ok(())
-        }).await {
-            Ok(_) => info_log(Component::Service, "Ship-only subscription worked unexpectedly").await,
-            Err(e) => info_log(Component::Service, &format!("'ship' subscription failed as expected: {}", e)).await,
-        }
-
-        // Subscribe to ship landed event using shorthand format (without network ID)
-        let base_clone = self.clone();
+        println!("[BaseStationService] Subscribing to ship events directly");
+                
+        // Create direct subscription to exact topic paths the ship service publishes to
+        let self_clone_landed = self.clone();
+        let self_clone_takeoff = self.clone();
+        
+        // Subscribe to ship landing events
         println!("[BaseStationService] Subscribing to 'ship/landed'");
-        match ctx.subscribe("ship/landed", move |payload| {
-            if let ValueType::Map(event_data) = &payload {
-                // Store the event in non-await context (can't use await in closures)
-                let mut events = base_clone.events.lock().unwrap();
-                events.push(payload.clone());
-                println!("[BaseStationService] Received 'landed' event: {:?}", event_data);
-            }
-            Ok(())
-        }).await {
-            Ok(_) => info_log(Component::Service, "Successfully subscribed to 'ship/landed'").await,
-            Err(e) => info_log(Component::Service, &format!("'ship/landed' subscription failed: {}", e)).await,
-        }
-
-        // Subscribe to ship tookOff event using shorthand format (without network ID)
-        let base_clone = self.clone();
+        let _ = ctx.subscribe("ship/landed", move |payload| {
+            let service = self_clone_landed.clone();
+            Box::pin(async move {
+                println!("[BaseStationService] Received landed event: {:?}", payload);
+                
+                // Store the event
+                {
+                    let mut events = service.events.lock().unwrap();
+                    events.push(payload.clone());
+                    println!("[BaseStationService] Stored landed event. Total count: {}", events.len());
+                } // MutexGuard dropped here
+                
+                info_log(Component::Service,
+                       &format!("[BaseStationService] Received landed event")).await;
+                Ok(())
+            })
+        }).await;
+        
+        println!("[BaseStationService] Successfully subscribed to 'ship/landed'");
+        
+        // Subscribe to ship takeoff events
         println!("[BaseStationService] Subscribing to 'ship/tookOff'");
-        match ctx.subscribe("ship/tookOff", move |payload| {
-            if let ValueType::Map(event_data) = &payload {
-                // Store the event in non-await context (can't use await in closures)
-                let mut events = base_clone.events.lock().unwrap();
-                events.push(payload.clone());
-                println!("[BaseStationService] Received 'tookOff' event: {:?}", event_data);
-            }
-            Ok(())
-        }).await {
-            Ok(_) => info_log(Component::Service, "Successfully subscribed to 'ship/tookOff'").await,
-            Err(e) => info_log(Component::Service, &format!("'ship/tookOff' subscription failed: {}", e)).await,
-        }
-
-        info_log(Component::Service, "Subscriptions setup complete").await;
+        let _ = ctx.subscribe("ship/tookOff", move |payload| {
+            let service = self_clone_takeoff.clone();
+            Box::pin(async move {
+                println!("[BaseStationService] Received takeOff event: {:?}", payload);
+                
+                // Store the event
+                {
+                    let mut events = service.events.lock().unwrap();
+                    events.push(payload.clone());
+                    println!("[BaseStationService] Stored takeOff event. Total count: {}", events.len());
+                } // MutexGuard dropped here
+                
+                info_log(Component::Service,
+                       &format!("[BaseStationService] Received tookOff event")).await;
+                Ok(())
+            })
+        }).await;
+        
+        println!("[BaseStationService] Successfully subscribed to 'ship/tookOff'");
+        
         Ok(())
     }
 }
@@ -155,54 +181,48 @@ impl AbstractService for BaseStationService {
         self.state
     }
     
-    fn version(&self) -> &str {
-        "1.0.0"
-    }
-    
     fn description(&self) -> &str {
-        "A base station that monitors ship events"
+        "Base Station Service for monitoring ship activities"
     }
     
-    fn actions(&self) -> Vec<ActionMetadata> {
-        vec![
-            ActionMetadata { name: "get_events".to_string() }
-        ]
+    fn version(&self) -> &str {
+        "0.1.0"
     }
-    
-    async fn init(&mut self, ctx: &RequestContext) -> Result<()> {
-        println!("BaseStationService init called");
-        self.context = Some(ctx.clone());
-        
-        // Set up event subscriptions
-        println!("[BaseStationService] About to set up subscriptions");
-        self.setup_subscriptions(ctx).await?;
-        println!("[BaseStationService] Subscriptions setup complete");
-        
+
+    async fn init(&mut self, context: &RequestContext) -> Result<()> {
+        println!("[BaseStationService] init called");
         self.state = ServiceState::Initialized;
+        
+        // Set up subscriptions to various ship events
+        match self.setup_subscriptions(context).await {
+            Ok(_) => info_log(Component::Service, 
+                  "[BaseStationService] Successfully subscribed to ship events").await,
+            Err(e) => info_log(Component::Service, 
+                  &format!("[BaseStationService] Error subscribing to events: {}", e)).await,
+        }
+        
         Ok(())
     }
     
     async fn start(&mut self) -> Result<()> {
-        println!("BaseStationService start called");
+        println!("[BaseStationService] start called");
         self.state = ServiceState::Running;
         Ok(())
     }
     
     async fn stop(&mut self) -> Result<()> {
-        println!("BaseStationService stop called");
+        println!("[BaseStationService] stop called");
         self.state = ServiceState::Stopped;
         Ok(())
     }
     
     async fn handle_request(&self, request: ServiceRequest) -> Result<ServiceResponse> {
-        // Debug the request
-        println!("[BaseStationService] Handling request: action={}", request.action);
+        println!("[BaseStationService] handle_request: {} / {}", self.path, request.action);
         
-        // Delegate to specialized methods based on action
         match request.action.as_str() {
             "get_events" => self.handle_get_events(request).await,
             _ => {
-                println!("  → Error: unknown action '{}'", request.action);
+                println!("[BaseStationService] Unknown action: {}", request.action);
                 Ok(ServiceResponse {
                     status: ResponseStatus::Error,
                     message: format!("Unknown action: {}", request.action),
@@ -210,5 +230,36 @@ impl AbstractService for BaseStationService {
                 })
             }
         }
+    }
+    
+    fn actions(&self) -> Vec<ActionMetadata> {
+        vec![
+            ActionMetadata {
+                name: "get_events".to_string(),
+            }
+        ]
+    }
+}
+
+impl BaseStationService {
+    pub async fn handle_event(&self, event_data: ValueType, topic: &str) -> Result<()> {
+        info_log(Component::Service,
+                &format!("[BaseStationService] Received event on topic '{}' with data: {:?}", 
+                        topic, event_data)).await;
+        
+        // Store the event regardless of type for our event collection
+        info_log(Component::Service,
+                &format!("[BaseStationService] Current event count before adding: {}", 
+                        self.events.lock().unwrap().len())).await;
+        
+        // Store the event
+        let mut events = self.events.lock().unwrap();
+        events.push(event_data.clone());
+        
+        info_log(Component::Service,
+                &format!("[BaseStationService] Total events after update: {}", 
+                        events.len())).await;
+        
+        Ok(())
     }
 } 

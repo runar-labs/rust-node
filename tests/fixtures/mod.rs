@@ -4,4 +4,6 @@
 // TODO: Update these services to use ValueType::Array or ValueType::from_json().
 
 pub mod base_station_service;
-pub mod ship_service; 
+pub mod ship_service;
+pub mod math_service;
+pub mod auth_service; 

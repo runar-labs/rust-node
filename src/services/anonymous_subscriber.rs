@@ -198,6 +198,7 @@ impl AbstractService for AnonymousSubscriberService {
             ActionMetadata { name: "unsubscribe".to_string() },
             ActionMetadata { name: "publish".to_string() },
             ActionMetadata { name: "get_metrics".to_string() },
+            ActionMetadata { name: "handle_event".to_string() },
         ]
     }
     
@@ -253,6 +254,34 @@ impl AbstractService for AnonymousSubscriberService {
                     format!("Unsubscribed from topic {}, remaining subscribers: {}", 
                             self.subscription_topic(), count),
                     Some(ValueType::Number(count as f64)),
+                ))
+            }
+            "handle_event" => {
+                // Handle incoming events for subscriptions
+                self.update_last_activity();
+                
+                // Log that we received an event
+                log::debug!(
+                    "[{}] Anonymous subscriber {} received event on topic '{}'", 
+                    Component::Service.as_str(),
+                    self.name, 
+                    self.subscription_topic
+                );
+                
+                // Start timing the processing
+                let start_time = Instant::now();
+                
+                // In the actual implementation, this would be handled by the callback
+                // that's stored in the service registry. The registry will invoke the
+                // callback directly when publishing events.
+                
+                // Record metrics for this event
+                let processing_time_us = start_time.elapsed().as_micros() as u64;
+                self.record_event_received(true, processing_time_us);
+                
+                Ok(ServiceResponse::success::<ValueType>(
+                    "Event processed successfully".to_string(),
+                    None,
                 ))
             }
             "publish" => {

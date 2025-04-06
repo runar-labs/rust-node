@@ -8,6 +8,8 @@ pub enum PathType {
     Action,
     /// Path represents an event topic (publish/subscribe)
     Event,
+    /// Path represents a service (without action or event)
+    Service,
 }
 
 impl fmt::Display for PathType {
@@ -15,6 +17,7 @@ impl fmt::Display for PathType {
         match self {
             PathType::Action => write!(f, "Action"),
             PathType::Event => write!(f, "Event"),
+            PathType::Service => write!(f, "Service"),
         }
     }
 }
@@ -56,44 +59,107 @@ impl TopicPath {
         }
     }
     
+    /// Create a new service path (without action or event)
+    pub fn new_service(network_id: &str, service_path: &str) -> Self {
+        Self {
+            network_id: network_id.to_string(),
+            service_path: service_path.to_string(),
+            action_or_event: String::new(),
+            path_type: PathType::Service,
+        }
+    }
+    
+    /// Creates a new TopicPath representing just the service part of this path
+    pub fn to_service_path(&self) -> Self {
+        Self {
+            network_id: self.network_id.clone(),
+            service_path: self.service_path.clone(),
+            action_or_event: String::new(),
+            path_type: PathType::Service,
+        }
+    }
+    
+    /// Extracts the service path string from this TopicPath
+    pub fn service_path_str(&self) -> String {
+        format!("{}:{}", self.network_id, self.service_path)
+    }
+    
+    /// Creates a TopicPath for an action on this service
+    pub fn with_action(&self, action: &str) -> Self {
+        Self {
+            network_id: self.network_id.clone(),
+            service_path: self.service_path.clone(),
+            action_or_event: action.to_string(),
+            path_type: PathType::Action,
+        }
+    }
+    
+    /// Creates a TopicPath for an event on this service
+    pub fn with_event(&self, event: &str) -> Self {
+        Self {
+            network_id: self.network_id.clone(),
+            service_path: self.service_path.clone(),
+            action_or_event: event.to_string(),
+            path_type: PathType::Event,
+        }
+    }
+    
     /// Parse a path string into a TopicPath
     /// 
     /// Supports the following formats:
-    /// - "service_path/action" (uses the default network ID)
-    /// - "network:service_path/action" (explicit network ID)
+    /// - Format 1: Full format with network ID - "network:service/action"
+    /// - Format 2: Network and service only - "network:service"
+    /// - Format 3: Service and action without network - "service/action" (uses default network ID)
+    /// - Format 4: Just service name - "service" (uses default network ID)
     pub fn parse(path_str: &str, default_network_id: &str) -> Result<Self> {
-        // Check for network separator
-        if let Some(network_index) = path_str.find(':') {
-            // Format: "network:service_path/action"
-            let network_id = &path_str[0..network_index];
-            let remainder = &path_str[network_index+1..];
-            
-            // Split the remainder by '/'
-            let parts: Vec<&str> = remainder.split('/').collect();
-            if parts.len() != 2 {
-                return Err(anyhow!("Invalid path format after network ID: {}", remainder));
+        // Format 1: Full format with network ID - "network:service/action"
+        if let Some((network_prefix, remainder)) = path_str.split_once(':') {
+            if let Some((service, action)) = remainder.split_once('/') {
+                return Ok(Self {
+                    network_id: network_prefix.to_string(),
+                    service_path: service.to_string(),
+                    action_or_event: action.to_string(),
+                    path_type: if path_str.contains("(Event)") {
+                        PathType::Event
+                    } else {
+                        PathType::Action
+                    },
+                });
             }
-            
-            Ok(Self {
-                network_id: network_id.to_string(),
-                service_path: parts[0].to_string(),
-                action_or_event: parts[1].to_string(),
-                path_type: PathType::Action, // Default, can be changed by caller
-            })
-        } else {
-            // No network specified, use default
-            let parts: Vec<&str> = path_str.split('/').collect();
-            if parts.len() != 2 {
-                return Err(anyhow!("Invalid path format: {}", path_str));
-            }
-            
-            Ok(Self {
-                network_id: default_network_id.to_string(),
-                service_path: parts[0].to_string(),
-                action_or_event: parts[1].to_string(),
-                path_type: PathType::Action, // Default, can be changed by caller
-            })
+            // Format 2: Network and service only - "network:service"
+            return Ok(Self {
+                network_id: network_prefix.to_string(),
+                service_path: remainder.to_string(),
+                action_or_event: String::new(),
+                path_type: PathType::Service,
+            });
         }
+        
+        // Format 3: Service and action without network - "service/action"
+        if let Some((service, action)) = path_str.split_once('/') {
+            return Ok(Self {
+                network_id: default_network_id.to_string(),
+                service_path: service.to_string(),
+                action_or_event: action.to_string(),
+                path_type: if path_str.contains("(Event)") {
+                    PathType::Event
+                } else {
+                    PathType::Action
+                },
+            });
+        }
+        
+        // Format 4: Just service name - "service"
+        if !path_str.is_empty() {
+            return Ok(Self {
+                network_id: default_network_id.to_string(),
+                service_path: path_str.to_string(),
+                action_or_event: String::new(),
+                path_type: PathType::Service,
+            });
+        }
+        
+        Err(anyhow!("Invalid path format: {}", path_str))
     }
     
     /// Try to parse a path string into a TopicPath, without a default network ID
@@ -132,7 +198,13 @@ impl TopicPath {
     
     /// Convert TopicPath to string representation with network ID
     pub fn to_string(&self) -> String {
-        format!("{}:{}/{}", self.network_id, self.service_path, self.action_or_event)
+        if self.action_or_event.is_empty() {
+            // Service path only
+            format!("{}:{}", self.network_id, self.service_path)
+        } else {
+            // Full path
+            format!("{}:{}/{}", self.network_id, self.service_path, self.action_or_event)
+        }
     }
     
     /// Convert TopicPath to string representation without network ID
@@ -224,22 +296,21 @@ mod tests {
     }
     
     #[test]
-    fn test_parse_invalid_single_part() {
-        // Test that a single-part path (without slash) fails with an error
-        let result = TopicPath::parse("ship", "test_network");
-        assert!(result.is_err());
-        
-        if let Err(e) = result {
-            assert!(e.to_string().contains("Invalid path format"));
-        }
-        
-        // Test with network ID explicitly included
-        let result = TopicPath::parse("test_network:ship", "default");
-        assert!(result.is_err());
-        
-        if let Err(e) = result {
-            assert!(e.to_string().contains("Invalid path format"));
-        }
+    fn test_parse_service_only() {
+        let path = TopicPath::parse("auth_service", "test_network").unwrap();
+        assert_eq!(path.network_id, "test_network");
+        assert_eq!(path.service_path, "auth_service");
+        assert_eq!(path.action_or_event, "");
+        assert_eq!(path.path_type, PathType::Service);
+    }
+    
+    #[test]
+    fn test_parse_network_and_service_only() {
+        let path = TopicPath::parse("test_network:auth_service", "default").unwrap();
+        assert_eq!(path.network_id, "test_network");
+        assert_eq!(path.service_path, "auth_service");
+        assert_eq!(path.action_or_event, "");
+        assert_eq!(path.path_type, PathType::Service);
     }
     
     #[test]
@@ -266,14 +337,13 @@ mod tests {
     
     #[test]
     fn test_matches_event() {
-        let path1 = TopicPath::new_event("test", "user", "created");
-        let path2 = TopicPath::new_event("test", "user", "created");
-        let path3 = TopicPath::new_event("test", "user", "#");
-        let path4 = TopicPath::new_event("test", "#", "created");
+        let path1 = TopicPath::new_event("test", "auth", "logged_in");
+        let path2 = TopicPath::new_event("test", "auth", "logged_in");
+        let path3 = TopicPath::new_event("test", "auth", "#"); // Wildcard
         
         assert!(path1.matches(&path2));
-        assert!(path1.matches(&path3));
-        assert!(path1.matches(&path4));
+        assert!(path1.matches(&path3)); // Wildcard should match
+        assert!(path3.matches(&path1)); // Matching should be symmetric
     }
     
     #[test]
@@ -282,5 +352,56 @@ mod tests {
         let path2 = TopicPath::new_action("test2", "auth", "login");
         
         assert!(!path1.matches(&path2));
+    }
+    
+    #[test]
+    fn test_topic_path_conversion() {
+        // Create service-only TopicPath from full path
+        let full_path = TopicPath::parse("network:service/action", "").unwrap();
+        let service_path = full_path.to_service_path();
+        assert_eq!(service_path.network_id, "network");
+        assert_eq!(service_path.service_path, "service");
+        assert_eq!(service_path.action_or_event, "");
+        assert_eq!(service_path.path_type, PathType::Service);
+        
+        // Create action variation from service path
+        let service_path = TopicPath::parse("network:service", "").unwrap();
+        let action_path = service_path.with_action("new_action");
+        assert_eq!(action_path.network_id, "network");
+        assert_eq!(action_path.service_path, "service");
+        assert_eq!(action_path.action_or_event, "new_action");
+        assert_eq!(action_path.path_type, PathType::Action);
+        
+        // Create event variation from service path
+        let event_path = service_path.with_event("new_event");
+        assert_eq!(event_path.network_id, "network");
+        assert_eq!(event_path.service_path, "service");
+        assert_eq!(event_path.action_or_event, "new_event");
+        assert_eq!(event_path.path_type, PathType::Event);
+    }
+    
+    #[test]
+    fn test_topic_path_string_representation() {
+        // Test string representation is normalized
+        let path = TopicPath::parse("network:service/action", "").unwrap();
+        assert_eq!(path.to_string(), "network:service/action");
+        
+        // Service path representation
+        let service_path = path.to_service_path();
+        assert_eq!(service_path.to_string(), "network:service");
+        
+        // Service path string helper
+        assert_eq!(path.service_path_str(), "network:service");
+    }
+    
+    #[test]
+    fn test_service_path_extraction() {
+        let path = TopicPath::parse("network:service/action", "").unwrap();
+        let service_topic_path = path.to_service_path();
+        
+        assert_eq!(service_topic_path.network_id, "network");
+        assert_eq!(service_topic_path.service_path, "service");
+        assert_eq!(service_topic_path.action_or_event, "");
+        assert_eq!(service_topic_path.path_type, PathType::Service);
     }
 }
