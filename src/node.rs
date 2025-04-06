@@ -310,25 +310,36 @@ impl Node {
         Ok(())
     }
 
-    /// Request implementation - for converting path strings to service requests and handling them
+    /// Process a service request
     ///
-    /// INTENTION: Process a service request by routing it to the appropriate handler.
-    /// This is the core request handling method of the Node.
+    /// INTENTION: Validate and route a request to the appropriate service action handler.
+    /// This method parses the given path, looks up the service and action handler,
+    /// and invokes the handler with a request context.
     ///
-    /// This method:
-    /// 1. Parses the path into a validated TopicPath
-    /// 2. Creates a proper request context
-    /// 3. Constructs a ServiceRequest
-    /// 4. Finds the appropriate action handler from the service registry
-    /// 5. Invokes the handler and returns its response
-    /// 6. Returns an error response if no handler is found
+    /// Example:
+    /// ```
+    /// use runar_node::Node;
+    /// use runar_common::types::ValueType;
+    /// use serde_json::json;
     ///
-    /// Path formats supported:
-    /// - "service_name/action" - Uses the current network context
-    /// - "network_id:service_name/action" - Fully qualified path
-    pub async fn request(&self, path: String, params: ValueType) -> Result<ServiceResponse> {
+    /// async fn make_request(node: &Node) {
+    ///     // Call the "add" action on the "math" service
+    ///     let response = node.request(
+    ///         "math/add",
+    ///         ValueType::from(json!({
+    ///             "a": 5,
+    ///             "b": 3
+    ///         }))
+    ///     ).await.expect("Request failed");
+    ///
+    ///     // Process the response...
+    /// }
+    /// ```
+    pub async fn request(&self, path: impl Into<String>, params: ValueType) -> Result<ServiceResponse> {
+        let path_string = path.into();
+        
         // Parse the path into a TopicPath for validation
-        let topic_path = TopicPath::new(&path, &self.network_id)
+        let topic_path = TopicPath::new(&path_string, &self.network_id)
             .map_err(|e| anyhow!("Invalid path format: {}", e))?;
         
         // Create a context with a derived logger for this request
@@ -376,13 +387,13 @@ impl Node {
         context_arc.error(&error_msg);
         Ok(ServiceResponse::error(404, &error_msg))
     }
-    
+
     /// Publish an event to a topic
     ///
     /// INTENTION: Distribute an event to subscribers of the topic.
     /// This method validates the topic string, converts it to a TopicPath,
     /// looks up subscribers in the service registry, and delivers the event.
-    pub async fn publish(&self, topic: String, data: ValueType) -> Result<()> {
+    pub async fn publish(&self, topic: impl Into<String>, data: ValueType) -> Result<()> {
         // Use publish_with_options with default options
         self.publish_with_options(topic, data, PublishOptions::default()).await
     }
@@ -398,9 +409,12 @@ impl Node {
     /// The method validates the topic string, converts it to a TopicPath,
     /// looks up subscribers in the service registry, and delivers the event
     /// according to the specified options.
-    pub async fn publish_with_options(&self, topic: String, data: ValueType, options: PublishOptions) -> Result<()> {
+    pub async fn publish_with_options(&self, topic: impl Into<String>, data: ValueType, options: PublishOptions) -> Result<()> {
+        // Convert to String for NodeDelegate implementation
+        let topic_string = topic.into();
+        
         // Convert string to validated TopicPath
-        let topic_path = TopicPath::new(&topic, &self.network_id)
+        let topic_path = TopicPath::new(&topic_string, &self.network_id)
             .map_err(|e| anyhow!("Invalid topic format: {}", e))?;
             
         self.logger.debug(format!("Publishing to topic '{}' with options: {:?}", topic_path.as_str(), options));
@@ -471,25 +485,52 @@ impl Node {
     /// Subscribe to a topic
     pub async fn subscribe(
         &self,
-        topic: String,
+        topic: impl Into<String>,
         callback: Box<dyn Fn(Arc<EventContext>, ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
     ) -> Result<String> {
-        <Self as NodeDelegate>::subscribe(self, topic, callback).await
+        let topic_string = topic.into();
+        
+        // Get a topic path to validate the topic and extract network ID if present
+        let topic_path = TopicPath::new(&topic_string, &self.network_id)
+            .map_err(|e| anyhow!("Invalid topic format: {}", e))?;
+        
+        // Convert Box to Arc (required by service_registry)
+        let callback_arc = Arc::from(callback);
+        
+        // Subscribe through the service registry
+        self.service_registry.subscribe(&topic_path, callback_arc).await
     }
 
     /// Subscribe to a topic with options
     pub async fn subscribe_with_options(
         &self,
-        topic: String,
+        topic: impl Into<String>,
         callback: Box<dyn Fn(Arc<EventContext>, ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
         options: SubscriptionOptions,
     ) -> Result<String> {
-        <Self as NodeDelegate>::subscribe_with_options(self, topic, callback, options).await
+        let topic_string = topic.into();
+        
+        // Get a topic path to validate the topic and extract network ID if present
+        let topic_path = TopicPath::new(&topic_string, &self.network_id)
+            .map_err(|e| anyhow!("Invalid topic format: {}", e))?;
+        
+        // Convert Box to Arc (required by service_registry)
+        let callback_arc = Arc::from(callback);
+        
+        // Subscribe through the service registry with options
+        self.service_registry.subscribe_with_options(&topic_path, callback_arc, options).await
     }
 
     /// Unsubscribe from a topic
-    pub async fn unsubscribe(&self, topic: String, subscription_id: Option<&str>) -> Result<()> {
-        <Self as NodeDelegate>::unsubscribe(self, topic, subscription_id).await
+    pub async fn unsubscribe(&self, topic: impl Into<String>, subscription_id: Option<&str>) -> Result<()> {
+        let topic_string = topic.into();
+        
+        // Get a topic path to validate the topic and extract network ID if present
+        let topic_path = TopicPath::new(&topic_string, &self.network_id)
+            .map_err(|e| anyhow!("Invalid topic format: {}", e))?;
+        
+        // Unsubscribe through the service registry
+        self.service_registry.unsubscribe(&topic_path, subscription_id).await
     }
 
     /// List all services
@@ -759,103 +800,57 @@ pub type ActionRegistrar = Arc<dyn Fn(&TopicPath, ActionHandler, Option<ActionMe
 
 #[async_trait::async_trait]
 impl NodeDelegate for Node {
-    /// Process a service request
+    /// Process a service request - NodeDelegate trait implementation
     async fn request(&self, path: String, params: ValueType) -> Result<ServiceResponse> {
-        // Call Node's own implementation directly
-        Self::request(self, path, params).await
-    }
-    
-    /// Simplified publish for common cases
-    async fn publish(&self, topic: String, data: ValueType) -> Result<()> {
-        // Call Node's own implementation directly
-        Self::publish(self, topic, data).await
+        // Call public method with path String
+        self.request(path, params).await
     }
 
-    /// Subscribe to a topic
+    /// Publish an event - NodeDelegate trait implementation
+    async fn publish(&self, topic: String, data: ValueType) -> Result<()> {
+        // Call public method with topic String
+        self.publish(topic, data).await
+    }
+
+    /// Subscribe to a topic - NodeDelegate trait implementation
     async fn subscribe(
         &self,
         topic: String,
         callback: Box<dyn Fn(Arc<EventContext>, ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
     ) -> Result<String> {
-        // Convert string to TopicPath and subscribe through service registry
-        let topic_path = TopicPath::new(&topic, &self.network_id)
-            .map_err(|e| anyhow!("Invalid topic format: {}", e))?;
-        
-        // Convert Box to Arc
-        let callback_arc = Arc::from(callback);
-        
-        // Register with the service registry
-        self.service_registry.subscribe(&topic_path, callback_arc).await
+        // Call public method with topic String
+        self.subscribe(topic, callback).await
     }
 
-    /// Subscribe to a topic with options
+    /// Subscribe to a topic with options - NodeDelegate trait implementation
     async fn subscribe_with_options(
         &self,
         topic: String,
         callback: Box<dyn Fn(Arc<EventContext>, ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
         options: SubscriptionOptions,
     ) -> Result<String> {
-        // Convert string to TopicPath and subscribe through service registry
-        let topic_path = TopicPath::new(&topic, &self.network_id)
-            .map_err(|e| anyhow!("Invalid topic format: {}", e))?;
-        
-        // Convert Box to Arc
-        let callback_arc = Arc::from(callback);
-        
-        // Register with the service registry
-        self.service_registry.subscribe_with_options(&topic_path, callback_arc, options).await
+        // Call public method with topic String
+        self.subscribe_with_options(topic, callback, options).await
     }
 
-    /// Unsubscribe from a topic
+    /// Unsubscribe from a topic - NodeDelegate trait implementation
     async fn unsubscribe(&self, topic: String, subscription_id: Option<&str>) -> Result<()> {
-        // Convert string to TopicPath and unsubscribe through service registry
-        let topic_path = TopicPath::new(&topic, &self.network_id)
-            .map_err(|e| anyhow!("Invalid topic format: {}", e))?;
-        
-        self.service_registry.unsubscribe(&topic_path, subscription_id).await
+        // Call public method with topic String
+        self.unsubscribe(topic, subscription_id).await
     }
 
-    /// List all services
+    /// List all services - NodeDelegate trait implementation
     fn list_services(&self) -> Vec<String> {
         // Return a simple snapshot of services
-        // This avoids the need to block on async code
         self.services.try_read()
             .map(|services| services.keys().cloned().collect::<Vec<String>>())
             .unwrap_or_default()
     }
-    
-    /// Register an action handler for a specific path
+
+    /// Register an action handler - NodeDelegate trait implementation
     async fn register_action_handler(&self, topic_path: &TopicPath, handler: ActionHandler, metadata: Option<ActionMetadata>) -> Result<()> {
-        // Log the registration
-        self.logger.debug(format!("Registering action handler for '{}'", topic_path.as_str()));
-        
-        // Clone metadata for service registry
-        let metadata_for_registry = metadata.clone();
-        
-        // Register the handler with the service registry
-        self.service_registry.register_action_handler(topic_path, handler, metadata_for_registry).await?;
-        
-        // Update service metadata if provided
-        if let Some(md) = &metadata {
-            // Get a write lock on the service metadata
-            let mut service_metadata = self.service_metadata.write().await;
-            
-            // Find or create metadata for this service
-            let service_path = topic_path.service_path();
-            let entry = service_metadata.entry(service_path.to_string()).or_insert_with(|| {
-                CompleteServiceMetadata::new(
-                    service_path.to_string(),
-                    "unknown".to_string(),
-                    service_path.to_string(),
-                    "Dynamically registered service".to_string()
-                )
-            });
-            
-            // Add this action to the service's registered actions
-            entry.register_action(md.clone());
-        }
-        
-        Ok(())
+        // Register through the service registry
+        self.service_registry.register_action_handler(topic_path, handler, metadata).await
     }
 }
 
