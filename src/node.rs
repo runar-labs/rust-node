@@ -129,7 +129,6 @@ impl Node {
         // Create and add the Registry Service using a different approach to avoid weak reference issues
         logger.debug("Creating RegistryService instance");
         let registry_service = RegistryService::new(
-            &node.network_id,
             node.logger.with_component(Component::Service),
             Arc::new(node.clone()) as Arc<dyn RegistryDelegate>,
         );
@@ -665,7 +664,6 @@ impl Node {
             // Get a write lock on the service metadata
             let mut service_metadata = self.service_metadata.write().await;
             
-            
             // Find or create metadata for this service
             let service_path = topic_path.service_path();
             let entry = service_metadata.entry(service_path.to_string()).or_insert_with(|| {
@@ -853,6 +851,12 @@ impl RegistryDelegate for Node {
     async fn get_service_metadata(&self, service_path: &str) -> Option<CompleteServiceMetadata> {
         let metadata = self.service_metadata.read().await;
         metadata.get(service_path).cloned()
+    }
+    
+    /// Get metadata for all registered services in a single call
+    async fn get_all_service_metadata(&self) -> HashMap<String, CompleteServiceMetadata> {
+        let metadata = self.service_metadata.read().await;
+        metadata.clone()
     }
     
     /// List all services

@@ -466,24 +466,4 @@ impl ServiceRegistry {
         
         result
     }
-
-    /// Create an action registrar function
-    ///
-    /// INTENTION: Create a function that can be passed to services during
-    /// initialization to allow them to register action handlers.
-    pub fn create_action_registrar(&self, network_id: String) -> Arc<dyn Fn(&TopicPath, ActionHandler, Option<ActionMetadata>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync> {
-        let registry = self.clone();
-        
-        // Create a boxed function that can register action handlers using TopicPath
-        Arc::new(move |topic_path: &TopicPath, handler: ActionHandler, metadata: Option<ActionMetadata>| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
-            let registry_clone = registry.clone();
-            let metadata = metadata.clone();
-            let topic_path = topic_path.clone();
-            
-            // Return a future that registers the handler
-            Box::pin(async move {
-                registry_clone.register_action_handler(&topic_path, handler, metadata).await
-            })
-        })
-    }
 } 

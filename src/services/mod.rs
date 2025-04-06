@@ -1343,22 +1343,9 @@ pub trait RegistryDelegate: Send + Sync {
     /// Get metadata for a specific service
     async fn get_service_metadata(&self, service_path: &str) -> Option<CompleteServiceMetadata>;
     
+    /// Get metadata for all registered services in a single call
+    async fn get_all_service_metadata(&self) -> HashMap<String, CompleteServiceMetadata>;
+    
     /// List all services
     fn list_services(&self) -> Vec<String>;
-}
-
-// For backward compatibility with tests - use with caution in LifecycleContext
-// #[deprecated(note = "Use new_with_logger instead")]
-// impl LifecycleContext {
-//     pub fn new(network_id: &str, service_path: &str) -> Self {
-//         // Warning: This creates a new root logger which is not the correct pattern
-//         // Only used for backward compatibility with tests
-//         Self {
-//             network_id: network_id.to_string(),
-//             service_path: service_path.to_string(),
-//             config: None,
-//             logger: Logger::new_root(Component::Service, network_id),
-//             action_registrar: None,
-//         }
-//     }
-// } 
+} 

@@ -16,19 +16,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::routing::TopicPath;
 use crate::services::abstract_service::{AbstractService, CompleteServiceMetadata, ServiceState};
-use crate::services::{ActionHandler, ActionRegistrationOptions, LifecycleContext, RequestContext, ServiceResponse, RegistryDelegate};
-use runar_common::logging::{Component, Logger};
+use crate::services::{ActionHandler, LifecycleContext, RequestContext, ServiceResponse, RegistryDelegate};
+use runar_common::logging::Logger;
 use runar_common::types::ValueType;
 
 /// Registry Info Service - provides information about registered services without holding state
 pub struct RegistryService {
     /// The service path
     path: String,
-    
-    /// The network ID for this service
-    network_id: String,
     
     /// Logger instance
     logger: Logger,
@@ -40,13 +36,11 @@ pub struct RegistryService {
 impl RegistryService {
     /// Create a new Registry Service
     pub fn new(
-        network_id: &str,
         logger: Logger,
         delegate: Arc<dyn RegistryDelegate>,
     ) -> Self {
         RegistryService {
             path: "$registry".to_string(),
-            network_id: network_id.to_string(),
             logger,
             registry_delegate: delegate,
         }
@@ -148,8 +142,9 @@ impl RegistryService {
     async fn handle_list_services(&self, _params: ValueType, ctx: RequestContext) -> Result<ServiceResponse> {
         let mut services = Vec::new();
         
-        // Get services info directly from the registry delegate
+        // Get all service states and metadata in one call
         let service_states = self.registry_delegate.get_all_service_states().await;
+        let service_metadata = self.registry_delegate.get_all_service_metadata().await;
         
         // Combine the information
         for (path, state) in service_states {
@@ -157,8 +152,8 @@ impl RegistryService {
             service_info.insert("path".to_string(), ValueType::String(path.clone()));
             service_info.insert("state".to_string(), ValueType::String(format!("{:?}", state)));
             
-            // Try to get additional metadata if available
-            if let Some(meta) = self.registry_delegate.get_service_metadata(&path).await {
+            // Add metadata if available
+            if let Some(meta) = service_metadata.get(&path) {
                 service_info.insert("name".to_string(), ValueType::String(meta.name.clone()));
                 service_info.insert("version".to_string(), ValueType::String(meta.version.clone()));
                 service_info.insert("description".to_string(), ValueType::String(meta.description.clone()));
@@ -171,7 +166,7 @@ impl RegistryService {
     }
     
     /// Handler for getting detailed information about a specific service
-    async fn handle_service_info(&self, service_path: &str, _params: ValueType, ctx: RequestContext) -> Result<ServiceResponse> {
+    async fn handle_service_info(&self, _service_path: &str, _params: ValueType, ctx: RequestContext) -> Result<ServiceResponse> {
         // Extract the service path from path parameters
         let actual_service_path = match self.extract_service_path(&ctx) {
             Ok(path) => path,
@@ -236,7 +231,7 @@ impl RegistryService {
     }
     
     /// Handler for getting just the state of a service
-    async fn handle_service_state(&self, service_path: &str, _params: ValueType, ctx: RequestContext) -> Result<ServiceResponse> {
+    async fn handle_service_state(&self, _service_path: &str, _params: ValueType, ctx: RequestContext) -> Result<ServiceResponse> {
         // Extract the service path from path parameters
         let actual_service_path = match self.extract_service_path(&ctx) {
             Ok(path) => path,
@@ -330,7 +325,6 @@ impl Clone for RegistryService {
     fn clone(&self) -> Self {
         Self {
             path: self.path.clone(),
-            network_id: self.network_id.clone(),
             logger: self.logger.clone(),
             registry_delegate: self.registry_delegate.clone(),
         }
