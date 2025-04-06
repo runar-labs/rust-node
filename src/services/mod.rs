@@ -1,1217 +1,1364 @@
+// Services Module
+//
+// INTENTION:
+// This module defines the core service architecture components, interfaces, and types
+// that form the foundation of the service-oriented architecture. It establishes
+// the contracts between services, the node, and clients that use them.
+//
+// ARCHITECTURAL PRINCIPLES:
+// 1. Service Isolation - Services are self-contained with clear boundaries
+// 2. Request-Response Pattern - All service interactions follow a consistent
+//    request-response pattern for predictability and simplicity
+// 3. Contextual Logging - All operations include context for proper tracing
+// 4. Network Isolation - Services operate within specific network boundaries
+// 5. Event-Driven Communication - Services can publish and subscribe to events
+//
+// This module is the cornerstone of the system's service architecture, defining
+// how services are structured, discovered, and interacted with.
+
 use anyhow::{anyhow, Result};
-use log::info;
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use std::any::Any;
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use uuid;
-use std::pin::Pin;
 use std::future::Future;
-
+use std::pin::Pin;
+use std::sync::Arc;
+use std::fmt::{self, Debug};
+use std::collections::HashMap;
 use crate::routing::TopicPath;
+use serde::{Serialize, Deserialize};
+use tokio::sync::RwLock;
 
-use crate::db::SqliteDatabase;
-use crate::node::NodeConfig;
-
-// Import types from runar_common
-use runar_common::types::{ValueType, SerializableStruct};
-
-// Export the abstract service module
-pub mod abstract_service;
-// Export the sqlite service module
-pub mod sqlite;
-// Export the node info service module
-pub mod node_info;
-// Export the registry service module
 pub mod service_registry;
-// Export the registry info module
+pub mod abstract_service;
+pub mod path_processor;
 pub mod registry_info;
-// Export the utils module
-pub mod utils;
-// Export the remote service module
-pub mod remote;
-// Export the anonymous subscriber module
-pub mod anonymous_subscriber;
-// Export the manager module
-pub mod manager;
-// Export the distributed registry module (for macros)
-pub mod distributed_registry;
-// Export the error handling demo module
-pub mod error_handling_demo;
 
-// Re-export service types
-pub use abstract_service::{AbstractService, ServiceMetadata, ServiceState};
-pub use anonymous_subscriber::AnonymousSubscriberService;
-pub use node_info::NodeInfoService;
-pub use remote::{P2PTransport, RemoteService};
-pub use sqlite::SqliteService;
-pub use utils::ServiceResponseExt;
-pub use error_handling_demo::ErrorHandlingDemoService;
+use runar_common::types::ValueType;
+use runar_common::logging::{Component, LoggingContext, Logger};
+use crate::services::abstract_service::{ActionMetadata, EventMetadata, CompleteServiceMetadata, ServiceState};
 
-// Re-export common types (safely)
-pub mod types {
-    pub use runar_common::types::{ValueType, SerializableStruct};
-}
-
-// Re-export distributed registry types (for macros)
-pub use distributed_registry::{
-    ActionHandler, 
-    ProcessHandler, 
-    EventSubscription, 
-    PublicationInfo,
-};
-
-// Re-export registry objects if distributed slice feature is enabled
-#[cfg(feature = "distributed_slice")]
-pub use distributed_registry::{
-    ACTION_REGISTRY,
-    PROCESS_REGISTRY,
-    SUBSCRIPTION_REGISTRY,
-    PUBLICATION_REGISTRY,
-    distributed_slice,
-};
-
-/// Handler for node requests - used to make service calls and handle events
-#[async_trait::async_trait]
-pub trait NodeRequestHandler: Send + Sync {
-    /// Make a request to a service with additional options
-    /// 
-    /// This method provides a flexible API for making service requests with various options
-    /// such as timeout, retries, custom request IDs, and additional metadata.
-    /// 
-    /// # Examples
-    /// 
-    /// Basic request with timeout:
-    /// ```
-    /// let options = RequestOptions::with_timeout(5000); // 5 second timeout
-    /// node.request_with_options("service/action", params, options).await?;
-    /// ```
-    /// 
-    /// Request with retry:
-    /// ```
-    /// let options = RequestOptions::new()
-    ///     .timeout(5000)
-    ///     .with_retry(3, 500); // retry up to 3 times with 500ms delay
-    /// node.request_with_options("service/action", params, options).await?;
-    /// ```
-    /// 
-    /// Request with custom ID and metadata:
-    /// ```
-    /// let mut metadata = HashMap::new();
-    /// metadata.insert("source".to_string(), ValueType::String("user_interface".to_string()));
-    /// 
-    /// let options = RequestOptions::new()
-    ///     .with_request_id("custom-request-123".to_string())
-    ///     .with_metadata(metadata);
-    /// node.request_with_options("service/action", params, options).await?;
-    /// ```
-    async fn request_with_options(&self, path: String, params: ValueType, options: RequestOptions) -> Result<ServiceResponse> {
-        // Handle retries if enabled
-        if options.retry && options.max_retries.is_some() {
-            let max_retries = options.max_retries.unwrap();
-            let retry_delay = options.retry_delay_ms.unwrap_or(500);
-            
-            // Attempt the request multiple times
-            let mut attempt = 0;
-            let mut last_error = None;
-            
-            while attempt <= max_retries {
-                attempt += 1;
-                
-                // For each attempt, try with timeout if specified
-                let result = if let Some(timeout_ms) = options.timeout_ms {
-                    match tokio::time::timeout(
-                        std::time::Duration::from_millis(timeout_ms),
-                        self.request(path.clone(), params.clone())
-                    ).await {
-                        Ok(result) => result,
-                        Err(_) => Err(anyhow::anyhow!("Request timed out")),
-                    }
-                } else {
-                    // No timeout, just make the request
-                    self.request(path.clone(), params.clone()).await
-                };
-                
-                // Check the result
-                match result {
-                    Ok(response) => {
-                        // Check if it's an error response that should be retried
-                        if response.status == ResponseStatus::Error {
-                            // Store the error and retry if we haven't exceeded max retries
-                            last_error = Some(anyhow::anyhow!("Service error: {}", response.message));
-                            
-                            if attempt <= max_retries {
-                                // Wait before retrying
-                                tokio::time::sleep(std::time::Duration::from_millis(retry_delay)).await;
-                                continue;
-                            } else {
-                                // Return the error response on the last attempt
-                                return Ok(response);
-                            }
-                        } else {
-                            // Success response, return it
-                            return Ok(response);
-                        }
-                    },
-                    Err(err) => {
-                        // Store the error and retry if we haven't exceeded max retries
-                        last_error = Some(err);
-                        
-                        if attempt <= max_retries {
-                            // Wait before retrying
-                            tokio::time::sleep(std::time::Duration::from_millis(retry_delay)).await;
-                            continue;
-                        }
-                    }
-                }
-            }
-            
-            // If we get here, all retries failed
-            return Err(last_error.unwrap_or_else(|| anyhow::anyhow!("Request failed after retries")));
-        } else {
-            // No retries, just handle timeout if specified
-            if let Some(timeout_ms) = options.timeout_ms {
-                match tokio::time::timeout(
-                    std::time::Duration::from_millis(timeout_ms),
-                    self.request(path, params)
-                ).await {
-                    Ok(result) => result,
-                    Err(_) => Ok(ServiceResponse::error("Request timed out")),
-                }
-            } else {
-                // No timeout or retries, just forward the request
-                self.request(path, params).await
-            }
-        }
-    }
-
-    /// Make a request to a service
-    async fn request(&self, path: String, params: ValueType) -> Result<ServiceResponse>;
-
-    /// Publish an event
-    async fn publish(&self, topic: String, data: ValueType) -> Result<()>;
-
-    /// Subscribe to events on a topic with an async callback
-    async fn subscribe(
-        &self,
-        topic: String,
-        callback: Box<dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
-    ) -> Result<String>;
-    
-    /// Subscribe to events with options and an async callback
-    async fn subscribe_with_options(
-        &self,
-        topic: String,
-        callback: Box<dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
-        options: SubscriptionOptions,
-    ) -> Result<String>;
-
-    /// Unsubscribe from events
-    async fn unsubscribe(&self, topic: String, subscription_id: Option<&str>) -> Result<()>;
-
-    /// List available services
-    fn list_services(&self) -> Vec<String> {
-        Vec::new()
-    }
-    
-    /// Get the current request context, if available
-    /// This is used for determining the caller's identity in certain operations
-    fn current_context(&self) -> Option<RequestContext> {
-        None
-    }
-}
-
-/// Options for subscription management
-#[derive(Debug, Clone)]
-pub struct SubscriptionOptions {
-    /// Optional time-to-live for the subscription (None means no expiration)
-    pub ttl: Option<std::time::Duration>,
-
-    /// Maximum number of times this subscription should be triggered before auto-unsubscribing
-    /// None means no limit
-    pub max_triggers: Option<usize>,
-
-    /// Whether this is a one-time subscription that should be removed after first trigger
-    pub once: bool,
-
-    /// A unique ID for this subscription (auto-generated if not provided)
-    pub id: Option<String>,
-    
-    /// Context for the subscriber (automatically set)
-    pub context: RequestContext,
-}
-
-impl Default for SubscriptionOptions {
-    fn default() -> Self {
-        Self {
-            ttl: None,
-            max_triggers: None,
-            once: false,
-            id: None,
-            context: RequestContext::default(),
-        }
-    }
-}
-
-impl SubscriptionOptions {
-    /// Create a new set of subscription options
-    pub fn new(context: RequestContext) -> Self {
-        Self {
-            ttl: None,
-            max_triggers: None,
-            once: false,
-            id: None,
-            context,
-        }
-    }
-
-    /// Set a time-to-live for the subscription
-    pub fn with_ttl(mut self, ttl: std::time::Duration) -> Self {
-        self.ttl = Some(ttl);
-        self
-    }
-
-    /// Set a maximum number of triggers for the subscription
-    pub fn with_max_triggers(mut self, max_triggers: usize) -> Self {
-        self.max_triggers = Some(max_triggers);
-        self
-    }
-
-    /// Set this subscription to trigger only once
-    pub fn once(mut self) -> Self {
-        self.once = true;
-        self
-    }
-
-    /// Set a custom ID for this subscription
-    pub fn with_id(mut self, id: String) -> Self {
-        self.id = Some(id);
-        self
-    }
-
-    /// Generate a random ID if one is not already set
-    pub fn ensure_id(&mut self) {
-        if self.id.is_none() {
-            self.id = Some(uuid::Uuid::new_v4().to_string());
-        }
-    }
-}
-
-/// Options for request management
-#[derive(Debug, Clone)]
-pub struct RequestOptions {
-    /// Optional timeout for the request in milliseconds
-    pub timeout_ms: Option<u64>,
-    
-    /// Optional request ID (auto-generated if not provided)
-    pub request_id: Option<String>,
-    
-    /// Optional metadata for additional context
-    pub metadata: Option<HashMap<String, ValueType>>,
-    
-    /// Whether to retry the request on failure
-    pub retry: bool,
-    
-    /// Maximum number of retries
-    pub max_retries: Option<usize>,
-    
-    /// Delay between retries in milliseconds
-    pub retry_delay_ms: Option<u64>,
-}
-
-impl Default for RequestOptions {
-    fn default() -> Self {
-        Self {
-            timeout_ms: None,
-            request_id: None,
-            metadata: None,
-            retry: false,
-            max_retries: None,
-            retry_delay_ms: None,
-        }
-    }
-}
-
-impl RequestOptions {
-    /// Create new request options
-    pub fn new() -> Self {
-        Self::default()
-    }
-    
-    /// Create request options with a timeout
-    pub fn with_timeout(timeout_ms: u64) -> Self {
-        let mut options = Self::default();
-        options.timeout_ms = Some(timeout_ms);
-        options
-    }
-    
-    /// Set a timeout for the request
-    pub fn timeout(mut self, timeout_ms: u64) -> Self {
-        self.timeout_ms = Some(timeout_ms);
-        self
-    }
-    
-    /// Set a custom request ID
-    pub fn with_request_id(mut self, request_id: String) -> Self {
-        self.request_id = Some(request_id);
-        self
-    }
-    
-    /// Set metadata for the request
-    pub fn with_metadata(mut self, metadata: HashMap<String, ValueType>) -> Self {
-        self.metadata = Some(metadata);
-        self
-    }
-    
-    /// Enable retries for the request
-    pub fn with_retry(mut self, max_retries: usize, retry_delay_ms: u64) -> Self {
-        self.retry = true;
-        self.max_retries = Some(max_retries);
-        self.retry_delay_ms = Some(retry_delay_ms);
-        self
-    }
-    
-    /// Generate a random request ID if one is not already set
-    pub fn ensure_request_id(&mut self) {
-        if self.request_id.is_none() {
-            self.request_id = Some(uuid::Uuid::new_v4().to_string());
-        }
-    }
-}
-
-/// Response status for service responses
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ResponseStatus {
-    /// Success
-    Success,
-    /// Error
-    Error,
-}
-
-/// Define our own wrapper to avoid the orphan rule violation for Arc cloning
-pub struct StructArc(pub Box<dyn SerializableStruct + Send + Sync + 'static>);
-
-impl Clone for StructArc {
-    fn clone(&self) -> Self {
-        StructArc(self.0.clone())
-    }
-}
-
-/// Service request - represents a request to a service
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServiceRequest {
-    /// The path of the service
-    pub path: String,
-    /// The action to perform on the service
-    pub action: String,
-    /// The data for the action
-    pub data: Option<ValueType>,
-    /// Request ID for tracing
-    pub request_id: Option<String>,
-    /// Optional metadata for additional context
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<HashMap<String, ValueType>>,
-    /// Request context object (not serialized)
-    #[serde(skip)]
-    pub context: Arc<RequestContext>,
-    /// Structured topic path (not serialized)
-    /// This field will eventually replace path and action for routing
-    #[serde(skip)]
-    pub topic_path: Option<TopicPath>,
-}
-
-impl ServiceRequest {
-    /// Create a new service request
-    pub fn new<P: Into<String>, A: Into<String>, D: Into<ValueType>>(
-        path: P,
-        action: A,
-        data: D,
-        context: Arc<RequestContext>,
-    ) -> Self {
-        let path_str = path.into();
-        let action_str = action.into();
-        
-        // Create a topic path from path and action
-        // For now, we default to the network_id "default" for backward compatibility
-        let topic_path = TopicPath::new_action("default", &path_str, &action_str);
-        
-        ServiceRequest {
-            path: path_str,
-            action: action_str,
-            data: Some(data.into()),
-            request_id: Some(uuid::Uuid::new_v4().to_string()),
-            metadata: None,
-            context,
-            topic_path: Some(topic_path),
-        }
-    }
-
-    /// Create a new service request with optional parameters
-    pub fn new_with_optional<P: Into<String>, A: Into<String>>(
-        path: P,
-        action: A,
-        data: Option<ValueType>,
-        context: Arc<RequestContext>,
-    ) -> Self {
-        let path_str = path.into();
-        let action_str = action.into();
-        
-        // Create a topic path from path and action
-        let topic_path = TopicPath::new_action("default", &path_str, &action_str);
-        
-        ServiceRequest {
-            path: path_str,
-            action: action_str,
-            data,
-            request_id: Some(uuid::Uuid::new_v4().to_string()),
-            metadata: None,
-            context,
-            topic_path: Some(topic_path),
-        }
-    }
-
-    /// Create a new service request with metadata
-    pub fn new_with_metadata<P: Into<String>, A: Into<String>, D: Into<ValueType>>(
-        path: P,
-        action: A,
-        data: D,
-        metadata: HashMap<String, ValueType>,
-        context: Arc<RequestContext>,
-    ) -> Self {
-        let path_str = path.into();
-        let action_str = action.into();
-        
-        // Create a topic path from path and action
-        let topic_path = TopicPath::new_action("default", &path_str, &action_str);
-        
-        ServiceRequest {
-            path: path_str,
-            action: action_str,
-            data: Some(data.into()),
-            request_id: Some(uuid::Uuid::new_v4().to_string()),
-            metadata: Some(metadata),
-            context,
-            topic_path: Some(topic_path),
-        }
-    }
-    
-    /// Set the TopicPath with network ID for this request
-    pub fn with_topic_path(mut self, network_id: &str, service_path: &str, action: &str) -> Self {
-        self.topic_path = Some(TopicPath::new_action(network_id, service_path, action));
-        self
-    }
-    
-    /// Get the network ID for this request
-    pub fn network_id(&self) -> &str {
-        match &self.topic_path {
-            Some(tp) => &tp.network_id,
-            None => "default" // Fallback for backward compatibility
-        }
-    }
-    
-    /// Parse a path string to update the request's topic_path
-    /// The path string should be in the format: "[network_id:]service_path/action"
-    pub fn parse_path_string(&mut self, path_str: &str) -> Result<()> {
-        // Use a default network ID for parsing - ideally this should be obtained from context
-        let default_network_id = "default";
-        match TopicPath::parse(path_str, default_network_id) {
-            Ok(topic_path) => {
-                self.path = topic_path.service_path.clone();
-                self.action = topic_path.action_or_event.clone();
-                self.topic_path = Some(topic_path);
-                Ok(())
-            },
-            Err(e) => Err(anyhow!("Failed to parse path string: {}", e))
-        }
-    }
-
-    /// Get a data parameter from the request
-    pub fn get_param(&self, key: &str) -> Option<ValueType> {
-        self.data.as_ref().and_then(|v| match v {
-            ValueType::Map(map) => map.get(key).cloned(),
-            ValueType::Json(json) => json.get(key).map(|v| ValueType::Json(v.clone())),
-            _ => None,
-        })
-    }
-
-    /// Get a data parameter reference from the request
-    pub fn get_param_ref(&self, key: &str) -> Option<&ValueType> {
-        self.data.as_ref().and_then(|v| match v {
-            ValueType::Map(map) => map.get(key),
-            _ => None,
-        })
-    }
-
-    /// Convert to JSON params
-    pub fn to_json_params(&self) -> Value {
-        json!({
-            "path": self.path,
-            "action": self.action,
-            "data": self.data.as_ref().map(|v| v.to_json()),
-            "request_id": self.request_id,
-        })
-    }
-}
-
-/// Service response - represents a response from a service
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ServiceResponse {
-    /// Status of the response (success or error)
-    pub status: ResponseStatus,
-    /// Message describing the response
-    pub message: String,
-    /// The response data
-    pub data: Option<ValueType>,
-}
-
-impl ServiceResponse {
-    /// Create a success response with data
-    pub fn success<T: Into<ValueType>>(message: String, data: Option<T>) -> Self {
-        ServiceResponse {
-            status: ResponseStatus::Success,
-            message,
-            data: data.map(|d| d.into()),
-        }
-    }
-
-    /// Create an error response with a message
-    pub fn error<T: Into<String>>(message: T) -> Self {
-        ServiceResponse {
-            status: ResponseStatus::Error,
-            message: message.into(),
-            data: None,
-        }
-    }
-}
-
-/// Service Manager - manages services and routes requests
-/// This implementation is being refactored to use ServiceRegistry
-/// in the future and will eventually be deprecated
-pub struct ServiceManager {
-    /// Map of service name to service implementation
-    services: Arc<RwLock<HashMap<String, Arc<dyn AbstractService>>>>,
-    /// The network ID
-    network_id: String,
-    /// Database connection
-    db: Arc<SqliteDatabase>,
-    /// Node configuration
-    config: Arc<NodeConfig>,
-    /// Node handler for making requests
-    node_handler: Option<Arc<dyn NodeRequestHandler + Send + Sync>>,
-}
-
-impl ServiceManager {
-    /// Create a new ServiceManager
-    pub fn new(db: Arc<SqliteDatabase>, config: Arc<NodeConfig>) -> Self {
-        ServiceManager {
-            db,
-            network_id: config.network_id.clone(),
-            services: Arc::new(RwLock::new(HashMap::new())),
-            config,
-            node_handler: None,
-        }
-    }
-
-    /// Create a new ServiceManager from a reference to NodeConfig
-    pub fn new_from_ref(db: Arc<SqliteDatabase>, config: &NodeConfig) -> Self {
-        // Create a new Arc<NodeConfig> from the reference by cloning
-        let config_clone = config.clone();
-        let config_arc = Arc::new(config_clone);
-
-        ServiceManager {
-            db,
-            network_id: config.network_id.clone(),
-            services: Arc::new(RwLock::new(HashMap::new())),
-            config: config_arc,
-            node_handler: None,
-        }
-    }
-
-    /// Get the network ID
-    pub fn network_id(&self) -> &str {
-        &self.network_id
-    }
-
-    /// Get the node configuration
-    pub fn config(&self) -> Arc<NodeConfig> {
-        self.config.clone()
-    }
-
-    /// Get the database connection
-    pub fn get_db(&self) -> &Arc<SqliteDatabase> {
-        &self.db
-    }
-
-    /// Initialize services
-    pub async fn init_services(&mut self) -> Result<()> {
-        info!("Initializing services for network ID: {}", self.network_id);
-
-        // Require a valid node handler
-        let node_handler = self.node_handler.clone()
-            .ok_or_else(|| anyhow!("No node handler configured - ServiceManager must be initialized with a valid node handler"))?;
-
-        // Create a request context for initialization
-        let request_context = Arc::new(RequestContext::new_with_option(
-            "service_manager".to_string(),
-            None,
-            node_handler,
-        ));
-
-        // Initialize the registry service
-        let registry_service =
-            crate::services::service_registry::ServiceRegistry::new(&self.network_id);
-        
-        // No need to initialize or start - ServiceRegistry is not an AbstractService
-
-        // Get a reference to use later
-        let _registry = Arc::new(registry_service);
-        
-        // Initialize the SQLite service
-        let mut sqlite_service = sqlite::SqliteService::new(self.db.clone(), &self.network_id);
-        sqlite_service.init(&request_context).await?;
-        sqlite_service.start().await?;
-
-        // Add it to our services map
-        self.register_service(Arc::new(sqlite_service)).await?;
-
-        // Initialize the node info service
-        let mut node_info_service =
-            node_info::NodeInfoService::new(&self.network_id, self.config.clone());
-        node_info_service.init(&request_context).await?;
-        node_info_service.start().await?;
-
-        // Add it to our services map
-        self.register_service(Arc::new(node_info_service)).await?;
-
-        // Load services from the registry database
-        let services = self.list_services().await;
-        log::info!("Services initialized: {}", services.join(", "));
-
-        Ok(())
-    }
-
-    /// Register a service with the ServiceManager
-    /// Note: This is being refactored to use ServiceRegistry
-    pub async fn register_service(&self, service: Arc<dyn AbstractService>) -> Result<()> {
-        let mut services = self.services.write().await;
-        let service_name = service.name().to_string();
-
-        info!(
-            "Registering service: {} at {}",
-            service_name,
-            service.path()
-        );
-
-        if services.contains_key(&service_name) {
-            return Err(anyhow!("Service '{}' is already registered", service_name));
-        }
-
-        services.insert(service_name, service);
-
-        Ok(())
-    }
-
-    /// Get a service by name
-    pub async fn get_service(&self, name: &str) -> Option<Arc<dyn AbstractService>> {
-        let services = self.services.read().await;
-        services.get(name).cloned()
-    }
-
-    /// Get a service by path
-    pub async fn get_service_by_path(&self, path: &str) -> Option<Arc<dyn AbstractService>> {
-        let services = self.services.read().await;
-
-        // Check for direct matches first
-        for service in services.values() {
-            if service.path() == path {
-                return Some(service.clone());
-            }
-        }
-
-        // Check for matches with the network ID prefix
-        let full_path = if !path.starts_with(&self.network_id) {
-            format!("{}/{}", self.network_id, path)
-        } else {
-            path.to_string()
-        };
-
-        for service in services.values() {
-            if service.path() == full_path {
-                return Some(service.clone());
-            }
-            // Also check if the path is just the service name
-            if service.name() == path {
-                return Some(service.clone());
-            }
-        }
-
-        None
-    }
-
-    /// List all services
-    pub async fn list_services(&self) -> Vec<String> {
-        let services = self.services.read().await;
-        services.keys().cloned().collect()
-    }
-
-    /// Get all services
-    pub async fn get_all_services(&self) -> Vec<Arc<dyn AbstractService>> {
-        let services = self.services.read().await;
-        services.values().cloned().collect()
-    }
-
-    /// Handle a service request
-    pub async fn handle_request(&self, request: ServiceRequest) -> Result<ServiceResponse> {
-        // Get the service from the path
-        let service_path = request.path.clone();
-        let service = self.get_service_by_path(&service_path).await;
-
-        match service {
-            Some(service) => {
-                // Forward the request to the service
-                service.handle_request(request).await
-            }
-            None => {
-                // Service not found
-                Ok(ServiceResponse::error(format!(
-                    "Service not found: {}",
-                    service_path
-                )))
-            }
-        }
-    }
-
-    /// Clone the ServiceManager
-    pub fn clone(&self) -> Self {
-        ServiceManager {
-            db: self.db.clone(),
-            network_id: self.network_id.clone(),
-            services: self.services.clone(),
-            config: self.config.clone(),
-            node_handler: self.node_handler.clone(),
-        }
-    }
-
-    /// Create a service manager from a NodeConfig
-    pub fn create_from_node_config(config: Arc<NodeConfig>, db: Arc<SqliteDatabase>) -> Self {
-        ServiceManager {
-            db,
-            network_id: config.network_id.to_string(),
-            services: Arc::new(RwLock::new(HashMap::new())),
-            config,
-            node_handler: None,
-        }
-    }
-
-    /// Create a service manager from a NodeConfig (owned version)
-    pub fn create_from_config(config: &NodeConfig, db: Arc<SqliteDatabase>) -> Self {
-        let config_arc = Arc::new(config.clone());
-        ServiceManager {
-            db,
-            network_id: config.network_id.to_string(),
-            services: Arc::new(RwLock::new(HashMap::new())),
-            config: config_arc,
-            node_handler: None,
-        }
-    }
-}
-
-// Re-export value conversion utilities from rust-common
-pub use runar_common::utils::to_value_type;
-
-/// Request context for service requests
+/// Context for a service request
 ///
-/// It allows services to make requests to other services, publish events, and subscribe to events
-/// without having direct access to the node instance.
-#[derive(Clone)]
+/// INTENTION: Encapsulate all contextual information needed to process
+/// a service request, including network identity, service path, and metadata.
+/// This ensures consistent request processing and proper logging.
+///
+/// The RequestContext is immutable and is passed with each request to provide:
+/// - Network isolation (via network_id)
+/// - Service targeting (via service_path)
+/// - Request metadata and contextual information
+/// - Logging capabilities with consistent context
+///
+/// ARCHITECTURAL PRINCIPLE:
+/// Each request should have its own isolated context that moves with the
+/// request through the entire processing pipeline, ensuring proper tracing
+/// and consistent handling.
 pub struct RequestContext {
-    /// The path of the request
-    pub path: String,
-    /// Data associated with the request
-    pub data: ValueType,
-    /// Node handler for making requests to other services
-    #[doc(hidden)]
-    pub node_handler: Arc<dyn NodeRequestHandler + Send + Sync>,
-    /// Explicit service path for the caller (extracted from path)
-    /// Note: This field is currently populated automatically from the path
-    /// but will require explicit initialization in a future version.
-    service_path: String,
-    /// Explicit network ID for the caller (extracted from path)
-    /// Note: This field is currently populated automatically from the path
-    /// but will require explicit initialization in a future version.
-    network_id: String,
+    /// Network ID for this request - ensures network isolation
+    pub network_id: String,
+    /// Service path for the service handling this request - target service path
+    pub service_path: String,
+    /// Complete topic path for this request (optional) - includes service path and action
+    pub topic_path: Option<TopicPath>,
+    /// Metadata for this request - additional contextual information
+    pub metadata: Option<ValueType>,
+    /// Logger for this context - pre-configured with the appropriate component and path
+    /// Path parameters extracted from template matching
+    pub path_params: HashMap<String, String>,
+    pub logger: Logger,
 }
 
-impl std::fmt::Debug for RequestContext {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+// Manual implementation of Debug for RequestContext
+impl fmt::Debug for RequestContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RequestContext")
-            .field("path", &self.path)
-            .field("data", &self.data)
-            .field("node_handler", &"<node_handler>")
-            .field("service_path", &self.service_path)
             .field("network_id", &self.network_id)
+            .field("service_path", &self.service_path)
+            .field("topic_path", &self.topic_path)
+            .field("metadata", &self.metadata)
+            .field("path_params", &self.path_params)
+            .field("logger", &"<Logger>") // Avoid trying to Debug the Logger
             .finish()
     }
 }
 
+// Manual implementation of Clone for RequestContext
+impl Clone for RequestContext {
+    fn clone(&self) -> Self {
+        Self {
+            network_id: self.network_id.clone(),
+            service_path: self.service_path.clone(),
+            topic_path: self.topic_path.clone(),
+            metadata: self.metadata.clone(),
+            path_params: self.path_params.clone(),
+            logger: self.logger.clone(),
+        }
+    }
+}
+
+// Manual implementation of Default for RequestContext
 impl Default for RequestContext {
     fn default() -> Self {
-        // Create a minimal implementation of NodeRequestHandler for default contexts
-        struct MinimalDefaultHandler;
-        
-        #[async_trait::async_trait]
-        impl NodeRequestHandler for MinimalDefaultHandler {
-            async fn request(&self, _path: String, _params: ValueType) -> Result<ServiceResponse> {
-                Ok(ServiceResponse::error("Default RequestContext used - not intended for production use"))
-            }
-            
-            async fn publish(&self, _topic: String, _data: ValueType) -> Result<()> {
-                Ok(())
-            }
-            
-            async fn subscribe(
-                &self,
-                _topic: String,
-                _callback: Box<dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
-            ) -> Result<String> {
-                Ok("default-subscription".to_string())
-            }
-            
-            async fn subscribe_with_options(
-                &self,
-                _topic: String,
-                _callback: Box<dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
-                _options: SubscriptionOptions,
-            ) -> Result<String> {
-                Ok("default-subscription".to_string())
-            }
-            
-            async fn unsubscribe(&self, _topic: String, _subscription_id: Option<&str>) -> Result<()> {
-                Ok(())
-            }
-            
-            fn current_context(&self) -> Option<RequestContext> {
-                None
-            }
+        panic!("RequestContext should not be created with default. Use new instead");
+    }
+}
+
+/// Constructors follow the builder pattern principle:
+/// - Prefer a single primary constructor with required parameters
+/// - Use builder methods for optional parameters
+/// - Avoid creating specialized constructors for every parameter combination
+impl RequestContext {
+    /// Create a new RequestContext with the given topic path and logger
+    ///
+    /// This is the primary constructor that takes the minimum required parameters.
+    pub fn new(topic_path: &TopicPath, logger: Logger) -> Self {
+        Self {
+            network_id: topic_path.network_id().to_string(),
+            service_path: topic_path.service_path(),
+            topic_path: Some(topic_path.clone()),
+            metadata: None,
+            path_params: HashMap::new(),
+            logger,
         }
-        
-        RequestContext {
-            path: "default-context".to_string(),
-            data: ValueType::Map(HashMap::new()),
-            node_handler: Arc::new(MinimalDefaultHandler),
-            service_path: "default".to_string(),
-            network_id: "default".to_string(),
+    }
+    
+    /// Add metadata to a RequestContext
+    ///
+    /// Use builder-style methods instead of specialized constructors.
+    pub fn with_metadata(mut self, metadata: ValueType) -> Self {
+        self.metadata = Some(metadata);
+        self
+    }
+
+    /// Helper method to log debug level message
+    ///
+    /// INTENTION: Provide a convenient way to log debug messages with the
+    /// context's logger, without having to access the logger directly.
+    pub fn debug(&self, message: impl Into<String>) {
+        self.logger.debug(message);
+    }
+    
+    /// Helper method to log info level message
+    ///
+    /// INTENTION: Provide a convenient way to log info messages with the
+    /// context's logger, without having to access the logger directly.
+    pub fn info(&self, message: impl Into<String>) {
+        self.logger.info(message);
+    }
+    
+    /// Helper method to log warning level message
+    ///
+    /// INTENTION: Provide a convenient way to log warning messages with the
+    /// context's logger, without having to access the logger directly.
+    pub fn warn(&self, message: impl Into<String>) {
+        self.logger.warn(message);
+    }
+    
+    /// Helper method to log error level message
+    ///
+    /// INTENTION: Provide a convenient way to log error messages with the
+    /// context's logger, without having to access the logger directly.
+    pub fn error(&self, message: impl Into<String>) {
+        self.logger.error(message);
+    }
+}
+
+impl LoggingContext for RequestContext {
+    fn component(&self) -> Component {
+        Component::Service
+    }
+    
+    fn service_path(&self) -> Option<&str> {
+        Some(&self.service_path)
+    }
+    
+    fn logger(&self) -> &Logger {
+        &self.logger
+    }
+}
+
+/// Context for handling events
+///
+/// INTENTION: Provide context information for event handlers, allowing them
+/// to access network information, logging, and perform operations like
+/// publishing other events or making service requests.
+///
+/// ARCHITECTURAL PRINCIPLE:
+/// Event handlers should have access to necessary context for performing 
+/// their operations, but with appropriate isolation and scope control.
+/// The EventContext provides a controlled interface to the node's capabilities.
+pub struct EventContext {
+    /// Network ID for this context
+    pub network_id: String,
+    
+    /// Topic that triggered this event
+    pub topic: String,
+    
+    /// Service that subscribed to the event
+    pub service_path: String,
+    
+    /// Logger instance specific to this context
+    pub logger: Logger,
+    
+    /// Optional configuration values
+    pub config: Option<ValueType>,
+    
+    /// Node delegate for node operations (requests and events)
+    pub node_delegate: Option<Arc<dyn NodeDelegate + Send + Sync>>,
+}
+
+impl Debug for EventContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EventContext")
+            .field("network_id", &self.network_id)
+            .field("topic", &self.topic)
+            .field("service_path", &self.service_path)
+            .field("config", &self.config)
+            .field("logger", &"<Logger>") // Avoid trying to Debug the Logger
+            .field("node_delegate", &self.node_delegate.is_some())
+            .finish()
+    }
+}
+
+// Manual implementation of Clone for EventContext
+impl Clone for EventContext {
+    fn clone(&self) -> Self {
+        panic!("EventContext should not be cloned directly. Use new instead");
+    }
+}
+
+// Manual implementation of Default for EventContext
+impl Default for EventContext {
+    fn default() -> Self {
+        panic!("EventContext should not be created with default. Use new instead");
+    }
+}
+
+/// Constructors follow the builder pattern principle:
+/// - Prefer a single primary constructor with required parameters 
+/// - Use builder methods for optional parameters
+/// - Avoid creating specialized constructors for every parameter combination
+impl EventContext {
+    /// Create a new EventContext with the given topic path and logger
+    ///
+    /// This is the primary constructor that takes the minimum required parameters.
+    pub fn new(topic_path: &TopicPath, logger: Logger) -> Self {
+        Self {
+            network_id: topic_path.network_id().to_string(),
+            topic: topic_path.action_path(),
+            service_path: topic_path.service_path(),
+            config: None,
+            logger,
+            node_delegate: None,
+        }
+    }
+    
+    /// Legacy constructor for backward compatibility
+    pub fn new_from_path(network_id: &str, topic: &str, service_path: &str, logger: Logger) -> Self {
+        Self {
+            network_id: network_id.to_string(),
+            topic: topic.to_string(),
+            service_path: service_path.to_string(),
+            config: None,
+            logger,
+            node_delegate: None,
+        }
+    }
+    
+    /// Add configuration to an EventContext
+    ///
+    /// Use builder-style methods instead of specialized constructors.
+    pub fn with_config(mut self, config: ValueType) -> Self {
+        self.config = Some(config);
+        self
+    }
+    
+    /// Add node delegate to an EventContext
+    ///
+    /// Used to make service requests from within an event handler.
+    pub fn with_node_delegate(mut self, delegate: Arc<dyn NodeDelegate + Send + Sync>) -> Self {
+        self.node_delegate = Some(delegate);
+        self
+    }
+    
+    /// Helper method to log debug level message
+    pub fn debug(&self, message: impl Into<String>) {
+        self.logger.debug(message);
+    }
+
+    /// Helper method to log info level message
+    pub fn info(&self, message: impl Into<String>) {
+        self.logger.info(message);
+    }
+
+    /// Helper method to log warning level message
+    pub fn warn(&self, message: impl Into<String>) {
+        self.logger.warn(message);
+    }
+
+    /// Helper method to log error level message
+    pub fn error(&self, message: impl Into<String>) {
+        self.logger.error(message);
+    }
+    
+    /// Publish an event
+    ///
+    /// INTENTION: Allow event handlers to publish their own events.
+    /// This method provides a convenient way to publish events from within
+    /// an event handler, using the same context's network ID.
+    pub async fn publish(&self, topic: &str, event: &str, data: Option<ValueType>) -> Result<()> {
+        if let Some(delegate) = &self.node_delegate {
+            // Process the topic based on its format
+            let full_topic = if topic.contains(':') {
+                // Already has network ID, use as is
+                topic.to_string()
+            } else if topic.contains('/') {
+                // Has service/topic but no network ID
+                format!("{}:{}", self.network_id, topic)
+            } else {
+                // Simple topic name - add service path and network ID
+                format!("{}:{}/{}", self.network_id, self.service_path, topic)
+            };
+            
+            // Combine event name with topic and use the actual data or null
+            let full_topic = format!("{}/{}", full_topic, event);
+            let actual_data = data.unwrap_or(ValueType::Null);
+            
+            delegate.publish(full_topic, actual_data).await
+        } else {
+            Err(anyhow!("No node delegate available in this context"))
+        }
+    }
+    
+    /// Make a service request
+    ///
+    /// INTENTION: Allow event handlers to make requests to other services.
+    /// This method provides a convenient way to call service actions from
+    /// within an event handler, using the same context's network ID.
+    pub async fn request(&self, path: &str, params: ValueType) -> Result<ServiceResponse> {
+        if let Some(delegate) = &self.node_delegate {
+            // Process the path based on its format:
+            let full_path = if path.contains(':') {
+                // Already has network ID, use as is
+                path.to_string()
+            } else if path.contains('/') {
+                // Has service/action but no network ID
+                format!("{}:{}", self.network_id, path)
+            } else {
+                // Simple action name - add both service path and network ID
+                format!("{}:{}/{}", self.network_id, self.service_path, path)
+            };
+            
+            // Call the delegate
+            delegate.request(full_path, params).await
+        } else {
+            Err(anyhow!("No node delegate available in this context"))
         }
     }
 }
 
-impl RequestContext {
-    /// Create a new RequestContext with explicit service path and network ID
-    /// 
-    /// This is the preferred constructor that allows specifying exact service path and network ID.
-    /// In a future version, this will become the primary constructor and the 3-parameter version
-    /// will be deprecated.
-    pub fn new_with_option_v2<P: AsRef<str>>(
-        path: P,
-        data: Option<ValueType>,
-        node_handler: Arc<dyn NodeRequestHandler + Send + Sync>,
-        service_path: String,
-        network_id: String,
-    ) -> Self {
-        RequestContext {
-            path: path.as_ref().to_string(),
-            data: data.unwrap_or_else(|| ValueType::Map(HashMap::new())),
-            node_handler,
-            service_path,
-            network_id,
-        }
+impl LoggingContext for EventContext {
+    fn component(&self) -> Component {
+        Component::Service
     }
-
-    /// Create a new RequestContext with optional ValueType
-    /// 
-    /// Note: This method signature will change in a future version to require
-    /// explicit service_path and network_id parameters. This version automatically
-    /// extracts those values from the path.
-    pub fn new_with_option<P: AsRef<str>>(
-        path: P,
-        data: Option<ValueType>,
-        node_handler: Arc<dyn NodeRequestHandler + Send + Sync>,
-    ) -> Self {
-        // Extract service path and network ID from path if possible
-        let path_str = path.as_ref();
-        let (service_path, network_id) = match crate::routing::TopicPath::parse(path_str, "") {
-            Ok(tp) => (tp.service_path.clone(), tp.network_id.clone()),
-            Err(_) => {
-                // Fallback to extracting just the service part
-                let parts: Vec<&str> = path_str.split('/').collect();
-                if !parts.is_empty() {
-                    (parts[0].to_string(), "".to_string())
-                } else {
-                    ("".to_string(), "".to_string())
-                }
-            }
-        };
-        
-        Self::new_with_option_v2(path, data, node_handler, service_path, network_id)
+    
+    fn service_path(&self) -> Option<&str> {
+        Some(&self.service_path)
     }
-
-    /// Create a new RequestContext
-    pub fn new<P: AsRef<str>, V: Into<ValueType>>(
-        path: P,
-        data: V,
-        node_handler: Arc<dyn NodeRequestHandler + Send + Sync>,
-    ) -> Self {
-        Self::new_with_option(path, Some(data.into()), node_handler)
+    
+    fn logger(&self) -> &Logger {
+        &self.logger
     }
+}
 
-    /// Create a RequestContext for a child request
-    pub fn new_child<P: AsRef<str>, V: Into<ValueType>>(&self, path: P, data: V) -> Self {
-        // Extract service path and network ID from the new path
-        let path_str = path.as_ref();
-        let (service_path, network_id) = match crate::routing::TopicPath::parse(path_str, &self.network_id) {
-            Ok(tp) => (tp.service_path.clone(), tp.network_id.clone()),
-            Err(_) => {
-                // Fallback to extracting just the service part
-                let parts: Vec<&str> = path_str.split('/').collect();
-                if !parts.is_empty() {
-                    (parts[0].to_string(), self.network_id.clone())
-                } else {
-                    (self.service_path.clone(), self.network_id.clone())
-                }
-            }
-        };
-        
-        RequestContext {
-            path: path.as_ref().to_string(),
-            data: data.into(),
-            node_handler: self.node_handler.clone(),
-            service_path,
-            network_id,
+/// Handler for a service action
+///
+/// INTENTION: Define the signature for a function that handles a service action.
+/// This provides a consistent interface for all action handlers and enables
+/// them to be stored, passed around, and invoked uniformly.
+pub type ActionHandler = Arc<dyn Fn(Option<ValueType>, RequestContext) -> ServiceFuture + Send + Sync>;
+
+/// Type for action registration function
+pub type ActionRegistrar = Arc<dyn Fn(&TopicPath, ActionHandler, Option<ActionMetadata>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
+
+/// Context for service lifecycle management
+///
+/// INTENTION: Provide services with the context needed for lifecycle operations
+/// such as initialization and shutdown. Includes access to the node for
+/// registering action handlers, subscribing to events, and other operations.
+pub struct LifecycleContext {
+    /// Network ID for the context
+    pub network_id: String,
+    /// Service path - identifies the service within the network
+    pub service_path: String,
+    /// Optional configuration data
+    pub config: Option<ValueType>,
+    /// Logger instance with service context
+    pub logger: Logger,
+    /// Node delegate for node operations
+    node_delegate: Option<Arc<dyn NodeDelegate + Send + Sync>>,
+}
+
+impl LifecycleContext {
+    /// Create a new LifecycleContext with the given topic path and logger
+    ///
+    /// This is the primary constructor that takes the minimum required parameters.
+    pub fn new(topic_path: &TopicPath, logger: Logger) -> Self {
+        Self {
+            network_id: topic_path.network_id().to_string(),
+            service_path: topic_path.service_path(),
+            config: None,
+            logger,
+            node_delegate: None,
         }
     }
     
-    /// Get the service path of the caller (now direct field access)
-    pub fn service_path(&self) -> &str {
-        &self.service_path
+    /// Legacy constructor for backward compatibility
+    pub fn new_from_path(network_id: &str, service_path: &str, logger: Logger) -> Self {
+        Self {
+            network_id: network_id.to_string(),
+            service_path: service_path.to_string(),
+            config: None,
+            logger,
+            node_delegate: None,
+        }
     }
     
-    /// Get the network ID (now direct field access)
-    pub fn network_id(&self) -> &str {
-        &self.network_id
+    /// Add configuration to a LifecycleContext
+    ///
+    /// Use builder-style methods instead of specialized constructors.
+    pub fn with_config(mut self, config: ValueType) -> Self {
+        self.config = Some(config);
+        self
+    }
+    
+    /// Add a NodeDelegate to a LifecycleContext
+    ///
+    /// INTENTION: Provide access to node operations during service lifecycle events,
+    /// including action registration, request handling, and event dispatching.
+    pub fn with_node_delegate(mut self, delegate: Arc<dyn NodeDelegate + Send + Sync>) -> Self {
+        self.node_delegate = Some(delegate);
+        self
+    }
+    
+    /// Create a new LifecycleContext with a provided node delegate
+    ///
+    /// INTENTION: Create a fully functional LifecycleContext with all needed components
+    /// for proper service initialization, including the delegate that allows services
+    /// to register handlers and interact with the node.
+    /// 
+    /// This is kept for backward compatibility until all code is migrated to the builder pattern.
+    pub fn new_with_delegate(
+        network_id: &str,
+        service_path: &str,
+        logger: Logger,
+        delegate: Arc<dyn NodeDelegate + Send + Sync>
+    ) -> Self {
+        let topic_path = TopicPath::new(service_path, network_id).expect("Invalid service path");
+        Self::new(&topic_path, logger).with_node_delegate(delegate)
     }
 
-    /// Get a context value
-    pub fn get(&self, key: &str) -> Option<ValueType> {
-        match &self.data {
-            ValueType::Map(map) => map.get(key).cloned(),
-            ValueType::Json(json) => json.get(key).map(|v| ValueType::Json(v.clone())),
-            _ => None,
+    /// Helper method to log debug level message
+    pub fn debug(&self, message: impl Into<String>) {
+        self.logger.debug(message);
+    }
+
+    /// Helper method to log info level message
+    pub fn info(&self, message: impl Into<String>) {
+        self.logger.info(message);
+    }
+
+    /// Helper method to log warning level message
+    pub fn warn(&self, message: impl Into<String>) {
+        self.logger.warn(message);
+    }
+
+    /// Helper method to log error level message
+    pub fn error(&self, message: impl Into<String>) {
+        self.logger.error(message);
+    }
+
+    /// Register an action handler for a specific action
+    ///
+    /// INTENTION: Allow a service to register a handler function for one of its actions.
+    /// This is typically done during service initialization to set up handlers
+    /// for all supported actions.
+    ///
+    /// Example:
+    /// ```
+    /// use runar_node_new::services::{LifecycleContext, ServiceResponse, ActionHandler};
+    /// use runar_common::types::ValueType;
+    /// use std::sync::Arc;
+    /// use anyhow::Result;
+    ///
+    /// async fn init_service(context: LifecycleContext) -> Result<()> {
+    ///     // Register a handler for the "add" action
+    ///     context.register_action(
+    ///         "add", 
+    ///         Arc::new(|params, ctx| {
+    ///             Box::pin(async move {
+    ///                 // Handler implementation
+    ///                 Ok(ServiceResponse::ok_empty())
+    ///             })
+    ///         })
+    ///     ).await?;
+    ///     
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn register_action(&self, action_name: &str, handler: ActionHandler) -> Result<()> {
+        // Get the node delegate
+        let delegate = match &self.node_delegate {
+            Some(d) => d,
+            None => return Err(anyhow!("No node delegate available")),
+        };
+        
+        // Create a topic path for this action
+        let action_path = format!("{}/{}", self.service_path, action_name);
+        let topic_path = TopicPath::new(&action_path, &self.network_id)
+            .map_err(|e| anyhow!("Invalid action path: {}", e))?;
+        
+        // Call the delegate with no metadata
+        delegate.register_action_handler(&topic_path, handler, None).await
+    }
+
+    /// Register an action handler with metadata
+    ///
+    /// INTENTION: Allow a service to register a handler function for an action,
+    /// along with descriptive metadata. This enables documentation and discovery
+    /// of the action's purpose and parameters.
+    ///
+    /// Example:
+    /// ```
+    /// use runar_node_new::services::{LifecycleContext, ServiceResponse, ActionHandler, ActionRegistrationOptions};
+    /// use runar_common::types::ValueType;
+    /// use std::sync::Arc;
+    /// use anyhow::Result;
+    ///
+    /// async fn init_service(context: LifecycleContext) -> Result<()> {
+    ///     // Create options for the action
+    ///     let options = ActionRegistrationOptions {
+    ///         description: Some("Adds two numbers".to_string()),
+    ///         params_schema: None,
+    ///         return_schema: None,
+    ///     };
+    ///     
+    ///     // Register a handler with metadata
+    ///     context.register_action_with_options(
+    ///         "add", 
+    ///         Arc::new(|params, ctx| {
+    ///             Box::pin(async move {
+    ///                 // Handler implementation
+    ///                 Ok(ServiceResponse::ok_empty())
+    ///             })
+    ///         }),
+    ///         options
+    ///     ).await?;
+    ///     
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn register_action_with_options(
+        &self,
+        action_name: &str,
+        handler: ActionHandler,
+        options: ActionRegistrationOptions,
+    ) -> Result<()> {
+        // Create action metadata from the options
+        let metadata = ActionMetadata {
+            name: action_name.to_string(),
+            description: options.description.unwrap_or_default(),
+            parameters_schema: options.params_schema.map(|v| v),
+            return_schema: options.return_schema.map(|v| v),
+        };
+        
+        // Get the node delegate
+        let delegate = match &self.node_delegate {
+            Some(d) => d,
+            None => return Err(anyhow!("No node delegate available")),
+        };
+        
+        // Create a topic path for this action
+        let action_path = format!("{}/{}", self.service_path, action_name);
+        let topic_path = TopicPath::new(&action_path, &self.network_id)
+            .map_err(|e| anyhow!("Invalid action path: {}", e))?;
+        
+        // Register the action with the provided options
+        delegate.register_action_handler(&topic_path, handler, Some(metadata)).await
+    }
+    
+    /// Register an event with extra metadata
+    ///
+    /// INTENTION: This method allows registering an event with additional
+    /// information such as a description and data schema, which can be used
+    /// for documentation and validation.
+    pub async fn register_event_with_options(
+        &self,
+        event_name: &str,
+        options: EventRegistrationOptions,
+    ) -> Result<()> {
+        // Create event metadata
+        let metadata = EventMetadata {
+            name: event_name.to_string(),
+            description: options.description.unwrap_or_default(),
+            data_schema: options.data_schema.map(|v| v),
+        };
+        
+        // TODO: Update event registration to include metadata in the service registry
+        
+        // For now, just log that we registered an event
+        self.logger.debug(&format!("Registered event '{}' with metadata", event_name));
+        
+        Ok(())
+    }
+    
+    /// Make a service request
+    ///
+    /// INTENTION: Allow services to make requests to other services during lifecycle operations.
+    /// This method provides the same path handling as EventContext.request.
+    pub async fn request(&self, path: &str, params: ValueType) -> Result<ServiceResponse> {
+        if let Some(delegate) = &self.node_delegate {
+            // Process the path based on its format:
+            let full_path = if path.contains(':') {
+                // Already has network ID, use as is
+                path.to_string()
+            } else if path.contains('/') {
+                // Has service/action but no network ID
+                format!("{}:{}", self.network_id, path)
+            } else {
+                // Simple action name - add both service path and network ID
+                format!("{}:{}/{}", self.network_id, self.service_path, path)
+            };
+            
+            // Call the delegate
+            delegate.request(full_path, params).await
+        } else {
+            Err(anyhow!("No node delegate available in this context"))
+        }
+    }
+    
+    /// Publish an event
+    ///
+    /// INTENTION: Allow services to publish events during lifecycle operations.
+    /// This method provides the same path handling as EventContext.publish.
+    pub async fn publish(&self, topic: &str, event: &str, data: Option<ValueType>) -> Result<()> {
+        if let Some(delegate) = &self.node_delegate {
+            // Process the topic based on its format
+            let full_topic = if topic.contains(':') {
+                // Already has network ID, use as is
+                topic.to_string()
+            } else if topic.contains('/') {
+                // Has service/topic but no network ID
+                format!("{}:{}", self.network_id, topic)
+            } else {
+                // Simple topic name - add service path and network ID
+                format!("{}:{}/{}", self.network_id, self.service_path, topic)
+            };
+            
+            // Combine event name with topic and use the actual data or null
+            let full_topic = format!("{}/{}", full_topic, event);
+            let actual_data = data.unwrap_or(ValueType::Null);
+            
+            delegate.publish(full_topic, actual_data).await
+        } else {
+            Err(anyhow!("No node delegate available in this context"))
         }
     }
 
-    /// Set a context value
-    pub fn set(&mut self, key: &str, value: ValueType) {
-        match &mut self.data {
-            ValueType::Map(map) => {
-                map.insert(key.to_string(), value);
-            }
-            _ => {
-                let mut map = HashMap::new();
-                map.insert(key.to_string(), value);
-                self.data = ValueType::Map(map);
-            }
+    /// Register an action handler with template pattern matching
+    ///
+    /// INTENTION: Allow services to register handlers for path templates with named parameters,
+    /// such as "services/{service_path}/state", extracting the parameters from matched paths.
+    ///
+    /// Example:
+    /// ```rust,no_run
+    /// use runar_node_new::services::{LifecycleContext, ServiceResponse};
+    /// use runar_node_new::routing::TopicPath;
+    /// use runar_common::types::ValueType;
+    /// use runar_common::logging::{Logger, Component};
+    /// use std::collections::HashMap;
+    /// use std::sync::Arc;
+    /// use anyhow::Result;
+    /// 
+    /// async fn example() -> Result<()> {
+    ///     // Create a logger
+    ///     let logger = Logger::new_root(Component::Service, "test-node");
+    ///     
+    ///     // Create a topic path for the service
+    ///     let topic_path = TopicPath::new_service("test-service", "default");
+    ///     
+    ///     // Create a lifecycle context
+    ///     let context = LifecycleContext::new(&topic_path, logger);
+    /// 
+    ///     // Register a handler for a templated path
+    ///     context.register_action_pattern("services/{service_path}/state", 
+    ///         |params, ctx, path_params| {
+    ///             let service_path = path_params.get("service_path").map_or("", |v| v).to_string();
+    ///             // Use service_path in the handler
+    ///             Box::pin(async move {
+    ///                 // Handler implementation
+    ///                 Ok(ServiceResponse::ok(ValueType::Null))
+    ///             })
+    ///         })
+    ///         .await?;
+    ///     
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn register_action_pattern<F, Fut>(&self, template: &str, handler: F) -> Result<()>
+    where
+        F: Fn(Option<ValueType>, RequestContext, std::collections::HashMap<String, String>) -> Fut + Send + Sync + Clone + 'static,
+        Fut: Future<Output = Result<ServiceResponse>> + Send + 'static,
+    {
+        // Get the node delegate
+        let delegate = match &self.node_delegate {
+            Some(d) => d,
+            None => return Err(anyhow!("No node delegate available")),
+        };
+        
+        // Store template as String for move into closure
+        let template_str = template.to_string();
+        
+        // Create a topic path for this template
+        let topic_path = TopicPath::new(template, &self.network_id)
+            .map_err(|e| anyhow!("Invalid template path: {}", e))?;
+        
+        // Create a wrapper for the handler that extracts parameters
+        let action_handler = Arc::new(move |params: Option<ValueType>, mut context: RequestContext| -> ServiceFuture {
+            // Capture handler and template by value
+            let template_owned = template_str.clone();
+            let handler_owned = handler.clone(); // This requires F: Clone
+            
+            Box::pin(async move {
+                // Use the path_processor to process the template
+                if path_processor::process_template(&mut context, &template_owned).unwrap_or(false) {
+                    // Template matched, path_params are set in the context
+                    // Extract them for the handler
+                    let path_params = context.path_params.clone();
+                    
+                    // Call the handler with extracted parameters
+                    handler_owned(params, context, path_params).await
+                } else {
+                    // Template didn't match
+                    Ok(ServiceResponse::error(400, "Path doesn't match template"))
+                }
+            })
+        });
+        
+        // Register the action with the provided template name
+        delegate.register_action_handler(&topic_path, action_handler, None).await
+    }
+    
+    /// Helper method to format a service-specific path
+    fn format_path(&self, path: &str) -> String {
+        format!("{}/{}", self.service_path, path)
+    }
+}
+
+impl LoggingContext for LifecycleContext {
+    fn component(&self) -> Component {
+        Component::Service
+    }
+    
+    fn service_path(&self) -> Option<&str> {
+        Some(&self.service_path)
+    }
+    
+    fn logger(&self) -> &Logger {
+        &self.logger
+    }
+}
+
+/// Service request for an action on a specific service
+///
+/// INTENTION: Represent a request to perform an action on a service.
+/// Includes the destination, requested action, and input data.
+///
+/// ARCHITECTURAL PRINCIPLE:
+/// The ServiceRequest should be self-contained with all routing and
+/// context information needed to process a request from start to finish.
+pub struct ServiceRequest {
+    /// Topic path for the service and action
+    pub topic_path: TopicPath,
+    /// Data for the request
+    pub data: ValueType,
+    /// Request context
+    pub context: Arc<RequestContext>,
+}
+
+impl ServiceRequest {
+    /// Create a new service request
+    ///
+    /// INTENTION: Create a service request using the service path and action name.
+    /// This method will construct the appropriate TopicPath and initialize the request.
+    ///
+    /// Example:
+    /// ```
+    /// use runar_node_new::services::{ServiceRequest, RequestContext};
+    /// use runar_common::types::ValueType;
+    /// use std::sync::Arc;
+    ///
+    /// fn create_request(context: Arc<RequestContext>) {
+    ///     // Create a request to the "auth" service with "login" action
+    ///     let request = ServiceRequest::new(
+    ///         "auth",
+    ///         "login",
+    ///         ValueType::Null,
+    ///         context
+    ///     );
+    /// }
+    /// ```
+    pub fn new(
+        service_path: &str,
+        action_or_event: &str,
+        data: ValueType,
+        context: Arc<RequestContext>,
+    ) -> Self {
+        // Create a path string combining service path and action
+        let path_string = format!("{}/{}", service_path, action_or_event);
+        
+        // Parse the path using the context's network_id
+        let topic_path = TopicPath::new(&path_string, &context.network_id)
+            .expect("Invalid path format");
+            
+        Self {
+            topic_path,
+            data,
+            context,
         }
     }
+
+    /// Create a new service request with a TopicPath
+    ///
+    /// INTENTION: Create a service request using an existing TopicPath object.
+    /// This is useful when the TopicPath has already been constructed and validated.
+    ///
+    /// Example:
+    /// ```
+    /// use runar_node_new::services::{ServiceRequest, RequestContext};
+    /// use runar_node_new::routing::TopicPath;
+    /// use runar_common::types::ValueType;
+    /// use std::sync::Arc;
+    ///
+    /// fn create_request(context: Arc<RequestContext>) {
+    ///     // Create a topic path for the "auth/login" action
+    ///     let topic_path = TopicPath::new("auth/login", &context.network_id)
+    ///         .expect("Valid path");
+    ///     
+    ///     // Create a request with the topic path
+    ///     let request = ServiceRequest::new_with_topic_path(
+    ///         topic_path,
+    ///         ValueType::Null,
+    ///         context
+    ///     );
+    /// }
+    /// ```
+    pub fn new_with_topic_path(
+        topic_path: TopicPath,
+        data: ValueType,
+        context: Arc<RequestContext>,
+    ) -> Self {
+        Self {
+            topic_path,
+            data,
+            context,
+        }
+    }
+
+    /// Create a new service request with optional data
+    ///
+    /// INTENTION: Create a service request where the data parameter is optional.
+    /// If no data is provided, ValueType::Null will be used.
+    ///
+    /// Example:
+    /// ```
+    /// use runar_node_new::services::{ServiceRequest, RequestContext};
+    /// use runar_common::types::ValueType;
+    /// use std::sync::Arc;
+    ///
+    /// fn create_request(context: Arc<RequestContext>, data: Option<ValueType>) {
+    ///     // Create a request with optional data
+    ///     let request = ServiceRequest::new_with_optional(
+    ///         "auth",
+    ///         "login",
+    ///         data,
+    ///         context
+    ///     );
+    /// }
+    /// ```
+    pub fn new_with_optional(
+        service_path: &str,
+        action_or_event: &str,
+        data: Option<ValueType>,
+        context: Arc<RequestContext>,
+    ) -> Self {
+        // Create a TopicPath from the service path and action
+        let path_string = format!("{}/{}", service_path, action_or_event);
+        
+        // Parse the path using the context's network_id
+        let topic_path = TopicPath::new(&path_string, &context.network_id)
+            .expect("Invalid path format");
+            
+        Self {
+            topic_path,
+            data: data.unwrap_or(ValueType::Null),
+            context,
+        }
+    }
+    
+    /// Get the service path from the topic path
+    ///
+    /// INTENTION: Extract the service path component from the topic path.
+    /// This is useful for service identification and routing.
+    pub fn path(&self) -> String {
+        self.topic_path.service_path()
+    }
+    
+    /// Get the action or event name from the topic path
+    ///
+    /// INTENTION: Extract the action or event name from the topic path.
+    /// This identifies what operation is being requested.
+    pub fn action_or_event(&self) -> String {
+        // Get the action path and extract the last part which is the action name
+        let action_path = self.topic_path.action_path();
+        
+        // If action_path contains a slash, take the part after the last slash
+        if let Some(idx) = action_path.rfind('/') {
+            action_path[idx + 1..].to_string()
+        } else {
+            // If there's no slash, it's just the action name itself
+            action_path
+        }
+    }
+}
+
+/// Status of a service response
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResponseStatus {
+    /// The request was successful
+    Success,
+    /// The request failed
+    Error,
+}
+
+/// A response from a service
+///
+/// INTENTION: Provide a consistent structure for all service responses, 
+/// ensuring uniform error handling, result communication, and metadata
+/// exchange between services and clients.
+///
+/// ARCHITECTURAL PRINCIPLE:
+/// All service interactions should follow a consistent request-response pattern
+/// with a clearly defined response structure that includes status, result data,
+/// and possible error information.
+#[derive(Debug, Clone)]
+pub struct ServiceResponse {
+    /// Status code - indicates success or error type
+    pub status: i32,
+    /// Response data (if successful)
+    pub data: Option<ValueType>,
+    /// Error details (if status indicates error)
+    pub error: Option<String>,
+}
+
+impl ServiceResponse {
+    /// Create a successful response with data
+    ///
+    /// INTENTION: Provide a convenient way to create a successful response
+    /// with optional result data.
+    ///
+    /// Example:
+    /// ```
+    /// use runar_node_new::services::ServiceResponse;
+    /// use runar_common::types::ValueType;
+    /// use serde_json::json;
+    ///
+    /// fn handle_get_user() -> ServiceResponse {
+    ///     // Successful response with data
+    ///     ServiceResponse::ok(ValueType::from(json!({
+    ///         "id": "123",
+    ///         "name": "John Doe"
+    ///     })))
+    /// }
+    /// ```
+    pub fn ok(data: ValueType) -> Self {
+        Self {
+            status: 200,
+            data: Some(data),
+            error: None,
+        }
+    }
+
+    /// Create a successful response with no data
+    ///
+    /// INTENTION: Provide a convenient way to create a successful response
+    /// when no result data is needed (for acknowledgement-type responses).
+    pub fn ok_empty() -> Self {
+        Self {
+            status: 200,
+            data: None,
+            error: None,
+        }
+    }
+
+    /// Create an error response
+    ///
+    /// INTENTION: Provide a convenient way to create an error response
+    /// with an error message and appropriate status code.
+    ///
+    /// Example:
+    /// ```
+    /// use runar_node_new::services::ServiceResponse;
+    ///
+    /// fn handle_permission_check() -> ServiceResponse {
+    ///     // Error response - unauthorized
+    ///     ServiceResponse::error(403, "Insufficient permissions to access resource")
+    /// }
+    /// ```
+    pub fn error(status: i32, message: &str) -> Self {
+        Self {
+            status,
+            data: None,
+            error: Some(message.to_string()),
+        }
+    }
+
+    /// Check if the response indicates success
+    ///
+    /// INTENTION: Provide a convenient way to check if a response indicates
+    /// success (2xx status code).
+    pub fn is_success(&self) -> bool {
+        self.status >= 200 && self.status < 300
+    }
+
+    /// Check if the response indicates an error
+    ///
+    /// INTENTION: Provide a convenient way to check if a response indicates
+    /// an error (non-2xx status code).
+    pub fn is_error(&self) -> bool {
+        !self.is_success()
+    }
+}
+
+/// Options for a subscription
+#[derive(Debug, Clone, Default)]
+pub struct SubscriptionOptions {
+    // Add subscription options as needed
+}
+
+/// Options for registering an action handler
+///
+/// INTENTION: Provide a way to specify metadata about an action when registering it,
+/// reducing the need for services to define complete metadata upfront.
+#[derive(Debug, Clone)]
+pub struct ActionRegistrationOptions {
+    /// Description of what the action does
+    pub description: Option<String>,
+    /// Parameter schema for validation and documentation
+    pub params_schema: Option<ValueType>,
+    /// Return value schema for documentation
+    pub return_schema: Option<ValueType>,
+}
+
+impl Default for ActionRegistrationOptions {
+    fn default() -> Self {
+        Self {
+            description: None,
+            params_schema: None,
+            return_schema: None,
+        }
+    }
+}
+
+/// Options for registering an event
+///
+/// INTENTION: Provide a way to specify metadata about an event when registering it,
+/// reducing the need for services to define complete metadata upfront.
+#[derive(Debug, Clone)]
+pub struct EventRegistrationOptions {
+    /// Description of what the event represents
+    pub description: Option<String>,
+    /// Schema of the event data
+    pub data_schema: Option<ValueType>,
+}
+
+impl Default for EventRegistrationOptions {
+    fn default() -> Self {
+        Self {
+            description: None,
+            data_schema: None,
+        }
+    }
+}
+
+/// Interface for handling service requests
+///
+/// INTENTION: Define a consistent interface for handling node requests. This trait
+/// is implemented by components that need to handle service requests, specifically
+/// the Node component itself which should be responsible for routing requests to
+/// appropriate services.
+///
+/// ARCHITECTURAL PRINCIPLE:
+/// Request handling should be centralized in the Node component, with a clear
+/// interface that allows for proper routing, logging, and error handling. This
+/// separates the responsibility of request handling from service management.
+#[async_trait::async_trait]
+pub trait NodeRequestHandler: Send + Sync {
+    /// Process a service request
+    ///
+    /// ```
+    /// // Example implementation
+    /// use runar_node_new::services::{NodeRequestHandler, ServiceResponse, EventContext, SubscriptionOptions};
+    /// use runar_common::types::ValueType;
+    /// use anyhow::Result;
+    /// use async_trait::async_trait;
+    /// use std::future::Future;
+    /// use std::pin::Pin;
+    /// use std::sync::Arc;
+    /// 
+    /// struct Node {}
+    /// 
+    /// #[async_trait]
+    /// impl NodeRequestHandler for Node {
+    ///     async fn request(&self, path: String, params: ValueType) -> Result<ServiceResponse> {
+    ///         // Process the request
+    ///         Ok(ServiceResponse::ok_empty())
+    ///     }
+    ///     
+    ///     // Other methods implemented...
+    /// #   async fn publish(&self, _topic: String, _data: ValueType) -> Result<()> { Ok(()) }
+    /// #   async fn subscribe(&self, _topic: String, _callback: Box<dyn Fn(Arc<EventContext>, ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>) -> Result<String> { Ok(String::new()) }
+    /// #   async fn subscribe_with_options(&self, _topic: String, _callback: Box<dyn Fn(Arc<EventContext>, ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>, _options: SubscriptionOptions) -> Result<String> { Ok(String::new()) }
+    /// #   async fn unsubscribe(&self, _topic: String, _subscription_id: Option<&str>) -> Result<()> { Ok(()) }
+    /// #   fn list_services(&self) -> Vec<String> { Vec::new() }
+    /// }
+    /// ```
+    async fn request(&self, path: String, params: ValueType) -> Result<ServiceResponse>;
 
     /// Publish an event to a topic
-    pub async fn publish<T: Into<String>, V: Into<ValueType>>(&self, topic: T, data: V) -> Result<()> {
-        self.node_handler.publish(topic.into(), data.into()).await
-    }
+    async fn publish(&self, topic: String, data: ValueType) -> Result<()>;
 
-    /// Subscribe to events on a topic with an async callback
-    pub async fn subscribe<T: Into<String>, F, Fut>(&self, topic: T, callback: F) -> Result<String>
-    where
-        F: Fn(ValueType) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<()>> + Send + 'static,
-    {
-        let topic_str = topic.into();
-        
-        // Create a wrapper function that returns a Pin<Box<dyn Future>>
-        let wrapper = Box::new(move |value: ValueType| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
-            Box::pin(callback(value))
-        });
-        
-        self.node_handler.subscribe(
-            topic_str,
-            wrapper,
-        ).await
-    }
+    /// Subscribe to a topic
+    ///
+    /// INTENTION: Register a callback that will be invoked when events are published 
+    /// to the specified topic. The callback receives both an EventContext and the event data.
+    async fn subscribe(
+        &self,
+        topic: String,
+        callback: Box<dyn Fn(Arc<EventContext>, ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
+    ) -> Result<String>;
 
-    /// Subscribe to events with additional options
-    pub async fn subscribe_with_options<T: Into<String>, F, Fut>(
-        &self, 
-        topic: T,
-        callback: F,
-        mut options: SubscriptionOptions,
-    ) -> Result<String>
-    where
-        F: Fn(ValueType) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<()>> + Send + 'static,
-    {
-        let topic_str = topic.into();
-        
-        // Create a wrapper function that returns a Pin<Box<dyn Future>>
-        let wrapper = Box::new(move |value: ValueType| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
-            Box::pin(callback(value))
-        });
-        
-        // Set the context in the options if not already set
-        options.context = self.clone();
-        
-        self.node_handler.subscribe_with_options(
-            topic_str,
-            wrapper,
-            options,
-        ).await
-    }
+    /// Subscribe to a topic with options
+    ///
+    /// INTENTION: Register a callback with specific delivery options for the subscription.
+    /// The callback receives both an EventContext and the event data.
+    async fn subscribe_with_options(
+        &self,
+        topic: String,
+        callback: Box<dyn Fn(Arc<EventContext>, ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
+        options: SubscriptionOptions,
+    ) -> Result<String>;
 
-    /// Unsubscribe from events on a topic
-    pub async fn unsubscribe<T: Into<String>>(&self, topic: T, subscription_id: Option<&str>) -> Result<()> {
-        self.node_handler.unsubscribe(topic.into(), subscription_id).await
-    }
+    /// Unsubscribe from a topic
+    async fn unsubscribe(&self, topic: String, subscription_id: Option<&str>) -> Result<()>;
 
-    /// Subscribe once to an event - automatically unsubscribes after first notification
-    pub async fn once<T: Into<String>, F, Fut>(&self, topic: T, callback: F) -> Result<String>
-    where
-        F: Fn(ValueType) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<()>> + Send + 'static,
-    {
-        let mut options = SubscriptionOptions::new(self.clone());
-        options.once = true;
-        self.subscribe_with_options(topic, callback, options).await
-    }
+    /// List all services
+    /// 
+    /// This method is provided in the trait to allow clients to discover
+    /// available services without needing to know the internal structure
+    /// of the service registry. It provides a simple way to enumerate
+    /// the services available for requests.
+    /// 
+    /// In more complex implementations, this could be expanded to include
+    /// filtering by service type, status, or other attributes.
+    fn list_services(&self) -> Vec<String>;
+}
 
-    /// Get the request path
-    pub fn path(&self) -> &str {
-        &self.path
+/// Helper trait to enable easy logging from an Arc<RequestContext>
+pub trait ArcContextLogging {
+    /// Log a debug level message
+    fn debug(&self, message: impl Into<String>);
+    
+    /// Log an info level message
+    fn info(&self, message: impl Into<String>);
+    
+    /// Log a warning level message
+    fn warn(&self, message: impl Into<String>);
+    
+    /// Log an error level message
+    fn error(&self, message: impl Into<String>);
+}
+
+/// Implement logging methods for Arc<RequestContext>
+impl ArcContextLogging for Arc<RequestContext> {
+    fn debug(&self, message: impl Into<String>) {
+        self.logger.debug(message);
+    }
+    
+    fn info(&self, message: impl Into<String>) {
+        self.logger.info(message);
+    }
+    
+    fn warn(&self, message: impl Into<String>) {
+        self.logger.warn(message);
+    }
+    
+    fn error(&self, message: impl Into<String>) {
+        self.logger.error(message);
     }
 }
 
-#[cfg(test)]
-mod request_context_tests {
-    use super::*;
-    use crate::routing::TopicPath;
-    
-    #[test]
-    fn test_request_context_with_explicit_path() {
-        let handler = Arc::new(create_test_handler());
-        
-        // Create context with explicit service path and network ID
-        let context = RequestContext::new_with_option_v2(
-            "service/action",
-            None,
-            handler.clone(),
-            "custom_service".to_string(),
-            "test_network".to_string()
-        );
-        
-        // Verify the explicit values were used
-        assert_eq!(context.service_path(), "custom_service");
-        assert_eq!(context.network_id(), "test_network");
-        
-        // Verify that path was preserved as-is
-        assert_eq!(context.path, "service/action");
-    }
-    
-    #[test]
-    fn test_request_context_path_extraction() {
-        let handler = Arc::new(create_test_handler());
-        
-        // Test with service/action format
-        let context = RequestContext::new_with_option(
-            "service/action",
-            None,
-            handler.clone()
-        );
-        
-        // Verify extraction worked correctly
-        assert_eq!(context.service_path(), "service");
-        assert_eq!(context.network_id(), "");
-        
-        // Test with network:service/action format
-        let context2 = RequestContext::new_with_option(
-            "network:service/action",
-            None,
-            handler.clone()
-        );
-        
-        // Verify extraction parsed the network ID
-        assert_eq!(context2.service_path(), "service");
-        assert_eq!(context2.network_id(), "network");
-    }
-    
-    #[test]
-    fn test_request_context_child() {
-        let handler = Arc::new(create_test_handler());
-        
-        // Create parent context with explicit network
-        let parent = RequestContext::new_with_option_v2(
-            "parent/action",
-            None,
-            handler.clone(),
-            "parent".to_string(),
-            "test_network".to_string()
-        );
-        
-        // Create child context
-        let child = parent.new_child("child/action", "test_data");
-        
-        // Verify child inherited network ID
-        assert_eq!(child.service_path(), "child");
-        assert_eq!(child.network_id(), "test_network");
-        assert_eq!(child.path, "child/action");
-    }
-    
-    // Helper function to create a test handler
-    fn create_test_handler() -> impl NodeRequestHandler {
-        // Simplified implementation for testing
-        struct TestHandler;
-        
-        #[async_trait::async_trait]
-        impl NodeRequestHandler for TestHandler {
-            async fn request(&self, _path: String, _params: ValueType) -> Result<ServiceResponse> {
-                Ok(ServiceResponse::success("Test".to_string(), None::<ValueType>))
-            }
-            
-            async fn publish(&self, _topic: String, _data: ValueType) -> Result<()> {
-                Ok(())
-            }
-            
-            async fn subscribe(
-                &self,
-                _topic: String,
-                _callback: Box<dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
-            ) -> Result<String> {
-                Ok("test-id".to_string())
-            }
-            
-            async fn subscribe_with_options(
-                &self,
-                _topic: String,
-                _callback: Box<dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
-                _options: SubscriptionOptions,
-            ) -> Result<String> {
-                Ok("test-id".to_string())
-            }
-            
-            async fn unsubscribe(&self, _topic: String, _subscription_id: Option<&str>) -> Result<()> {
-                Ok(())
-            }
-        }
-        
-        TestHandler
-    }
+/// Type alias for a boxed future returning a Result with ServiceResponse
+///
+/// INTENTION: Provide a consistent return type for asynchronous service methods,
+/// simplifying method signatures and ensuring uniformity across the codebase.
+pub type ServiceFuture = Pin<Box<dyn Future<Output = Result<ServiceResponse>> + Send>>;
+
+/// Event Dispatcher trait
+///
+/// INTENTION: Define a consistent interface for publishing events from services.
+/// This trait is implemented by components that need to dispatch events,
+/// specifically the Node component which should be responsible for publishing
+/// events to subscribers.
+///
+/// ARCHITECTURAL PRINCIPLE:
+/// Event publishing should be centralized in the Node component, with a clear
+/// interface that allows for proper topic-based routing and delivery to subscribers.
+/// This separates the responsibility of event publishing from service management.
+#[async_trait::async_trait]
+pub trait EventDispatcher: Send + Sync {
+    /// Publish an event to subscribers
+    ///
+    /// INTENTION: Distribute an event to all subscribers of the specified topic.
+    /// Implementations should handle subscriber lookups and asynchronous delivery.
+    ///
+    /// Example implementation (simplified):
+    /// ```
+    /// # use runar_node_new::services::{EventDispatcher, ServiceRequest, ServiceResponse, SubscriptionOptions, EventContext, RequestContext};
+    /// # use runar_common::types::ValueType;
+    /// # use runar_common::logging::{Logger, Component};
+    /// # use runar_node_new::routing::TopicPath;
+    /// # use anyhow::Result;
+    /// # use async_trait::async_trait;
+    /// # use std::future::Future;
+    /// # use std::pin::Pin;
+    /// # use std::sync::Arc;
+    /// 
+    /// struct Node {
+    ///     // Node state...
+    ///     network_id: String,
+    /// }
+    /// 
+    /// type SubscriberCallback = Box<dyn Fn(Arc<EventContext>, ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
+    /// struct Subscriber {
+    ///     id: String,
+    ///     callback: SubscriberCallback,
+    /// }
+    /// 
+    /// #[async_trait]
+    /// impl EventDispatcher for Node {
+    ///     async fn publish(&self, topic: &str, event: &str, data: Option<ValueType>, network_id: &str) -> Result<()> {
+    ///         // Find subscribers for the topic
+    ///         let subscribers: Vec<Subscriber> = Vec::new(); // Would fetch from a storage
+    ///         
+    ///         // Deliver the event to each subscriber
+    ///         for subscriber in subscribers {
+    ///             let data = data.clone().unwrap_or(ValueType::Null);
+    ///             let logger = Logger::new_root(Component::Service, network_id);
+    ///             
+    ///             // Create a topic path from the topic and event
+    ///             let full_topic = format!("{}/{}", topic, event);
+    ///             let topic_path = TopicPath::new(&full_topic, network_id).expect("Valid topic path");
+    ///             
+    ///             // Create event context with the topic path
+    ///             let event_context = Arc::new(EventContext::new(&topic_path, logger));
+    ///             
+    ///             // Call the subscriber's callback
+    ///             let future = (subscriber.callback)(event_context, data);
+    ///             future.await?;
+    ///         }
+    ///         
+    ///         Ok(())
+    ///     }
+    /// }
+    /// ```
+    async fn publish(&self, topic: &str, event: &str, data: Option<ValueType>, network_id: &str) -> Result<()>;
 }
 
+/// Unified Node Delegate trait 
+///
+/// INTENTION: Provide a single interface for all Node operations that services
+/// need to interact with, combining both request handling and event dispatching.
+///
+/// ARCHITECTURAL PRINCIPLE:
+/// A single unified interface simplifies service interactions with the Node,
+/// reducing code duplication and complexity while maintaining clear architectural
+/// boundaries. This follows the Interface Segregation Principle by providing
+/// a focused, cohesive interface for services.
+#[async_trait::async_trait]
+pub trait NodeDelegate: Send + Sync {
+    /// Process a service request
+    async fn request(&self, path: String, params: ValueType) -> Result<ServiceResponse>;
+ 
+    /// Simplified publish for common cases
+    async fn publish(&self, topic: String, data: ValueType) -> Result<()>;
+
+    /// Subscribe to a topic
+    async fn subscribe(
+        &self,
+        topic: String,
+        callback: Box<dyn Fn(Arc<EventContext>, ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
+    ) -> Result<String>;
+
+    /// Subscribe to a topic with options
+    async fn subscribe_with_options(
+        &self,
+        topic: String,
+        callback: Box<dyn Fn(Arc<EventContext>, ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
+        options: SubscriptionOptions,
+    ) -> Result<String>;
+
+    /// Unsubscribe from a topic
+    async fn unsubscribe(&self, topic: String, subscription_id: Option<&str>) -> Result<()>;
+
+    /// List all services
+    fn list_services(&self) -> Vec<String>;
+    
+    /// Register an action handler for a specific path
+    ///
+    /// INTENTION: Allow services to register handlers for actions through the NodeDelegate.
+    /// This consolidates all node interactions through a single interface.
+    async fn register_action_handler(&self, topic_path: &TopicPath, handler: ActionHandler, metadata: Option<ActionMetadata>) -> Result<()>;
+}
+
+/// Registry Delegate trait for registry service operations
+///
+/// INTENTION: Provide a dedicated interface for the Registry Service
+/// to interact with the Node without creating circular references.
+/// This follows the same pattern as NodeDelegate but provides only
+/// the functionality needed by registry operations.
+#[async_trait::async_trait]
+pub trait RegistryDelegate: Send + Sync {
+    /// Get all service states
+    async fn get_all_service_states(&self) -> HashMap<String, ServiceState>;
+    
+    /// Get metadata for a specific service
+    async fn get_service_metadata(&self, service_path: &str) -> Option<CompleteServiceMetadata>;
+    
+    /// List all services
+    fn list_services(&self) -> Vec<String>;
+}
+
+// For backward compatibility with tests - use with caution in LifecycleContext
+// #[deprecated(note = "Use new_with_logger instead")]
+// impl LifecycleContext {
+//     pub fn new(network_id: &str, service_path: &str) -> Self {
+//         // Warning: This creates a new root logger which is not the correct pattern
+//         // Only used for backward compatibility with tests
+//         Self {
+//             network_id: network_id.to_string(),
+//             service_path: service_path.to_string(),
+//             config: None,
+//             logger: Logger::new_root(Component::Service, network_id),
+//             action_registrar: None,
+//         }
+//     }
+// } 

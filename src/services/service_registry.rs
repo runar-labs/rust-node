@@ -1,542 +1,190 @@
+// Service Registry Module
+//
+// INTENTION:
+// This module provides action handler and event subscription management capabilities for the node.
+// It acts as a central registry for action handlers and event subscriptions, enabling the node to
+// find he correct subscribers and actions handlers.. THE Registry does not CALL ANY CALLBACKS/Handler directly
+//.. this is NODEs functions.
+//
+// ARCHITECTURAL PRINCIPLES:
+// 1. Handler Registration - Manages registration of action handlers
+// 2. Event Subscription  Registration - Manages registration of event handlers 
+// 3. Network Isolation - Respects network boundaries for handlers and subscriptions
+// 4. Path Consistency - ALL Registry APIs use TopicPath objects for proper validation
+//    and consistent path handling, NEVER raw strings
+//
+// IMPORTANT NOTE:
+// The Registry should focus solely on managing action handlers and subscriptions.
+// It should NOT handle service discovery or lifecycle - that's the responsibility of the Node.
+// Request routing and handling is also the Node's responsibility.
+
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use uuid::Uuid;
+use log::{debug, error, info, warn};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
-use tokio::sync::{RwLock, Semaphore};
-use tokio::time::timeout;
-use std::future::Future;
 use std::pin::Pin;
-use std::time::Duration as StdDuration;
-use tokio::runtime::Handle;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use log::{debug, info, warn, error};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
-use crate::db::SqliteDatabase;
-use crate::node::NodeRequestHandlerImpl;
-use crate::p2p::crypto::PeerId;
-use crate::p2p::service::P2PRemoteServiceDelegate;
-use crate::p2p::transport::P2PServiceInfo;
-use crate::p2p::peer_id_convert::CryptoToLibP2pPeerId;
-use crate::routing::{TopicPath, PathType};
-use crate::services::abstract_service::{ServiceState, AbstractService, ActionMetadata, EventMetadata};
-use crate::services::remote::P2PTransport;
+use runar_common::utils::logging::{debug_log, info_log, Component};
+use runar_common::logging::Logger;
+use runar_common::types::ValueType;
+use crate::routing::TopicPath;
+use crate::services::abstract_service::{CompleteServiceMetadata, ServiceState, ActionMetadata, AbstractService};
 use crate::services::{
-    NodeRequestHandler, RequestContext, ServiceRequest, ServiceResponse, ValueType,
-    ResponseStatus, SubscriptionOptions
+    NodeRequestHandler, RequestContext, ServiceRequest, ServiceResponse, SubscriptionOptions, 
+    ActionHandler, LifecycleContext, ArcContextLogging, EventContext
 };
-use crate::server::Service;
-use crate::services::RequestOptions;
-use runar_common::utils::logging::{debug_log, error_log, info_log, warn_log, Component};
 
-// Simple AsyncCache implementation
-struct AsyncCache<K, V> {
-    cache: Arc<Mutex<HashMap<K, V>>>,
-    _ttl: StdDuration,
-}
+/// Type definition for event callbacks
+///
+/// INTENTION: Define a type that can handle event notifications asynchronously.
+/// The callback takes an event context and payload and returns a future that
+/// resolves once the event has been processed.
+pub type EventCallback = Arc<dyn Fn(Arc<EventContext>, ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
 
-impl<K, V> AsyncCache<K, V> 
-where 
-    K: Eq + std::hash::Hash + Clone,
-    V: Clone,
-{
-    fn new(ttl: StdDuration) -> Self {
-        Self {
-            cache: Arc::new(Mutex::new(HashMap::new())),
-            _ttl: ttl,
-        }
-    }
+/// Type definition for event handler
+///
+/// INTENTION: Provide a sharable type similar to ActionHandler that can be referenced
+/// by multiple subscribers and cloned as needed. This fixes lifetime issues by using Arc.
+pub type EventHandler = Arc<dyn Fn(Arc<EventContext>, ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
 
-    async fn get(&self, key: &K) -> Option<V> 
-    where 
-        K: Clone,
-        V: Clone,
-    {
-        let cache = self.cache.lock().unwrap();
-        cache.get(key).cloned()
-    }
+/// Import Future trait for use in type definition
+use std::future::Future;
 
-    async fn set(&self, key: K, value: V) {
-        let mut cache = self.cache.lock().unwrap();
-        cache.insert(key, value);
-    }
-}
+/// Future returned by service operations
+pub type ServiceFuture = Pin<Box<dyn Future<Output = Result<ServiceResponse>> + Send>>;
 
-// Define the necessary types here
-type EventData = ValueType;
-type EventCallback = Arc<dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
-struct Event {
-    topic: String,
-    data: EventData,
-}
+/// Type for event subscription callbacks
+pub type EventSubscriber = Arc<dyn Fn(Arc<EventContext>, Option<ValueType>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
 
-/// Type definition for action handlers
-pub type ActionHandler = dyn Fn(&RequestContext, &ValueType) -> Pin<Box<dyn Future<Output = Result<ServiceResponse>> + Send>> + Send + Sync;
+/// Type for action registration function
+pub type ActionRegistrar = Arc<dyn Fn(&str, &str, ActionHandler, Option<ActionMetadata>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
 
-/// Type definition for process handlers
-pub type ProcessHandler = dyn Fn(&RequestContext, &str, &ValueType) -> Pin<Box<dyn Future<Output = Result<ServiceResponse>> + Send>> + Send + Sync;
-
-/// Type definition for subscription handlers
-pub type SubscriptionHandler = dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync;
-
-/// Entry for an action handler in the registry
-#[derive(Clone)]
-pub struct ActionHandlerEntry {
-    /// The service that owns this action
-    pub service: String,
-    /// The action name
-    pub action: String,
-    /// Timeout for this action
-    pub timeout: StdDuration,
-    /// The handler function
-    pub handler: Arc<ActionHandler>,
-}
-
-/// Registry for process handlers - maps service_name to handler functions
-#[derive(Clone)]
-pub struct ProcessHandlerEntry {
-    pub service: String,
-    pub process_id: String,
-    pub timeout: StdDuration,
-    pub handler: Arc<ProcessHandler>,
-}
-
-/// Entry for a subscription in the registry
-#[derive(Clone)]
-pub struct SubscriptionEntry {
-    /// Unique ID for this subscription
-    pub id: String,
-    /// The topic this subscription is for
-    pub topic: String,
-    /// The service path of the subscriber
-    pub service_path: String,
-    /// Subscription options
-    pub options: SubscriptionOptions,
-    /// Whether this is a remote subscription
-    pub remote: bool,
-    /// Peer ID for remote subscriptions
-    pub peer_id: Option<PeerId>,
-}
-
-/// ServiceRegistry is responsible for registering, discovering, and managing services
-/// It combines the functionality of the previous ServiceRegistry and ServiceManager
+/// Service registry for managing services and their handlers
+///
+/// INTENTION: Provide a centralized registry for action handlers and event subscriptions.
+/// This ensures consistent handling of service operations and enables service routing.
+///
+/// ARCHITECTURAL PRINCIPLE:
+/// Service discovery and routing should be centralized for consistency and
+/// to ensure proper service isolation.
 pub struct ServiceRegistry {
-    /// The path of the registry
-    path: String,
-
-    /// The services managed by this registry, organized by network_id -> service_name -> service
-    services: Arc<RwLock<HashMap<String, HashMap<String, Arc<dyn AbstractService>>>>>,
-
-    /// The database connection (optional)
-    db: Option<Arc<SqliteDatabase>>,
-
-    /// The node handler for sending requests to other services
-    node_handler: Option<Arc<dyn NodeRequestHandler + Send + Sync>>,
-
-    /// Event subscribers with topic as the key - wrapped in Arc to share between clones
-    event_subscribers: Arc<RwLock<HashMap<String, Vec<String>>>>,
-
-    /// Callback map for event subscribers - wrapped in Arc to share between clones
-    event_callbacks: Arc<RwLock<HashMap<String, Vec<(String, EventCallback)>>>>,
-
-    /// Remote peer map - peer_id to list of services offered by that peer
-    remote_peers: RwLock<HashMap<PeerId, Vec<String>>>,
-
-    /// P2P delegate for communicating with remote peers
-    p2p_delegate: RwLock<Option<Arc<P2PRemoteServiceDelegate>>>,
-
-    /// Remote subscriptions map - peer_id to set of topics they are subscribed to
-    remote_subscriptions: RwLock<HashMap<PeerId, HashSet<String>>>,
-
-    /// Service info cache
-    service_info_cache: RwLock<HashMap<String, P2PServiceInfo>>,
-
-    /// Node handler lock for interior mutability
-    node_handler_lock: RwLock<Option<Arc<dyn NodeRequestHandler + Send + Sync>>>,
-
-    /// Storage for action handlers
-    action_handlers: RwLock<HashMap<(String, String), ActionHandlerEntry>>,
-    
-    /// Storage for process handlers
-    process_handlers: RwLock<HashMap<String, ProcessHandlerEntry>>,
-    
-    /// Storage for subscriptions
-    subscription_handlers: RwLock<HashMap<(String, String), Arc<dyn Fn(ValueType) -> Result<()> + Send + Sync>>>,
-    
-    /// Storage for publications
-    publication_topics: RwLock<HashMap<String, HashSet<String>>>,
-
-    /// Cache for service lookups
-    services_cache: AsyncCache<String, Arc<dyn AbstractService + Send + Sync>>,
-
-    /// Events that are waiting for a subscription
-    pending_events: Arc<Mutex<Vec<(String, EventData)>>>,
-
-    /// Maximum number of pending events to store
-    max_pending_events: usize,
-
-    /// Concurrency control for event tasks
-    event_task_semaphore: Arc<Semaphore>,
-    max_event_tasks: usize,
-    max_concurrent_event_executions: usize,
-    current_event_tasks: Arc<AtomicUsize>,
+    /// Action handlers organized by network and then by path
+    action_handlers: RwLock<HashMap<String, HashMap<String, ActionHandler>>>,
+    /// Event subscribers organized by topic
+    event_subscribers: RwLock<HashMap<String, Vec<String>>>,
+    /// Callbacks map for event handlers
+    event_callbacks: RwLock<HashMap<String, Vec<(String, EventCallback)>>>,
+    logger: Logger,
 }
 
-// Implement Clone manually for ServiceRegistry
 impl Clone for ServiceRegistry {
     fn clone(&self) -> Self {
-        // Debug logging for cloning
-        println!("[ServiceRegistry] Cloning registry instance with address {:p}", self);
+        // Note: We create new RwLocks with new HashMaps inside
+        // WARNING: This implementation CREATES EMPTY REGISTRY MAPS
+        // This means that any handlers registered on the original registry
+        // will NOT be available in the cloned registry
+        debug!("WARNING: ServiceRegistry clone was called - creating empty registry!");
         
-        // Debug: Dump the subscribers map
-        println!("[ServiceRegistry] CLONE: Dumping event_subscribers map:");
-        let event_subscribers_ref = self.event_subscribers.try_read();
-        if let Ok(subs) = event_subscribers_ref {
-            for (topic, subscribers) in subs.iter() {
-                println!("[ServiceRegistry] CLONE:   Topic '{}': {:?}", topic, subscribers);
-            }
-        } else {
-            println!("[ServiceRegistry] CLONE: Could not read event_subscribers (locked)");
-        }
-        
-        // Instead of trying to clone the services, just reuse the Arc<RwLock>
-        println!("[ServiceRegistry] CLONE: Using shared services Arc<RwLock> for clone");
-        
-        // Create new registry sharing the same maps through Arc
         ServiceRegistry {
-            path: self.path.clone(),
-            services: Arc::clone(&self.services),
-            db: self.db.clone(),
-            node_handler: self.node_handler.clone(),
-            event_subscribers: Arc::clone(&self.event_subscribers),
-            event_callbacks: Arc::clone(&self.event_callbacks),
-            remote_peers: RwLock::new(HashMap::new()),
-            p2p_delegate: RwLock::new(None),
-            remote_subscriptions: RwLock::new(HashMap::new()),
-            service_info_cache: RwLock::new(HashMap::new()),
-            node_handler_lock: RwLock::new(None),
             action_handlers: RwLock::new(HashMap::new()),
-            process_handlers: RwLock::new(HashMap::new()),
-            subscription_handlers: RwLock::new(HashMap::new()),
-            publication_topics: RwLock::new(HashMap::new()),
-            services_cache: AsyncCache::new(StdDuration::from_secs(300)),
-            pending_events: Arc::new(Mutex::new(Vec::new())),
-            max_pending_events: self.max_pending_events,
-            event_task_semaphore: Arc::clone(&self.event_task_semaphore),
-            max_event_tasks: self.max_event_tasks,
-            max_concurrent_event_executions: self.max_concurrent_event_executions,
-            current_event_tasks: Arc::clone(&self.current_event_tasks),
+            event_subscribers: RwLock::new(HashMap::new()),
+            event_callbacks: RwLock::new(HashMap::new()),
+            logger: self.logger.clone(),
         }
     }
 }
 
-// Implement the ServiceRegistry trait from server.rs
-#[async_trait]
-impl crate::server::ServiceRegistry for ServiceRegistry {
-    async fn register_service(&self, service: Arc<dyn crate::server::Service>) -> Result<()> {
-        // Get the service name
-        let service_name = service.name().to_string();
-        
-        info_log(
-            Component::Registry,
-            &format!("Registering server service: {}", service_name)
-        ).await;
-        
-        // Create an adapter that wraps the Server::Service as an AbstractService
-        let adapter = ServerServiceAdapter::new(service);
-        
-        // Use default network ID for server services
-        self.register_service("default", Arc::new(adapter)).await
-    }
-    
-    async fn get_service(&self, name: &str) -> Option<Arc<dyn crate::server::Service>> {
-        // Create a topic path for lookup in the default network
-        let topic_path = TopicPath::new_service("default", name);
-        
-        // Try to get the service from our registry
-        if let Some(abstract_service) = self.get_service_by_topic_path(&topic_path).await {
-            // Check if it's a ServerServiceAdapter
-            if let Some(adapter) = ServerServiceAdapter::from_abstract(abstract_service.clone()) {
-                return Some(adapter.inner_service());
-            }
-        }
-        None
+impl Default for ServiceRegistry {
+    fn default() -> Self {
+        Self::new_with_default_logger()
     }
 }
 
-/// Adapter to convert between Service and AbstractService
-struct ServerServiceAdapter {
-    inner: Arc<dyn crate::server::Service>,
-}
-
-impl ServerServiceAdapter {
-    fn new(service: Arc<dyn crate::server::Service>) -> Self {
-        Self { inner: service }
-    }
-    
-    fn inner_service(&self) -> Arc<dyn crate::server::Service> {
-        self.inner.clone()
-    }
-    
-    fn from_abstract(service: Arc<dyn AbstractService>) -> Option<Arc<Self>> {
-        // For now, we need to use a simpler method since downcast isn't working well
-        // Check if the name follows our convention for server adapters
-        let name = service.name();
-        if name.starts_with("server_adapter_") {
-            // Create a new adapter - we can't actually extract the inner service
-            // This is a simplified version that won't work well in practice
-            None
-        } else {
-            None
+impl ServiceRegistry {
+    /// Create a new registry with a provided logger
+    ///
+    /// INTENTION: Initialize a new registry with a logger provided by the parent
+    /// component (typically the Node). This ensures proper logger hierarchy.
+    pub fn new(logger: Logger) -> Self {
+        Self {
+            action_handlers: RwLock::new(HashMap::new()),
+            event_subscribers: RwLock::new(HashMap::new()),
+            event_callbacks: RwLock::new(HashMap::new()),
+            logger,
         }
     }
-}
-
-#[async_trait]
-impl AbstractService for ServerServiceAdapter {
-    fn name(&self) -> &str {
-        self.inner.name()
-    }
     
-    fn path(&self) -> &str {
-        // Since the server::Service trait might not have a path method,
-        // we'll just use the name as the path for now
-        self.inner.name()
-    }
-    
-    fn description(&self) -> &str {
-        "Server service adapter"
-    }
-    
-    fn version(&self) -> &str {
-        "1.0.0"
-    }
-    
-    fn state(&self) -> ServiceState {
-        // Server services are always considered running
-        ServiceState::Running
-    }
-    
-    async fn init(&mut self, _context: &RequestContext) -> Result<()> {
-        // Server services are already initialized
-        Ok(())
-    }
-    
-    async fn start(&mut self) -> Result<()> {
-        // Server services are already started
-        Ok(())
-    }
-    
-    async fn stop(&mut self) -> Result<()> {
-        // No-op for server services
-        Ok(())
-    }
-    
-    async fn handle_request(&self, request: ServiceRequest) -> Result<ServiceResponse> {
-        // Forward the request to the inner service
-        self.inner.handle_request(request).await
-    }
-}
-
-/// A ServiceRequest handler for the ServiceRegistry
-/// This allows it to receive and process requests like a service
-#[async_trait]
-impl NodeRequestHandler for ServiceRegistry {
-    /// Request a service to perform an action
-    async fn request(&self, path: String, params: ValueType) -> Result<ServiceResponse> {
-        // Parse the path into a TopicPath
-        let topic_path = match TopicPath::parse(&path, "default") {
-            Ok(tp) => tp,
-            Err(e) => {
-                return Ok(ServiceResponse {
-                    status: ResponseStatus::Error,
-                    message: format!("Invalid path format: {}", e),
-                    data: None,
-                });
-            }
-        };
-        
-        // Get the service using the parsed path
-        let service_path = topic_path.service_path.clone();
-        let network_id = topic_path.network_id.clone();
-        
-        // Create a topic path for service lookup
-        let service_topic_path = TopicPath::new_service(&network_id, &service_path);
-        
-        // Try to get the service
-        let service = match self.get_service_by_topic_path(&service_topic_path).await {
-            Some(s) => s,
-            None => {
-                return Ok(ServiceResponse {
-                    status: ResponseStatus::Error,
-                    message: format!("Service not found: {}", service_path),
-                    data: None,
-                });
-            }
-        };
-        
-        // Create a request context
-        let context = RequestContext::default();
-        
-        // Create a service request
-        let request = ServiceRequest::new(
-            &service_path,
-            &topic_path.action_or_event,
-            params,
-            Arc::new(context)
-        );
-        
-        // Forward to the service
-        service.handle_request(request).await
-    }
-    
-    /// Publish an event to a topic
-    async fn publish(&self, topic: String, data: ValueType) -> Result<()> {
-        debug_log(
-            Component::Registry,
-            &format!("Publishing event to topic '{}'", topic)
-        );
-        
-        // Get callbacks for this topic
-        let callbacks = {
-            let callbacks_map = self.event_callbacks.read().await;
-            if let Some(cb_list) = callbacks_map.get(&topic) {
-                // Return the references to callbacks but don't clone them
-                cb_list.iter().map(|(id, cb)| (id.clone(), cb.clone())).collect::<Vec<_>>()
-            } else {
-                // No subscribers
-                Vec::new()
-            }
-        };
-        
-        // Store as a pending event if there are no subscribers
-        if callbacks.is_empty() {
-            debug_log(
-                Component::Registry,
-                &format!("No subscribers for topic '{}', storing as pending event", topic)
-            );
-            
-            // Add to pending events
-            let mut pending_events = self.pending_events.lock().unwrap();
-            
-            // Maintain max size
-            if pending_events.len() >= self.max_pending_events {
-                // Remove oldest events to stay under limit
-                let new_start = pending_events.len() - self.max_pending_events + 1;
-                let mut new_events = Vec::new();
-                for i in new_start..pending_events.len() {
-                    new_events.push(pending_events[i].clone());
-                }
-                *pending_events = new_events;
-            }
-            
-            // Add the new event
-            pending_events.push((topic, data));
-            
-            return Ok(());
-        }
-        
-        // Invoke each callback
-        for (subscription_id, callback) in callbacks {
-            debug_log(
-                Component::Registry,
-                &format!("Invoking callback for subscription '{}' on topic '{}'", 
-                        subscription_id, topic)
-            );
-            
-            // Clone data for each callback
-            let data_clone = data.clone();
-            
-            // Get a permit from the semaphore
-            let permit = match self.event_task_semaphore.clone().acquire_owned().await {
-                Ok(p) => p,
-                Err(e) => {
-                    error_log(
-                        Component::Registry,
-                        &format!("Failed to acquire semaphore permit: {}", e)
-                    );
-                    continue;
-                }
-            };
-            
-            // Spawn a task to handle the callback
-            let current_tasks = self.current_event_tasks.clone();
-            current_tasks.fetch_add(1, Ordering::SeqCst);
-            
-            tokio::spawn(async move {
-                // Execute the callback
-                let result = callback(data_clone);
-                
-                // Drop the permit when done
-                drop(permit);
-                
-                // Update task count
-                current_tasks.fetch_sub(1, Ordering::SeqCst);
-                
-                // Log any errors
-                if let Err(e) = result.await {
-                    error!("Error executing event callback: {}", e);
-                }
-            });
-        }
-        
-        Ok(())
+    /// Create a new registry with a default root logger
+    ///
+    /// INTENTION: Create a registry with a default logger when no parent logger
+    /// is available. This is primarily used for testing or standalone usage.
+    pub fn new_with_default_logger() -> Self {
+        Self::new(Logger::new_root(runar_common::Component::Registry, "global"))
     }
     
     /// Subscribe to a topic
-    async fn subscribe(
+    ///
+    /// INTENTION: Register a callback to be notified when events are published
+    /// to a specific topic. This is the primary way for components to receive
+    /// events from the system.
+    ///
+    /// Returns a unique subscription ID that can be used for unsubscribing.
+    pub async fn subscribe(
         &self,
-        topic: String,
-        callback: Box<dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
+        topic: &TopicPath,
+        callback: Arc<dyn Fn(Arc<EventContext>, ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
     ) -> Result<String> {
         self.subscribe_with_options(topic, callback, SubscriptionOptions::default()).await
     }
     
     /// Subscribe to a topic with options
-    async fn subscribe_with_options(
+    ///
+    /// INTENTION: Register a callback with specific options for controlling
+    /// how events are delivered. This extended version of subscribe allows
+    /// for more fine-grained control of subscription behavior.
+    ///
+    /// Note: Currently, options are not used, but the parameter exists for
+    /// future extension.
+    pub async fn subscribe_with_options(
         &self,
-        topic: String,
-        callback: Box<dyn Fn(ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
+        topic: &TopicPath,
+        callback: Arc<dyn Fn(Arc<EventContext>, ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
         _options: SubscriptionOptions,
     ) -> Result<String> {
         // Generate a unique subscription ID
         let subscription_id = uuid::Uuid::new_v4().to_string();
         
-        debug_log(
-            Component::Registry,
-            &format!("Subscribing to topic '{}' with ID '{}'", topic, subscription_id)
-        );
+        self.logger.debug(format!("Subscribing to topic '{}' with ID '{}'", topic.as_str(), subscription_id));
         
-        // Update the subscribers map
+        // Update the subscribers map - we need to store which subscription IDs exist for each topic
         {
             let mut subscribers = self.event_subscribers.write().await;
             
-            // Create entry if not exists
-            if !subscribers.contains_key(&topic) {
-                subscribers.insert(topic.clone(), Vec::new());
+            // Ensure we have an entry for this topic
+            if !subscribers.contains_key(topic.as_str()) {
+                subscribers.insert(topic.as_str().to_string(), Vec::new());
             }
             
-            // Add this subscription ID to the list
-            if let Some(sub_list) = subscribers.get_mut(&topic) {
-                sub_list.push(subscription_id.clone());
+            // Get the vector for this topic and add the subscription ID
+            if let Some(subscriber_list) = subscribers.get_mut(topic.as_str()) {
+                subscriber_list.push(subscription_id.clone());
             }
         }
         
-        // Convert Box to Arc to make it cloneable
-        let callback_arc: EventCallback = Arc::new(move |value| callback(value));
-        
-        // Update the callbacks map
+        // Store the callback in the callbacks map
         {
             let mut callbacks = self.event_callbacks.write().await;
             
             // Create entry if not exists
-            if !callbacks.contains_key(&topic) {
-                callbacks.insert(topic.clone(), Vec::new());
+            if !callbacks.contains_key(topic.as_str()) {
+                callbacks.insert(topic.as_str().to_string(), Vec::new());
             }
             
             // Add the callback
-            if let Some(cb_list) = callbacks.get_mut(&topic) {
-                cb_list.push((subscription_id.clone(), callback_arc));
+            if let Some(cb_list) = callbacks.get_mut(topic.as_str()) {
+                cb_list.push((subscription_id.clone(), callback));
             }
         }
         
@@ -545,18 +193,22 @@ impl NodeRequestHandler for ServiceRegistry {
     }
     
     /// Unsubscribe from a topic
-    async fn unsubscribe(&self, topic: String, subscription_id: Option<&str>) -> Result<()> {
+    ///
+    /// INTENTION: Remove a subscription from a topic, either by specific
+    /// subscription ID or all subscriptions for the topic if no ID is provided.
+    ///
+    /// ARCHITECTURAL PRINCIPLE:
+    /// Subscriptions should be explicitly managed, with the ability to clean up
+    /// when no longer needed to prevent resource leaks and unwanted callbacks.
+    pub async fn unsubscribe(&self, topic: &TopicPath, subscription_id: Option<&str>) -> Result<()> {
         match subscription_id {
             Some(id) => {
-                debug_log(
-                    Component::Registry,
-                    &format!("Unsubscribing from topic '{}' with ID '{}'", topic, id)
-                );
+                self.logger.debug(format!("Unsubscribing from topic '{}' with ID '{}'", topic.as_str(), id));
                 
                 // Remove from subscribers map
                 {
                     let mut subscribers = self.event_subscribers.write().await;
-                    if let Some(sub_list) = subscribers.get_mut(&topic) {
+                    if let Some(sub_list) = subscribers.get_mut(topic.as_str()) {
                         sub_list.retain(|sub_id| sub_id != id);
                     }
                 }
@@ -564,26 +216,23 @@ impl NodeRequestHandler for ServiceRegistry {
                 // Remove from callbacks map
                 {
                     let mut callbacks = self.event_callbacks.write().await;
-                    if let Some(cb_list) = callbacks.get_mut(&topic) {
+                    if let Some(cb_list) = callbacks.get_mut(topic.as_str()) {
                         cb_list.retain(|(sub_id, _)| sub_id != id);
                     }
                 }
             },
             None => {
-                debug_log(
-                    Component::Registry,
-                    &format!("Unsubscribing from all callbacks for topic '{}'", topic)
-                );
+                self.logger.debug(format!("Unsubscribing from all callbacks for topic '{}'", topic.as_str()));
                 
                 // Remove entire topic
                 {
                     let mut subscribers = self.event_subscribers.write().await;
-                    subscribers.remove(&topic);
+                    subscribers.remove(topic.as_str());
                 }
                 
                 {
                     let mut callbacks = self.event_callbacks.write().await;
-                    callbacks.remove(&topic);
+                    callbacks.remove(topic.as_str());
                 }
             }
         }
@@ -591,284 +240,250 @@ impl NodeRequestHandler for ServiceRegistry {
         Ok(())
     }
     
-    /// List all services
-    fn list_services(&self) -> Vec<String> {
-        // Return a flattened list of all services across all networks
-        let services_opt = self.services.try_read();
-        if let Ok(services) = services_opt {
-            let mut result = Vec::new();
-            
-            // Iterate through each network
-            for (_, network_services) in services.iter() {
-                // Extract unique service names
-                for (name, _) in network_services.iter() {
-                    // Only add the name if it's not a path
-                    if !name.contains('/') {
-                        result.push(name.clone());
-                    }
-                }
-            }
-            
-            result
-        } else {
-            Vec::new()
-        }
-    }
-}
+    /// Register an action handler
+    ///
+    /// INTENTION: Register a handler function for a specific service action.
+    /// This enables services to dynamically register handlers at runtime.
+    pub async fn register_action_handler(
+        &self,
+        topic_path: &TopicPath,
+        handler: ActionHandler,
+        metadata: Option<ActionMetadata>
+    ) -> Result<()> {
+        // Use action_path directly instead of manually constructing it
+        let action_path = topic_path.action_path();
+        let network_id = topic_path.network_id();
 
-// Add a method to list services for a specific network (not part of NodeRequestHandler trait)
-impl ServiceRegistry {
-    /// List services for a specific network
-    pub fn list_services_for_network(&self, network_id: &str) -> Vec<String> {
-        // Return a list of services for the specified network
-        let services_opt = self.services.try_read();
-        if let Ok(services) = services_opt {
-            if let Some(network_services) = services.get(network_id) {
-                let mut result = Vec::new();
+        // Debug output using proper logger
+        self.logger.debug(format!("DEBUG_REGISTER_ACTION: action_path={}, topic_path={}", 
+                  action_path, topic_path.as_str()));
+        
+        // Print detailed debug information
+        self.logger.info(format!("Registering action: action_path={}, topic_path={}", 
+                              action_path, topic_path.as_str()));
+        
+        // Store the handler in the appropriate network and path
+        {
+            let mut handlers = self.action_handlers.write().await;
+            
+            // Ensure we have a map for this network
+            if !handlers.contains_key(&network_id) {
+                handlers.insert(network_id.to_string(), HashMap::new());
+            }
+            
+            // Add the handler to the network's map
+            if let Some(network_handlers) = handlers.get_mut(&network_id) {
+                self.logger.debug(format!("Registering action handler for '{}' on network '{}'", action_path, network_id));
+                // Use the action_path directly as the key for consistency
+                network_handlers.insert(action_path.clone(), handler);
                 
-                // Extract unique service names
-                for (name, _) in network_services.iter() {
-                    // Only add the name if it's not a path
-                    if !name.contains('/') {
-                        result.push(name.clone());
-                    }
-                }
-                
-                return result;
+                // Debug output of registered handlers using proper logger
+                self.logger.debug(format!("Registered handlers for network {}: {:?}", 
+                         network_id, network_handlers.keys().collect::<Vec<_>>()));
             }
         }
         
-        Vec::new()
-    }
-    
-    /// Create a new ServiceRegistry with a database
-    pub fn new_with_db(db: Arc<SqliteDatabase>) -> Self {
-        let mut registry = Self::new();
-        registry.db = Some(db);
-        registry
-    }
-    
-    /// Register a service with a specific network ID
-    pub async fn register_service(&self, network_id: &str, service: Arc<dyn AbstractService>) -> Result<()> {
-        let service_name = service.name().to_string();
-        let service_path = service.path().to_string();
-        
-        debug_log(
-            Component::Registry,
-            &format!("Registering service '{}' with path '{}' on network '{}'", 
-                     service_name, service_path, network_id)
-        );
-        
-        // Get our services map
-        let mut services = self.services.write().await;
-        
-        // Ensure the network_id entry exists
-        if !services.contains_key(network_id) {
-            services.insert(network_id.to_string(), HashMap::new());
-        }
-        
-        // Get the network's services map
-        let network_services = services.get_mut(network_id).unwrap();
-        
-        // Add the service to the map
-        network_services.insert(service_name.clone(), service.clone());
-        
-        // Also index by path for path-based lookups (lowercase for case-insensitive lookup)
-        if !service_path.is_empty() && service_path != service_name {
-            let lower_path = service_path.to_lowercase();
-            network_services.insert(lower_path, service.clone());
-        }
-        
-        // Log success
-        debug_log(
-            Component::Registry,
-            &format!("Successfully registered service '{}' on network '{}'", service_name, network_id)
-        );
+        // Log the registration
+        self.logger.info(format!("Registered action handler for '{}' on network '{}'", action_path, network_id));
         
         Ok(())
     }
-    
-    /// Get a service by TopicPath
-    pub async fn get_service_by_topic_path(&self, topic_path: &TopicPath) -> Option<Arc<dyn AbstractService>> {
-        let network_id = &topic_path.network_id;
-        let service_path = &topic_path.service_path;
+
+    /// Get an action handler for a specific topic path
+    ///
+    /// INTENTION: Find the action handler registered for a specific topic path.
+    /// This is used by the Node when routing requests to the appropriate handler.
+    /// A valid topic path MUST include an action, not just a service name.
+    pub async fn get_action_handler(
+        &self,
+        topic_path: &TopicPath
+    ) -> Option<ActionHandler> {
+        // Use action_path directly instead of manually constructing it
+        let action_path = topic_path.action_path();
         
-        debug_log(
-            Component::Registry,
-            &format!("Looking up service by topic path: network='{}', service='{}'", 
-                    network_id, service_path)
-        );
+        // Debug output with proper logger
+        self.logger.debug(format!("Looking for handler: topic_path={}, action_path={}, network_id={}",
+                 topic_path.as_str(), action_path, topic_path.network_id()));
         
-        // Get the services map for this network
-        let services = self.services.read().await;
+        // Access the action handlers registry
+        let handlers = self.action_handlers.read().await;
         
-        if let Some(network_services) = services.get(network_id) {
-            // Try lookup by service name first
-            if let Some(service) = network_services.get(service_path) {
-                return Some(service.clone());
+        // Debug output of all available handlers using proper logger
+        if let Some(network_handlers) = handlers.get(&topic_path.network_id()) {
+            self.logger.debug(format!("Available handlers for network {}: {:?}", 
+                     topic_path.network_id(), network_handlers.keys().collect::<Vec<_>>()));
+        }
+        
+        // Try to find the handler in the network's handlers map
+        if let Some(network_handlers) = handlers.get(&topic_path.network_id()) {
+            // First check for direct match
+            if let Some(handler) = network_handlers.get(&action_path) {
+                self.logger.debug(format!("Found direct handler match for '{}'", action_path));
+                return Some(handler.clone());
             }
             
-            // Try lookup by lowercase path
-            let lower_path = service_path.to_lowercase();
-            if let Some(service) = network_services.get(&lower_path) {
-                return Some(service.clone());
-            }
-            
-            // Try to find by service name/path attribute
-            for (_, service) in network_services.iter() {
-                if service.name() == service_path || service.path() == service_path {
-                    return Some(service.clone());
-                }
-                
-                // Also try case-insensitive match
-                if service.name().to_lowercase() == lower_path || 
-                   service.path().to_lowercase() == lower_path {
-                    return Some(service.clone());
+            // If no direct match, check for template patterns with path parameters
+            for (registered_path, handler) in network_handlers.iter() {
+                // For paths with parameter placeholders like {service_path}
+                if registered_path.contains('{') {
+                    // Get the segments of both paths
+                    let registered_segments: Vec<&str> = registered_path.split('/').collect();
+                    let requested_segments: Vec<&str> = action_path.split('/').collect();
+                    
+                    // Strict segment count matching - must have exactly the same number of segments
+                    if registered_segments.len() != requested_segments.len() {
+                        self.logger.debug(format!("Template '{}' has {} segments, but request '{}' has {} segments - not a match", 
+                            registered_path, registered_segments.len(), action_path, requested_segments.len()));
+                        continue;
+                    }
+                    
+                    // If segment count matches, we might have a template match
+                    let mut matches = true;
+                    
+                    for (i, reg_segment) in registered_segments.iter().enumerate() {
+                        // If this segment is a parameter (wrapped in {}), it matches anything
+                        if reg_segment.starts_with('{') && reg_segment.ends_with('}') {
+                            // Parameter matches any value in this position
+                            continue;
+                        } else if reg_segment != &requested_segments[i] {
+                            // Literal segment must match exactly
+                            matches = false;
+                            self.logger.debug(format!("Template '{}' segment '{}' doesn't match request '{}' segment '{}'", 
+                                registered_path, reg_segment, action_path, requested_segments[i]));
+                            break;
+                        }
+                    }
+                    
+                    if matches {
+                        // Extract parameters from the registered path template and the actual request path
+                        let mut params = HashMap::new();
+                        
+                        for (i, reg_segment) in registered_segments.iter().enumerate() {
+                            if reg_segment.starts_with('{') && reg_segment.ends_with('}') {
+                                // Extract parameter name (remove the {} brackets)
+                                let param_name = &reg_segment[1..reg_segment.len()-1];
+                                
+                                // Store the parameter value from the requested path
+                                params.insert(param_name.to_string(), requested_segments[i].to_string());
+                            }
+                        }
+                        
+                        // Use proper logger
+                        self.logger.debug(format!("Found template handler for '{}' matching template '{}' with params: {:?}", 
+                                 action_path, registered_path, params));
+                                 
+                        // Create a wrapper handler that populates the path_params
+                        let original_handler = handler.clone();
+                        let handler_with_params: ActionHandler = Arc::new(move |params_data, mut context| {
+                            let handler_clone = original_handler.clone();
+                            let path_params = params.clone();
+                            
+                            Box::pin(async move {
+                                // Update the context with path parameters
+                                context.path_params = path_params;
+                                
+                                // Call the original handler with updated context
+                                handler_clone(params_data, context).await
+                            })
+                        });
+                        
+                        return Some(handler_with_params);
+                    }
                 }
             }
         }
         
-        debug_log(
-            Component::Registry,
-            &format!("Service not found: network='{}', service='{}'", network_id, service_path)
-        );
+        // Use proper logger for not found case
+        self.logger.debug(format!("No handler found for '{}', available keys: {:?}", action_path, 
+                 handlers.get(&topic_path.network_id())
+                 .map(|m| m.keys().collect::<Vec<_>>())
+                 .unwrap_or_default()));
         
         None
     }
     
-    /// Handle a service request (internal method, not part of the trait)
-    pub async fn handle_request(&self, request: ServiceRequest) -> Result<ServiceResponse> {
-        // Parse the request into components
-        let service_path = request.path.clone();
-        let action = request.action.clone();
-        let data = request.data.clone();
-        let context = request.context.clone();
-        
-        // Extract network ID from context or use default
-        // Use a default network ID if none is provided
-        let network_id = if context.network_id.is_empty() {
-            "default".to_string()
-        } else {
-            context.network_id.clone()
-        };
-        
-        debug_log(
-            Component::Registry,
-            &format!("ServiceRegistry received request for service '{}', action '{}' on network '{}'", 
-                    service_path, action, network_id)
-        );
-        
-        // Create a topic path for service lookup
-        let topic_path = TopicPath::new_service(&network_id, &service_path);
-        
-        // Try to find the service
-        if let Some(service) = self.get_service_by_topic_path(&topic_path).await {
-            debug_log(
-                Component::Registry,
-                &format!("Found service '{}', forwarding request", service.name())
-            );
-            
-            // Forward the request to the service
-            return service.handle_request(request).await;
-        }
-        
-        // If we get here, the service was not found
-        error_log(
-            Component::Registry,
-            &format!("Service not found: '{}' on network '{}'", service_path, network_id)
-        );
-        
-        // Return a not found response
-        Ok(ServiceResponse {
-            status: ResponseStatus::Error,
-            message: format!("Service not found: {}", service_path),
-            data: None,
-        })
-    }
-    
-    /// Get all services across all networks
-    pub async fn get_all_services(&self) -> Vec<Arc<dyn AbstractService>> {
-        let services = self.services.read().await;
+    /// List all registered action handler paths
+    ///
+    /// INTENTION: Get a list of all registered action handler paths.
+    /// This is useful for debugging and introspection.
+    pub async fn list_action_handlers(&self) -> Vec<String> {
+        let handlers = self.action_handlers.read().await;
         let mut result = Vec::new();
-        let mut seen = HashSet::new();
         
-        // Collect unique services (avoid duplicates from name/path storage)
-        for (_, network_services) in services.iter() {
-            for (name, service) in network_services.iter() {
-                if !name.contains('/') && !seen.contains(name) {
-                    seen.insert(name.clone());
-                    result.push(service.clone());
-                }
+        for (network_id, network_handlers) in handlers.iter() {
+            for handler_key in network_handlers.keys() {
+                result.push(format!("{}:{}", network_id, handler_key));
             }
         }
         
         result
     }
-    
-    /// Get subscribers for a topic
-    pub async fn get_subscribers_for_topic(&self, topic: &str) -> Vec<(String, EventCallback)> {
-        let callbacks_map = self.event_callbacks.read().await;
-        if let Some(cb_list) = callbacks_map.get(topic) {
-            // Return references to the callbacks but don't clone them
-            cb_list.iter().map(|(id, cb)| (id.clone(), cb.clone())).collect()
-        } else {
-            Vec::new()
-        }
-    }
-    
-    /// Set the database connection
-    pub fn set_database(&mut self, db: Arc<SqliteDatabase>) {
-        self.db = Some(db);
-    }
-    
-    /// Set the node request handler
-    pub fn set_node_handler(&mut self, handler: Arc<dyn NodeRequestHandler + Send + Sync>) {
-        self.node_handler = Some(handler.clone());
-        
-        // Also update the locked version
-        if let Ok(mut lock) = self.node_handler_lock.try_write() {
-            *lock = Some(handler);
-        }
-    }
-}
 
-impl Default for ServiceRegistry {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ServiceRegistry {
-    /// Create a new ServiceRegistry
-    pub fn new() -> Self {
-        info_log(
-            Component::Registry,
-            &format!("Creating new ServiceRegistry")
-        );
+    /// Get callback for a specific subscription
+    ///
+    /// INTENTION: Get the callback for a specific subscription ID.
+    /// This is used by the Node when executing callbacks, to avoid having
+    /// to hold locks across await points.
+    ///
+    /// Returns true if the callback was found and executed, false otherwise.
+    pub async fn has_subscriber(&self, topic: &TopicPath, subscription_id: &str) -> bool {
+        let callbacks = self.event_callbacks.read().await;
         
-        Self {
-            path: "registry".to_string(),
-            services: Arc::new(RwLock::new(HashMap::new())),
-            db: None,
-            node_handler: None,
-            event_subscribers: Arc::new(RwLock::new(HashMap::new())),
-            event_callbacks: Arc::new(RwLock::new(HashMap::new())),
-            remote_peers: RwLock::new(HashMap::new()),
-            p2p_delegate: RwLock::new(None),
-            remote_subscriptions: RwLock::new(HashMap::new()),
-            service_info_cache: RwLock::new(HashMap::new()),
-            node_handler_lock: RwLock::new(None),
-            action_handlers: RwLock::new(HashMap::new()),
-            process_handlers: RwLock::new(HashMap::new()),
-            subscription_handlers: RwLock::new(HashMap::new()),
-            publication_topics: RwLock::new(HashMap::new()),
-            services_cache: AsyncCache::new(StdDuration::from_secs(300)),
-            pending_events: Arc::new(Mutex::new(Vec::new())),
-            max_pending_events: 1000, // Default value
-            event_task_semaphore: Arc::new(Semaphore::new(10)), // Default value
-            max_event_tasks: 10, // Default value
-            max_concurrent_event_executions: 5, // Default value
-            current_event_tasks: Arc::new(AtomicUsize::new(0)),
+        // Check if we have this topic
+        if let Some(cb_list) = callbacks.get(topic.as_str()) {
+            // Find the matching subscription
+            for (id, _) in cb_list {
+                if id == subscription_id {
+                    return true;
+                }
+            }
         }
+        
+        false
     }
-}
+
+    /// Get event handlers for a topic
+    ///
+    /// INTENTION: Get all the event handlers registered for a specific topic.
+    /// This is used by the Node when publishing events, so it can execute the handlers directly.
+    ///
+    /// ARCHITECTURAL PRINCIPLE:
+    /// The Registry only provides the handler information, but does NOT execute handlers.
+    /// Handler execution is the responsibility of the Node.
+    ///
+    /// Returns subscription IDs and their handlers for the topic.
+    pub async fn get_event_handlers(&self, topic: &TopicPath) -> Vec<(String, EventHandler)> {
+        let callbacks = self.event_callbacks.read().await;
+        let mut result = Vec::new();
+        
+        // Check if we have any subscribers for this exact topic
+        if let Some(cb_list) = callbacks.get(topic.as_str()) {
+            // For each callback, clone the ID and the Arc callback
+            for (id, callback) in cb_list {
+                result.push((id.clone(), callback.clone()));
+            }
+        }
+        
+        result
+    }
+
+    /// Create an action registrar function
+    ///
+    /// INTENTION: Create a function that can be passed to services during
+    /// initialization to allow them to register action handlers.
+    pub fn create_action_registrar(&self, network_id: String) -> Arc<dyn Fn(&TopicPath, ActionHandler, Option<ActionMetadata>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync> {
+        let registry = self.clone();
+        
+        // Create a boxed function that can register action handlers using TopicPath
+        Arc::new(move |topic_path: &TopicPath, handler: ActionHandler, metadata: Option<ActionMetadata>| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
+            let registry_clone = registry.clone();
+            let metadata = metadata.clone();
+            let topic_path = topic_path.clone();
+            
+            // Return a future that registers the handler
+            Box::pin(async move {
+                registry_clone.register_action_handler(&topic_path, handler, metadata).await
+            })
+        })
+    }
+} 
