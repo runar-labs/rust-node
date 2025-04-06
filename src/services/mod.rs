@@ -30,212 +30,14 @@ pub mod service_registry;
 pub mod abstract_service;
 pub mod registry_info;
 pub mod request_context;
+pub mod event_context;
 
 use runar_common::types::ValueType;
 use runar_common::logging::{Component, LoggingContext, Logger};
 use crate::services::abstract_service::{ActionMetadata, EventMetadata, CompleteServiceMetadata, ServiceState};
-// Re-export the RequestContext from the dedicated module
+// Re-export the context types from their dedicated modules
 pub use crate::services::request_context::RequestContext;
-
-/// Context for handling events
-///
-/// INTENTION: Provide context information for event handlers, allowing them
-/// to access network information, logging, and perform operations like
-/// publishing other events or making service requests.
-///
-/// ARCHITECTURAL PRINCIPLE:
-/// Event handlers should have access to necessary context for performing 
-/// their operations, but with appropriate isolation and scope control.
-/// The EventContext provides a controlled interface to the node's capabilities.
-pub struct EventContext {
-    /// Network ID for this context
-    pub network_id: String,
-    
-    /// Topic that triggered this event
-    pub topic: String,
-    
-    /// Service that subscribed to the event
-    pub service_path: String,
-    
-    /// Logger instance specific to this context
-    pub logger: Logger,
-    
-    /// Configuration for this event context
-    pub config: Option<ValueType>,
-    
-    /// Node delegate for making requests or publishing events
-    pub(crate) node_delegate: Option<Arc<dyn NodeDelegate + Send + Sync>>,
-    
-    /// Delivery options used when publishing this event
-    pub delivery_options: Option<PublishOptions>,
-}
-
-impl Debug for EventContext {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EventContext")
-            .field("network_id", &self.network_id)
-            .field("topic", &self.topic)
-            .field("service_path", &self.service_path)
-            .field("config", &self.config)
-            .field("logger", &"<Logger>") // Avoid trying to Debug the Logger
-            .field("node_delegate", &self.node_delegate.is_some())
-            .field("delivery_options", &self.delivery_options.is_some())
-            .finish()
-    }
-}
-
-// Manual implementation of Clone for EventContext
-impl Clone for EventContext {
-    fn clone(&self) -> Self {
-        panic!("EventContext should not be cloned directly. Use new instead");
-    }
-}
-
-// Manual implementation of Default for EventContext
-impl Default for EventContext {
-    fn default() -> Self {
-        panic!("EventContext should not be created with default. Use new instead");
-    }
-}
-
-/// Constructors follow the builder pattern principle:
-/// - Prefer a single primary constructor with required parameters 
-/// - Use builder methods for optional parameters
-/// - Avoid creating specialized constructors for every parameter combination
-impl EventContext {
-    /// Create a new EventContext with the given topic path and logger
-    ///
-    /// This is the primary constructor that takes the minimum required parameters.
-    pub fn new(topic_path: &TopicPath, logger: Logger) -> Self {
-        Self {
-            network_id: topic_path.network_id().to_string(),
-            topic: topic_path.action_path(),
-            service_path: topic_path.service_path(),
-            config: None,
-            logger,
-            node_delegate: None,
-            delivery_options: None,
-        }
-    }
-    
-    /// Legacy constructor for backward compatibility
-    pub fn new_from_path(network_id: &str, topic: &str, service_path: &str, logger: Logger) -> Self {
-        Self {
-            network_id: network_id.to_string(),
-            topic: topic.to_string(),
-            service_path: service_path.to_string(),
-            config: None,
-            logger,
-            node_delegate: None,
-            delivery_options: None,
-        }
-    }
-    
-    /// Add configuration to an EventContext
-    ///
-    /// Use builder-style methods instead of specialized constructors.
-    pub fn with_config(mut self, config: ValueType) -> Self {
-        self.config = Some(config);
-        self
-    }
-    
-    /// Add node delegate to an EventContext
-    ///
-    /// Used to make service requests from within an event handler.
-    pub fn with_node_delegate(mut self, delegate: Arc<dyn NodeDelegate + Send + Sync>) -> Self {
-        self.node_delegate = Some(delegate);
-        self
-    }
-    
-    /// Helper method to log debug level message
-    pub fn debug(&self, message: impl Into<String>) {
-        self.logger.debug(message);
-    }
-
-    /// Helper method to log info level message
-    pub fn info(&self, message: impl Into<String>) {
-        self.logger.info(message);
-    }
-
-    /// Helper method to log warning level message
-    pub fn warn(&self, message: impl Into<String>) {
-        self.logger.warn(message);
-    }
-
-    /// Helper method to log error level message
-    pub fn error(&self, message: impl Into<String>) {
-        self.logger.error(message);
-    }
-    
-    /// Publish an event
-    ///
-    /// INTENTION: Allow event handlers to publish their own events.
-    /// This method provides a convenient way to publish events from within
-    /// an event handler, using the same context's network ID.
-    pub async fn publish(&self, topic: &str, event: &str, data: Option<ValueType>) -> Result<()> {
-        if let Some(delegate) = &self.node_delegate {
-            // Process the topic based on its format
-            let full_topic = if topic.contains(':') {
-                // Already has network ID, use as is
-                topic.to_string()
-            } else if topic.contains('/') {
-                // Has service/topic but no network ID
-                format!("{}:{}", self.network_id, topic)
-            } else {
-                // Simple topic name - add service path and network ID
-                format!("{}:{}/{}", self.network_id, self.service_path, topic)
-            };
-            
-            // Combine event name with topic and use the actual data or null
-            let full_topic = format!("{}/{}", full_topic, event);
-            let actual_data = data.unwrap_or(ValueType::Null);
-            
-            delegate.publish(full_topic, actual_data).await
-        } else {
-            Err(anyhow!("No node delegate available in this context"))
-        }
-    }
-    
-    /// Make a service request
-    ///
-    /// INTENTION: Allow event handlers to make requests to other services.
-    /// This method provides a convenient way to call service actions from
-    /// within an event handler, using the same context's network ID.
-    pub async fn request(&self, path: &str, params: ValueType) -> Result<ServiceResponse> {
-        if let Some(delegate) = &self.node_delegate {
-            // Process the path based on its format:
-            let full_path = if path.contains(':') {
-                // Already has network ID, use as is
-                path.to_string()
-            } else if path.contains('/') {
-                // Has service/action but no network ID
-                format!("{}:{}", self.network_id, path)
-            } else {
-                // Simple action name - add both service path and network ID
-                format!("{}:{}/{}", self.network_id, self.service_path, path)
-            };
-            
-            // Call the delegate
-            delegate.request(full_path, params).await
-        } else {
-            Err(anyhow!("No node delegate available in this context"))
-        }
-    }
-}
-
-impl LoggingContext for EventContext {
-    fn component(&self) -> Component {
-        Component::Service
-    }
-    
-    fn service_path(&self) -> Option<&str> {
-        Some(&self.service_path)
-    }
-    
-    fn logger(&self) -> &Logger {
-        &self.logger
-    }
-}
+pub use crate::services::event_context::EventContext;
 
 /// Handler for a service action
 ///
@@ -470,67 +272,21 @@ impl LifecycleContext {
             data_schema: options.data_schema.map(|v| v),
         };
         
-        // TODO: Update event registration to include metadata in the service registry
+        // Log event registration with metadata
+        self.logger.debug(&format!(
+            "Registered event '{}' with metadata: description='{}', has_schema={}",
+            event_name,
+            metadata.description,
+            metadata.data_schema.is_some()
+        ));
         
-        // For now, just log that we registered an event
-        self.logger.debug(&format!("Registered event '{}' with metadata", event_name));
+        // Note: The NodeDelegate trait doesn't currently support registering events with metadata.
+        // This information is logged for documentation purposes but not stored in the registry.
+        // When event publishing occurs, this metadata would ideally be accessible.
         
         Ok(())
     }
     
-    /// Make a service request
-    ///
-    /// INTENTION: Allow services to make requests to other services during lifecycle operations.
-    /// This method provides the same path handling as EventContext.request.
-    pub async fn request(&self, path: &str, params: ValueType) -> Result<ServiceResponse> {
-        if let Some(delegate) = &self.node_delegate {
-            // Process the path based on its format:
-            let full_path = if path.contains(':') {
-                // Already has network ID, use as is
-                path.to_string()
-            } else if path.contains('/') {
-                // Has service/action but no network ID
-                format!("{}:{}", self.network_id, path)
-            } else {
-                // Simple action name - add both service path and network ID
-                format!("{}:{}/{}", self.network_id, self.service_path, path)
-            };
-            
-            // Call the delegate
-            delegate.request(full_path, params).await
-        } else {
-            Err(anyhow!("No node delegate available in this context"))
-        }
-    }
-    
-    /// Publish an event
-    ///
-    /// INTENTION: Allow services to publish events during lifecycle operations.
-    /// This method provides the same path handling as EventContext.publish.
-    pub async fn publish(&self, topic: &str, event: &str, data: Option<ValueType>) -> Result<()> {
-        if let Some(delegate) = &self.node_delegate {
-            // Process the topic based on its format
-            let full_topic = if topic.contains(':') {
-                // Already has network ID, use as is
-                topic.to_string()
-            } else if topic.contains('/') {
-                // Has service/topic but no network ID
-                format!("{}:{}", self.network_id, topic)
-            } else {
-                // Simple topic name - add service path and network ID
-                format!("{}:{}/{}", self.network_id, self.service_path, topic)
-            };
-            
-            // Combine event name with topic and use the actual data or null
-            let full_topic = format!("{}/{}", full_topic, event);
-            let actual_data = data.unwrap_or(ValueType::Null);
-            
-            delegate.publish(full_topic, actual_data).await
-        } else {
-            Err(anyhow!("No node delegate available in this context"))
-        }
-    }
-
     /// Register an action handler with template pattern matching
     ///
     /// INTENTION: Allow services to register handlers for path templates with named parameters,

@@ -14,22 +14,15 @@ use uuid::Uuid;
 
 use crate::routing::TopicPath;
 use crate::services::{
-    ActionHandler, LifecycleContext,
-    NodeRequestHandler, RequestContext, ServiceRequest, ServiceResponse, 
-    SubscriptionOptions, RegistryDelegate,
+    ActionHandler, EventContext, LifecycleContext, NodeDelegate, PublishOptions,
+    RequestContext, ServiceRequest, ServiceResponse, SubscriptionOptions, RegistryDelegate,
+    ActionRegistrationOptions, EventRegistrationOptions
 };
-// Import ActionMetadata and AbstractService with full paths
-use crate::services::abstract_service::{ActionMetadata, AbstractService, CompleteServiceMetadata};
+use crate::services::abstract_service::{ActionMetadata, AbstractService, CompleteServiceMetadata, ServiceState};
 use crate::services::registry_info::RegistryService;
 use crate::services::service_registry::ServiceRegistry;
 use runar_common::types::ValueType;
 use runar_common::logging::{Component, Logger};
-use crate::services::abstract_service::ServiceState;
-use crate::services::{
-    ServiceFuture, EventContext
-};
-
-use crate::services::NodeDelegate;
 
 /// Configuration for a Node
 #[derive(Clone, Debug)]
@@ -384,21 +377,33 @@ impl Node {
         Ok(ServiceResponse::error(404, &error_msg))
     }
     
-
-    //TODO: we need also a publish_with_options method..  with the actiona implmetnation and the publish() calls 
-    //is with defaul options.. options will be if the vent shoul be a broadcast, or a single node, single servie, 
-    //guaranteed delivery. rentention policy
     /// Publish an event to a topic
     ///
     /// INTENTION: Distribute an event to subscribers of the topic.
     /// This method validates the topic string, converts it to a TopicPath,
     /// looks up subscribers in the service registry, and delivers the event.
     pub async fn publish(&self, topic: String, data: ValueType) -> Result<()> {
+        // Use publish_with_options with default options
+        self.publish_with_options(topic, data, PublishOptions::default()).await
+    }
+    
+    /// Publish an event to a topic with specific delivery options
+    ///
+    /// INTENTION: Distribute an event to subscribers of the topic with specific delivery options.
+    /// This method provides additional control over how events are delivered, including:
+    /// - Delivery scope (broadcast vs. targeted)
+    /// - Delivery guarantees (at-least-once vs. best-effort)
+    /// - Retention policies for persistent events
+    ///
+    /// The method validates the topic string, converts it to a TopicPath,
+    /// looks up subscribers in the service registry, and delivers the event
+    /// according to the specified options.
+    pub async fn publish_with_options(&self, topic: String, data: ValueType, options: PublishOptions) -> Result<()> {
         // Convert string to validated TopicPath
         let topic_path = TopicPath::new(&topic, &self.network_id)
             .map_err(|e| anyhow!("Invalid topic format: {}", e))?;
             
-        self.logger.debug(format!("Publishing to topic '{}'", topic_path.as_str()));
+        self.logger.debug(format!("Publishing to topic '{}' with options: {:?}", topic_path.as_str(), options));
         
         // Get handlers - returns subscription IDs and handlers
         let event_handlers = self.service_registry.get_event_handlers(&topic_path).await;
@@ -412,32 +417,47 @@ impl Node {
         let topic_clone = topic_path.clone();
         let logger = self.logger.clone();
         
-        // Execute callbacks - each in its own task
+        // Execute callbacks based on delivery scope
+        // For now, we just handle local delivery - network delivery will be added later
         for (subscriber_id, callback) in event_handlers {
             let data_clone = data.clone();
             let topic_path_clone = topic_clone.clone();
             let logger_clone = logger.clone();
             let subscriber_id_clone = subscriber_id.clone();
-            let network_id = self.network_id.clone();
-            let service_path = topic_path_clone.service_path();
+            let options_clone = options.clone();
+            
+            // If guaranteed delivery is requested, use a different execution strategy
+            if options_clone.guaranteed_delivery {
+                // For now, just log that guaranteed delivery was requested
+                // In the future, this would use a more robust delivery mechanism
+                logger_clone.debug(format!(
+                    "Guaranteed delivery requested for topic '{}' to subscriber '{}'",
+                    topic_path_clone.as_str(), subscriber_id_clone
+                ));
+            }
             
             tokio::spawn(async move {
                 // Create an event context for the callback
                 let event_logger = logger_clone.with_component(Component::Service);
                 
-                // Create an event context with the topic path
-                let event_context = EventContext::new(&topic_path_clone, event_logger);
+                // Create an event context with the topic path and delivery options
+                let mut event_context = EventContext::new(&topic_path_clone, event_logger);
+                event_context.delivery_options = Some(options_clone);
                 let event_context_arc = Arc::new(event_context);
                 
                 // Execute the callback with the context
                 match callback(event_context_arc, data_clone).await {
                     Ok(_) => {
-                        logger_clone.debug(format!("Successfully delivered event to subscriber '{}' for topic '{}'", 
-                            subscriber_id_clone, topic_path_clone.as_str()));
+                        logger_clone.debug(format!(
+                            "Successfully delivered event to subscriber '{}' for topic '{}'", 
+                            subscriber_id_clone, topic_path_clone.as_str()
+                        ));
                     },
                     Err(err) => {
-                        logger_clone.error(format!("Error executing callback for topic '{}', subscriber '{}': {}", 
-                            topic_path_clone.as_str(), subscriber_id_clone, err));
+                        logger_clone.error(format!(
+                            "Error executing callback for topic '{}', subscriber '{}': {}", 
+                            topic_path_clone.as_str(), subscriber_id_clone, err
+                        ));
                     }
                 }
             });
