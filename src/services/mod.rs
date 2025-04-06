@@ -28,152 +28,14 @@ use tokio::sync::RwLock;
 
 pub mod service_registry;
 pub mod abstract_service;
-pub mod path_processor;
 pub mod registry_info;
+pub mod request_context;
 
 use runar_common::types::ValueType;
 use runar_common::logging::{Component, LoggingContext, Logger};
 use crate::services::abstract_service::{ActionMetadata, EventMetadata, CompleteServiceMetadata, ServiceState};
-
-/// Context for a service request
-///
-/// INTENTION: Encapsulate all contextual information needed to process
-/// a service request, including network identity, service path, and metadata.
-/// This ensures consistent request processing and proper logging.
-///
-/// The RequestContext is immutable and is passed with each request to provide:
-/// - Network isolation (via network_id)
-/// - Service targeting (via service_path)
-/// - Request metadata and contextual information
-/// - Logging capabilities with consistent context
-///
-/// ARCHITECTURAL PRINCIPLE:
-/// Each request should have its own isolated context that moves with the
-/// request through the entire processing pipeline, ensuring proper tracing
-/// and consistent handling.
-pub struct RequestContext {
-    /// Network ID for this request - ensures network isolation
-    pub network_id: String,
-    /// Service path for the service handling this request - target service path
-    pub service_path: String,
-    /// Complete topic path for this request (optional) - includes service path and action
-    pub topic_path: Option<TopicPath>,
-    /// Metadata for this request - additional contextual information
-    pub metadata: Option<ValueType>,
-    /// Logger for this context - pre-configured with the appropriate component and path
-    /// Path parameters extracted from template matching
-    pub path_params: HashMap<String, String>,
-    pub logger: Logger,
-}
-
-// Manual implementation of Debug for RequestContext
-impl fmt::Debug for RequestContext {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("RequestContext")
-            .field("network_id", &self.network_id)
-            .field("service_path", &self.service_path)
-            .field("topic_path", &self.topic_path)
-            .field("metadata", &self.metadata)
-            .field("path_params", &self.path_params)
-            .field("logger", &"<Logger>") // Avoid trying to Debug the Logger
-            .finish()
-    }
-}
-
-// Manual implementation of Clone for RequestContext
-impl Clone for RequestContext {
-    fn clone(&self) -> Self {
-        Self {
-            network_id: self.network_id.clone(),
-            service_path: self.service_path.clone(),
-            topic_path: self.topic_path.clone(),
-            metadata: self.metadata.clone(),
-            path_params: self.path_params.clone(),
-            logger: self.logger.clone(),
-        }
-    }
-}
-
-// Manual implementation of Default for RequestContext
-impl Default for RequestContext {
-    fn default() -> Self {
-        panic!("RequestContext should not be created with default. Use new instead");
-    }
-}
-
-/// Constructors follow the builder pattern principle:
-/// - Prefer a single primary constructor with required parameters
-/// - Use builder methods for optional parameters
-/// - Avoid creating specialized constructors for every parameter combination
-impl RequestContext {
-    /// Create a new RequestContext with the given topic path and logger
-    ///
-    /// This is the primary constructor that takes the minimum required parameters.
-    pub fn new(topic_path: &TopicPath, logger: Logger) -> Self {
-        Self {
-            network_id: topic_path.network_id().to_string(),
-            service_path: topic_path.service_path(),
-            topic_path: Some(topic_path.clone()),
-            metadata: None,
-            path_params: HashMap::new(),
-            logger,
-        }
-    }
-    
-    /// Add metadata to a RequestContext
-    ///
-    /// Use builder-style methods instead of specialized constructors.
-    pub fn with_metadata(mut self, metadata: ValueType) -> Self {
-        self.metadata = Some(metadata);
-        self
-    }
-
-    /// Helper method to log debug level message
-    ///
-    /// INTENTION: Provide a convenient way to log debug messages with the
-    /// context's logger, without having to access the logger directly.
-    pub fn debug(&self, message: impl Into<String>) {
-        self.logger.debug(message);
-    }
-    
-    /// Helper method to log info level message
-    ///
-    /// INTENTION: Provide a convenient way to log info messages with the
-    /// context's logger, without having to access the logger directly.
-    pub fn info(&self, message: impl Into<String>) {
-        self.logger.info(message);
-    }
-    
-    /// Helper method to log warning level message
-    ///
-    /// INTENTION: Provide a convenient way to log warning messages with the
-    /// context's logger, without having to access the logger directly.
-    pub fn warn(&self, message: impl Into<String>) {
-        self.logger.warn(message);
-    }
-    
-    /// Helper method to log error level message
-    ///
-    /// INTENTION: Provide a convenient way to log error messages with the
-    /// context's logger, without having to access the logger directly.
-    pub fn error(&self, message: impl Into<String>) {
-        self.logger.error(message);
-    }
-}
-
-impl LoggingContext for RequestContext {
-    fn component(&self) -> Component {
-        Component::Service
-    }
-    
-    fn service_path(&self) -> Option<&str> {
-        Some(&self.service_path)
-    }
-    
-    fn logger(&self) -> &Logger {
-        &self.logger
-    }
-}
+// Re-export the RequestContext from the dedicated module
+pub use crate::services::request_context::RequestContext;
 
 /// Context for handling events
 ///
@@ -198,11 +60,14 @@ pub struct EventContext {
     /// Logger instance specific to this context
     pub logger: Logger,
     
-    /// Optional configuration values
+    /// Configuration for this event context
     pub config: Option<ValueType>,
     
-    /// Node delegate for node operations (requests and events)
-    pub node_delegate: Option<Arc<dyn NodeDelegate + Send + Sync>>,
+    /// Node delegate for making requests or publishing events
+    pub(crate) node_delegate: Option<Arc<dyn NodeDelegate + Send + Sync>>,
+    
+    /// Delivery options used when publishing this event
+    pub delivery_options: Option<PublishOptions>,
 }
 
 impl Debug for EventContext {
@@ -214,6 +79,7 @@ impl Debug for EventContext {
             .field("config", &self.config)
             .field("logger", &"<Logger>") // Avoid trying to Debug the Logger
             .field("node_delegate", &self.node_delegate.is_some())
+            .field("delivery_options", &self.delivery_options.is_some())
             .finish()
     }
 }
@@ -248,6 +114,7 @@ impl EventContext {
             config: None,
             logger,
             node_delegate: None,
+            delivery_options: None,
         }
     }
     
@@ -260,6 +127,7 @@ impl EventContext {
             config: None,
             logger,
             node_delegate: None,
+            delivery_options: None,
         }
     }
     
@@ -728,17 +596,21 @@ impl LifecycleContext {
             let handler_owned = handler.clone(); // This requires F: Clone
             
             Box::pin(async move {
-                // Use the path_processor to process the template
-                if path_processor::process_template(&mut context, &template_owned).unwrap_or(false) {
-                    // Template matched, path_params are set in the context
-                    // Extract them for the handler
-                    let path_params = context.path_params.clone();
-                    
-                    // Call the handler with extracted parameters
-                    handler_owned(params, context, path_params).await
+                // Use the topic path's extract_params method directly
+                if let Some(topic_path) = &context.topic_path {
+                    if let Ok(path_params) = topic_path.extract_params(&template_owned) {
+                        // Template matched, set path_params in the context
+                        context.path_params = path_params.clone();
+                        
+                        // Call the handler with extracted parameters
+                        handler_owned(params, context, path_params).await
+                    } else {
+                        // Template didn't match
+                        Ok(ServiceResponse::error(400, "Path doesn't match template"))
+                    }
                 } else {
-                    // Template didn't match
-                    Ok(ServiceResponse::error(400, "Path doesn't match template"))
+                    // No topic path in context
+                    Ok(ServiceResponse::error(400, "No topic path in context"))
                 }
             })
         });
@@ -815,8 +687,8 @@ impl ServiceRequest {
         // Create a path string combining service path and action
         let path_string = format!("{}/{}", service_path, action_or_event);
         
-        // Parse the path using the context's network_id
-        let topic_path = TopicPath::new(&path_string, &context.network_id)
+        // Parse the path using the context's network_id method
+        let topic_path = TopicPath::new(&path_string, &context.network_id())
             .expect("Invalid path format");
             
         Self {
@@ -840,7 +712,7 @@ impl ServiceRequest {
     ///
     /// fn create_request(context: Arc<RequestContext>) {
     ///     // Create a topic path for the "auth/login" action
-    ///     let topic_path = TopicPath::new("auth/login", &context.network_id)
+    ///     let topic_path = TopicPath::new("auth/login", &context.network_id())
     ///         .expect("Valid path");
     ///     
     ///     // Create a request with the topic path
@@ -893,8 +765,8 @@ impl ServiceRequest {
         // Create a TopicPath from the service path and action
         let path_string = format!("{}/{}", service_path, action_or_event);
         
-        // Parse the path using the context's network_id
-        let topic_path = TopicPath::new(&path_string, &context.network_id)
+        // Parse the path using the context's network_id method
+        let topic_path = TopicPath::new(&path_string, &context.network_id())
             .expect("Invalid path format");
             
         Self {
@@ -1042,6 +914,37 @@ impl ServiceResponse {
 #[derive(Debug, Clone, Default)]
 pub struct SubscriptionOptions {
     // Add subscription options as needed
+}
+
+/// Options for publishing an event
+///
+/// INTENTION: Provide configuration options for event publishing,
+/// allowing control over delivery scope, guarantees, and retention.
+#[derive(Debug, Clone)]
+pub struct PublishOptions {
+    /// Whether this event should be broadcast to all nodes in the network
+    pub broadcast: bool,
+    
+    /// Whether delivery should be guaranteed (at-least-once semantics)
+    pub guaranteed_delivery: bool,
+    
+    /// How long the event should be retained for late subscribers (in seconds)
+    /// None means no retention, 0 means forever
+    pub retention_seconds: Option<u64>,
+    
+    /// Target a specific node or service instead of all subscribers
+    pub target: Option<String>,
+}
+
+impl Default for PublishOptions {
+    fn default() -> Self {
+        Self {
+            broadcast: false,
+            guaranteed_delivery: false,
+            retention_seconds: None,
+            target: None,
+        }
+    }
 }
 
 /// Options for registering an action handler
