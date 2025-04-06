@@ -15,8 +15,8 @@ use serde_json::json;
 
 use runar_common::types::ValueType;
 use runar_common::logging::{Component, Logger};
-use runar_node_new::services::abstract_service::{AbstractService, ServiceState};
-use runar_node_new::services::{RequestContext, ServiceRequest, ServiceResponse, LifecycleContext, ArcContextLogging, ActionRegistrationOptions};
+use runar_node::services::abstract_service::{AbstractService, ServiceState};
+use runar_node::services::{RequestContext, ServiceRequest, ServiceResponse, LifecycleContext, ArcContextLogging, ActionRegistrationOptions};
 
 /// A simple math service for testing
 /// 

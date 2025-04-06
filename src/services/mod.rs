@@ -484,7 +484,7 @@ impl LifecycleContext {
     ///
     /// Example:
     /// ```
-    /// use runar_node_new::services::{LifecycleContext, ServiceResponse, ActionHandler};
+    /// use runar_node::services::{LifecycleContext, ServiceResponse, ActionHandler};
     /// use runar_common::types::ValueType;
     /// use std::sync::Arc;
     /// use anyhow::Result;
@@ -528,7 +528,7 @@ impl LifecycleContext {
     ///
     /// Example:
     /// ```
-    /// use runar_node_new::services::{LifecycleContext, ServiceResponse, ActionHandler, ActionRegistrationOptions};
+    /// use runar_node::services::{LifecycleContext, ServiceResponse, ActionHandler, ActionRegistrationOptions};
     /// use runar_common::types::ValueType;
     /// use std::sync::Arc;
     /// use anyhow::Result;
@@ -670,8 +670,8 @@ impl LifecycleContext {
     ///
     /// Example:
     /// ```rust,no_run
-    /// use runar_node_new::services::{LifecycleContext, ServiceResponse};
-    /// use runar_node_new::routing::TopicPath;
+    /// use runar_node::services::{LifecycleContext, ServiceResponse};
+    /// use runar_node::routing::TopicPath;
     /// use runar_common::types::ValueType;
     /// use runar_common::logging::{Logger, Component};
     /// use std::collections::HashMap;
@@ -792,7 +792,7 @@ impl ServiceRequest {
     ///
     /// Example:
     /// ```
-    /// use runar_node_new::services::{ServiceRequest, RequestContext};
+    /// use runar_node::services::{ServiceRequest, RequestContext};
     /// use runar_common::types::ValueType;
     /// use std::sync::Arc;
     ///
@@ -833,8 +833,8 @@ impl ServiceRequest {
     ///
     /// Example:
     /// ```
-    /// use runar_node_new::services::{ServiceRequest, RequestContext};
-    /// use runar_node_new::routing::TopicPath;
+    /// use runar_node::services::{ServiceRequest, RequestContext};
+    /// use runar_node::routing::TopicPath;
     /// use runar_common::types::ValueType;
     /// use std::sync::Arc;
     ///
@@ -870,7 +870,7 @@ impl ServiceRequest {
     ///
     /// Example:
     /// ```
-    /// use runar_node_new::services::{ServiceRequest, RequestContext};
+    /// use runar_node::services::{ServiceRequest, RequestContext};
     /// use runar_common::types::ValueType;
     /// use std::sync::Arc;
     ///
@@ -967,7 +967,7 @@ impl ServiceResponse {
     ///
     /// Example:
     /// ```
-    /// use runar_node_new::services::ServiceResponse;
+    /// use runar_node::services::ServiceResponse;
     /// use runar_common::types::ValueType;
     /// use serde_json::json;
     ///
@@ -1006,7 +1006,7 @@ impl ServiceResponse {
     ///
     /// Example:
     /// ```
-    /// use runar_node_new::services::ServiceResponse;
+    /// use runar_node::services::ServiceResponse;
     ///
     /// fn handle_permission_check() -> ServiceResponse {
     ///     // Error response - unauthorized
@@ -1106,7 +1106,7 @@ pub trait NodeRequestHandler: Send + Sync {
     ///
     /// ```
     /// // Example implementation
-    /// use runar_node_new::services::{NodeRequestHandler, ServiceResponse, EventContext, SubscriptionOptions};
+    /// use runar_node::services::{NodeRequestHandler, ServiceResponse, EventContext, SubscriptionOptions};
     /// use runar_common::types::ValueType;
     /// use anyhow::Result;
     /// use async_trait::async_trait;
@@ -1232,10 +1232,10 @@ pub trait EventDispatcher: Send + Sync {
     ///
     /// Example implementation (simplified):
     /// ```
-    /// # use runar_node_new::services::{EventDispatcher, ServiceRequest, ServiceResponse, SubscriptionOptions, EventContext, RequestContext};
+    /// # use runar_node::services::{EventDispatcher, ServiceRequest, ServiceResponse, SubscriptionOptions, EventContext, RequestContext};
     /// # use runar_common::types::ValueType;
     /// # use runar_common::logging::{Logger, Component};
-    /// # use runar_node_new::routing::TopicPath;
+    /// # use runar_node::routing::TopicPath;
     /// # use anyhow::Result;
     /// # use async_trait::async_trait;
     /// # use std::future::Future;

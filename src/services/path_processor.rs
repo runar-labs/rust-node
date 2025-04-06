@@ -17,9 +17,9 @@ use crate::services::RequestContext;
 ///
 /// Example:
 /// ```
-/// use runar_node_new::services::path_processor::process_template;
-/// use runar_node_new::services::RequestContext;
-/// use runar_node_new::routing::TopicPath;
+/// use runar_node::services::path_processor::process_template;
+/// use runar_node::services::RequestContext;
+/// use runar_node::routing::TopicPath;
 /// use runar_common::logging::{Logger, Component};
 /// 
 /// // Create a logger for the context

@@ -15,9 +15,9 @@ use tokio::test;
 use tokio::time::timeout;
 
 use runar_common::types::ValueType; 
-use runar_node_new::services::service_registry::ServiceRegistry;
-use runar_node_new::services::{ ServiceResponse, ActionHandler, EventContext};
-use runar_node_new::routing::TopicPath;
+use runar_node::services::service_registry::ServiceRegistry;
+use runar_node::services::{ ServiceResponse, ActionHandler, EventContext};
+use runar_node::routing::TopicPath;
 use runar_common::logging::{Logger, Component};
 
 /// Test that verifies subscription functionality in the service registry

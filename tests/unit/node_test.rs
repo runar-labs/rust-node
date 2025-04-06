@@ -12,9 +12,9 @@ use tokio::time::timeout;
 
 use runar_common::types::ValueType;
 use runar_common::logging::{Logger, Component};
-use runar_node_new::node::{Node, NodeConfig};
-use runar_node_new::services::{EventContext, ServiceResponse, NodeRequestHandler};
-use runar_node_new::services::abstract_service::{AbstractService, ServiceState};
+use runar_node::node::{Node, NodeConfig};
+use runar_node::services::{EventContext, ServiceResponse, NodeRequestHandler};
+use runar_node::services::abstract_service::{AbstractService, ServiceState};
 
 // Import the test fixtures
 use crate::fixtures::math_service::MathService;

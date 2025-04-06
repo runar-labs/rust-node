@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use runar_node_new::routing::TopicPath;
+use runar_node::routing::TopicPath;
 
 #[test]
 fn test_extract_params_from_template() {

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use runar_node_new::routing::TopicPath;
+use runar_node::routing::TopicPath;
 
 /// Comprehensive test suite for TopicPath
 ///

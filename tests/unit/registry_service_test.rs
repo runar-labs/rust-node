@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
 use runar_common::types::ValueType;
-use runar_node_new::node::{Node, NodeConfig};
-use runar_node_new::services::abstract_service::ServiceState;
+use runar_node::node::{Node, NodeConfig};
+use runar_node::services::abstract_service::ServiceState;
 
 // Import the test fixtures
 use crate::fixtures::math_service::MathService;

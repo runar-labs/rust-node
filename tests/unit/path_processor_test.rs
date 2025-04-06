@@ -1,7 +1,7 @@
 use std::collections::HashMap;
-use runar_node_new::routing::TopicPath;
-use runar_node_new::services::RequestContext;
-use runar_node_new::services::path_processor::{process_template, matches_template};
+use runar_node::routing::TopicPath;
+use runar_node::services::RequestContext;
+use runar_node::services::path_processor::{process_template, matches_template};
 use runar_common::logging::{Logger, Component};
 
 #[test]
