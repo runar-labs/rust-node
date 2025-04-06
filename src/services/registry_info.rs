@@ -16,10 +16,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::services::abstract_service::{AbstractService, ServiceState};
-use crate::services::{LifecycleContext, RequestContext, ServiceResponse, RegistryDelegate};
+use crate::services::abstract_service::{AbstractService, CompleteServiceMetadata, ServiceState};
+use crate::services::{ActionHandler, LifecycleContext, RequestContext, ServiceResponse, RegistryDelegate};
 use runar_common::logging::Logger;
 use runar_common::types::ValueType;
+use runar_common::vmap;
 
 /// Registry Info Service - provides information about registered services without holding state
 pub struct RegistryService {
@@ -148,18 +149,23 @@ impl RegistryService {
         
         // Combine the information
         for (path, state) in service_states {
-            let mut service_info = HashMap::new();
-            service_info.insert("path".to_string(), ValueType::String(path.clone()));
-            service_info.insert("state".to_string(), ValueType::String(format!("{:?}", state)));
+            // Use vmap! macro instead of manually building HashMap
+            let service_info = if let Some(meta) = service_metadata.get(&path) {
+                vmap! {
+                    "path" => path.clone(),
+                    "state" => format!("{:?}", state),
+                    "name" => meta.name.clone(),
+                    "version" => meta.version.clone(),
+                    "description" => meta.description.clone()
+                }
+            } else {
+                vmap! {
+                    "path" => path.clone(),
+                    "state" => format!("{:?}", state)
+                }
+            };
             
-            // Add metadata if available
-            if let Some(meta) = service_metadata.get(&path) {
-                service_info.insert("name".to_string(), ValueType::String(meta.name.clone()));
-                service_info.insert("version".to_string(), ValueType::String(meta.version.clone()));
-                service_info.insert("description".to_string(), ValueType::String(meta.description.clone()));
-            }
-            
-            services.push(ValueType::Map(service_info));
+            services.push(service_info);
         }
         
         Ok(ServiceResponse::ok(ValueType::Array(services)))
@@ -180,50 +186,70 @@ impl RegistryService {
         
         // Check if the service exists
         if let Some(state) = service_states.get(&actual_service_path) {
-            let mut service_info = HashMap::new();
-            service_info.insert("path".to_string(), ValueType::String(actual_service_path.to_string()));
-            service_info.insert("state".to_string(), ValueType::String(format!("{:?}", state)));
+            // Use vmap! macro to build the response
+            let mut service_info = vmap! {
+                "path" => actual_service_path.clone(),
+                "state" => format!("{:?}", state)
+            };
             
             // Add metadata if available
             if let Some(meta) = self.registry_delegate.get_service_metadata(&actual_service_path).await {
-                service_info.insert("name".to_string(), ValueType::String(meta.name.clone()));
-                service_info.insert("version".to_string(), ValueType::String(meta.version.clone()));
-                service_info.insert("description".to_string(), ValueType::String(meta.description.clone()));
+                // Create a new map with metadata
+                let metadata_info = vmap! {
+                    "name" => meta.name.clone(),
+                    "version" => meta.version.clone(),
+                    "description" => meta.description.clone()
+                };
+                
+                // Merge the maps
+                if let ValueType::Map(metadata_map) = metadata_info {
+                    if let ValueType::Map(ref mut service_map) = service_info {
+                        service_map.extend(metadata_map);
+                    }
+                }
                 
                 // Add registered actions
                 let actions: Vec<ValueType> = meta.registered_actions.values()
                     .map(|action| ValueType::String(action.name.clone()))
                     .collect();
-                service_info.insert("actions".to_string(), ValueType::Array(actions));
+                
+                if let ValueType::Map(ref mut service_map) = service_info {
+                    service_map.insert("actions".to_string(), ValueType::Array(actions));
+                }
                 
                 // Add registered events
                 let events: Vec<ValueType> = meta.registered_events.values()
                     .map(|event| ValueType::String(event.name.clone()))
                     .collect();
-                service_info.insert("events".to_string(), ValueType::Array(events));
+                
+                if let ValueType::Map(ref mut service_map) = service_info {
+                    service_map.insert("events".to_string(), ValueType::Array(events));
+                }
                 
                 // Add timestamps
-                service_info.insert("registration_time".to_string(), 
-                                   ValueType::Number(meta.registration_time as f64));
-                
-                if let Some(start_time) = meta.last_start_time {
-                    service_info.insert("started_at".to_string(), 
-                                       ValueType::Number(start_time as f64));
+                if let ValueType::Map(ref mut service_map) = service_info {
+                    service_map.insert("registration_time".to_string(), 
+                                       ValueType::Number(meta.registration_time as f64));
                     
-                    // Calculate uptime if service is running
-                    if *state == ServiceState::Running {
-                        let now = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs();
-                        let uptime = now.saturating_sub(start_time);
-                        service_info.insert("uptime_seconds".to_string(), 
-                                           ValueType::Number(uptime as f64));
+                    if let Some(start_time) = meta.last_start_time {
+                        service_map.insert("started_at".to_string(), 
+                                           ValueType::Number(start_time as f64));
+                        
+                        // Calculate uptime if service is running
+                        if *state == ServiceState::Running {
+                            let now = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            let uptime = now.saturating_sub(start_time);
+                            service_map.insert("uptime_seconds".to_string(), 
+                                               ValueType::Number(uptime as f64));
+                        }
                     }
                 }
             }
             
-            Ok(ServiceResponse::ok(ValueType::Map(service_info)))
+            Ok(ServiceResponse::ok(service_info))
         } else {
             ctx.logger.warn(format!("Service '{}' not found", actual_service_path));
             Ok(ServiceResponse::error(404, &format!("Service '{}' not found", actual_service_path)))
@@ -252,11 +278,14 @@ impl RegistryService {
         ctx.logger.debug(format!("Looking for service state with key exactly '{}'", actual_service_path));
         
         if let Some(state) = service_states.get(&actual_service_path) {
-            let mut state_info = HashMap::new();
-            state_info.insert("state".to_string(), ValueType::String(format!("{:?}", state)));
+            // Use vmap! macro to build the response
+            let state_info = vmap! {
+                "state" => format!("{:?}", state)
+            };
+            
             ctx.logger.debug(format!("Found state {:?} for service {}", state, actual_service_path));
             
-            Ok(ServiceResponse::ok(ValueType::Map(state_info)))
+            Ok(ServiceResponse::ok(state_info))
         } else {
             ctx.logger.error(format!("Service '{}' not found in state map", actual_service_path));
             Ok(ServiceResponse::error(404, &format!("Service '{}' not found", actual_service_path)))

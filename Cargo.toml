@@ -17,3 +17,8 @@ runar_common = { path = "../rust-common" }
 
 [dev-dependencies]
 tokio-test = "0.4"
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[[bench]]
+name = "node_benchmarks"
+harness = false

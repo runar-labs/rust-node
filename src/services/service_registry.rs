@@ -18,20 +18,22 @@
 // It should NOT handle service discovery or lifecycle - that's the responsibility of the Node.
 // Request routing and handling is also the Node's responsibility.
 
-use anyhow::Result;
-use log::debug;
-use std::collections::HashMap;
+use anyhow::{anyhow, Result};
+use async_trait::async_trait;
+use log::{debug, error, info, warn};
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use runar_common::utils::logging::{debug_log, info_log, Component};
 use runar_common::logging::Logger;
 use runar_common::types::ValueType;
-use crate::routing::TopicPath;
-use crate::services::abstract_service::ActionMetadata;
+use crate::routing::{TopicPath, WildcardSubscriptionRegistry};
+use crate::services::abstract_service::{CompleteServiceMetadata, ServiceState, ActionMetadata, AbstractService};
 use crate::services::{
-    NodeRequestHandler, ServiceResponse, SubscriptionOptions, 
-    ActionHandler, ArcContextLogging, EventContext
+    NodeRequestHandler, RequestContext, ServiceRequest, ServiceResponse, SubscriptionOptions, 
+    ActionHandler, LifecycleContext, EventContext
 };
 
 /// Type definition for event callbacks
@@ -70,10 +72,10 @@ pub type ActionRegistrar = Arc<dyn Fn(&str, &str, ActionHandler, Option<ActionMe
 pub struct ServiceRegistry {
     /// Action handlers organized by network and then by path
     action_handlers: RwLock<HashMap<String, HashMap<String, ActionHandler>>>,
-    /// Event subscribers organized by topic
-    event_subscribers: RwLock<HashMap<String, Vec<String>>>,
-    /// Callbacks map for event handlers
-    event_callbacks: RwLock<HashMap<String, Vec<(String, EventCallback)>>>,
+    
+    /// Wildcard subscription registry for efficient topic matching
+    event_subscriptions: RwLock<WildcardSubscriptionRegistry<(String, EventCallback)>>,
+    
     logger: Logger,
 }
 
@@ -87,8 +89,7 @@ impl Clone for ServiceRegistry {
         
         ServiceRegistry {
             action_handlers: RwLock::new(HashMap::new()),
-            event_subscribers: RwLock::new(HashMap::new()),
-            event_callbacks: RwLock::new(HashMap::new()),
+            event_subscriptions: RwLock::new(WildcardSubscriptionRegistry::new()),
             logger: self.logger.clone(),
         }
     }
@@ -108,8 +109,7 @@ impl ServiceRegistry {
     pub fn new(logger: Logger) -> Self {
         Self {
             action_handlers: RwLock::new(HashMap::new()),
-            event_subscribers: RwLock::new(HashMap::new()),
-            event_callbacks: RwLock::new(HashMap::new()),
+            event_subscriptions: RwLock::new(WildcardSubscriptionRegistry::new()),
             logger,
         }
     }
@@ -156,34 +156,10 @@ impl ServiceRegistry {
         
         self.logger.debug(format!("Subscribing to topic '{}' with ID '{}'", topic.as_str(), subscription_id));
         
-        // Update the subscribers map - we need to store which subscription IDs exist for each topic
+        // Store subscription in the wildcard registry
         {
-            let mut subscribers = self.event_subscribers.write().await;
-            
-            // Ensure we have an entry for this topic
-            if !subscribers.contains_key(topic.as_str()) {
-                subscribers.insert(topic.as_str().to_string(), Vec::new());
-            }
-            
-            // Get the vector for this topic and add the subscription ID
-            if let Some(subscriber_list) = subscribers.get_mut(topic.as_str()) {
-                subscriber_list.push(subscription_id.clone());
-            }
-        }
-        
-        // Store the callback in the callbacks map
-        {
-            let mut callbacks = self.event_callbacks.write().await;
-            
-            // Create entry if not exists
-            if !callbacks.contains_key(topic.as_str()) {
-                callbacks.insert(topic.as_str().to_string(), Vec::new());
-            }
-            
-            // Add the callback
-            if let Some(cb_list) = callbacks.get_mut(topic.as_str()) {
-                cb_list.push((subscription_id.clone(), callback));
-            }
+            let mut subscriptions = self.event_subscriptions.write().await;
+            subscriptions.add(topic.clone(), (subscription_id.clone(), callback));
         }
         
         // Return the subscription ID
@@ -203,35 +179,16 @@ impl ServiceRegistry {
             Some(id) => {
                 self.logger.debug(format!("Unsubscribing from topic '{}' with ID '{}'", topic.as_str(), id));
                 
-                // Remove from subscribers map
-                {
-                    let mut subscribers = self.event_subscribers.write().await;
-                    if let Some(sub_list) = subscribers.get_mut(topic.as_str()) {
-                        sub_list.retain(|sub_id| sub_id != id);
-                    }
-                }
-                
-                // Remove from callbacks map
-                {
-                    let mut callbacks = self.event_callbacks.write().await;
-                    if let Some(cb_list) = callbacks.get_mut(topic.as_str()) {
-                        cb_list.retain(|(sub_id, _)| sub_id != id);
-                    }
-                }
+                // Remove specific subscription ID from the wildcard registry
+                let mut subscriptions = self.event_subscriptions.write().await;
+                subscriptions.remove_handler(topic, |(sub_id, _)| sub_id == id);
             },
             None => {
                 self.logger.debug(format!("Unsubscribing from all callbacks for topic '{}'", topic.as_str()));
                 
-                // Remove entire topic
-                {
-                    let mut subscribers = self.event_subscribers.write().await;
-                    subscribers.remove(topic.as_str());
-                }
-                
-                {
-                    let mut callbacks = self.event_callbacks.write().await;
-                    callbacks.remove(topic.as_str());
-                }
+                // Remove all subscriptions for this topic from the wildcard registry
+                let mut subscriptions = self.event_subscriptions.write().await;
+                subscriptions.remove(topic);
             }
         }
         
@@ -425,19 +382,13 @@ impl ServiceRegistry {
     ///
     /// Returns true if the callback was found and executed, false otherwise.
     pub async fn has_subscriber(&self, topic: &TopicPath, subscription_id: &str) -> bool {
-        let callbacks = self.event_callbacks.read().await;
+        let subscriptions = self.event_subscriptions.read().await;
         
-        // Check if we have this topic
-        if let Some(cb_list) = callbacks.get(topic.as_str()) {
-            // Find the matching subscription
-            for (id, _) in cb_list {
-                if id == subscription_id {
-                    return true;
-                }
-            }
-        }
+        // Find all subscriptions that match this topic
+        let matching_subs = subscriptions.find_matches(topic);
         
-        false
+        // Check if any of them have the specified subscription ID
+        matching_subs.iter().any(|(id, _)| id == subscription_id)
     }
 
     /// Get event handlers for a topic
@@ -451,17 +402,9 @@ impl ServiceRegistry {
     ///
     /// Returns subscription IDs and their handlers for the topic.
     pub async fn get_event_handlers(&self, topic: &TopicPath) -> Vec<(String, EventHandler)> {
-        let callbacks = self.event_callbacks.read().await;
-        let mut result = Vec::new();
+        let subscriptions = self.event_subscriptions.read().await;
         
-        // Check if we have any subscribers for this exact topic
-        if let Some(cb_list) = callbacks.get(topic.as_str()) {
-            // For each callback, clone the ID and the Arc callback
-            for (id, callback) in cb_list {
-                result.push((id.clone(), callback.clone()));
-            }
-        }
-        
-        result
+        // Find all subscriptions that match this topic, including wildcard patterns
+        subscriptions.find_matches(topic)
     }
 } 
