@@ -16,6 +16,11 @@
 // to function in a decentralized, loosely-coupled manner.
 
 use anyhow::Result;
+use std::hash::{Hash, Hasher};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use uuid::Uuid;
 
 /// Type of a path, indicating what kind of resource is being addressed
 ///
@@ -32,34 +37,144 @@ pub enum PathType {
     Event,
 }
 
-/// Path representation with network ID, service path, and action/event
+/// Represents a single segment in a path, which can be a literal or a wildcard
+///
+/// INTENTION: Allow paths to include wildcard patterns for flexible topic matching
+/// in the publish-subscribe system. This enables powerful pattern-based subscriptions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathSegment {
+    /// A literal string segment (e.g., "services", "auth", "login")
+    Literal(String),
+    
+    /// A single-segment wildcard (*) - matches any single segment
+    /// Example: "services/*/state" matches "services/math/state" but not "services/auth/user/state"
+    SingleWildcard,
+    
+    /// A multi-segment wildcard (>) - matches one or more segments to the end
+    /// Example: "services/>" matches "services/math", "services/auth/login", etc.
+    /// Must be the last segment in a pattern.
+    MultiWildcard,
+}
+
+impl PathSegment {
+    /// Parse a string segment into a PathSegment
+    ///
+    /// INTENTION: Convert raw string segments into the appropriate PathSegment variant,
+    /// handling special wildcard characters.
+    fn from_str(segment: &str) -> Self {
+        match segment {
+            "*" => Self::SingleWildcard,
+            ">" => Self::MultiWildcard,
+            _ => Self::Literal(segment.to_string()),
+        }
+    }
+    
+    /// Check if this segment is a wildcard
+    ///
+    /// INTENTION: Quickly determine if a segment is a wildcard without pattern matching.
+    pub fn is_wildcard(&self) -> bool {
+        matches!(self, Self::SingleWildcard | Self::MultiWildcard)
+    }
+    
+    /// Check if this segment is a multi-segment wildcard
+    ///
+    /// INTENTION: Identify multi-segment wildcards which have special matching rules.
+    pub fn is_multi_wildcard(&self) -> bool {
+        matches!(self, Self::MultiWildcard)
+    }
+}
+
+/// Path representation with network ID and segments, supporting wildcard patterns
 ///
 /// INTENTION: Provide a structured representation of a path string,
-/// enabling proper splitting of parts and validation of format.
+/// enabling proper splitting of parts, validation of format, and wildcard matching.
 ///
 /// A TopicPath can be in several formats:
 /// - `main:auth/login` (Full path with network_id, service_path, and action)
 /// - `auth/login` (Shorthand without network_id, which will be added when TopicPath is created)
-/// - `login` (When used in a service context, can be just the action name)
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// - `services/*/state` (Pattern with single-segment wildcard)
+/// - `events/>` (Pattern with multi-segment wildcard)
+#[derive(Debug, Clone)]
 pub struct TopicPath {
     /// The raw path string with validated format
     path: String,
+    
     /// The network ID for this path
     network_id: String,
-    /// The service name (first segment of the path)
+    
+    /// The segments after the network ID
+    segments: Vec<PathSegment>,
+    
+    /// Whether this path contains wildcard patterns
+    is_pattern: bool,
+    
+    /// The service name (first segment of the path) - cached for convenience
     service_path: String,
-    /// The full path after network ID (including service and action)
-    full_path: String,
-    /// The action or event (last segment of the path)
-    action_or_event: Option<String>,
 }
+
+// Implement Hash trait for TopicPath to enable use in HashMaps
+impl Hash for TopicPath {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Hash the network ID
+        self.network_id.hash(state);
+        
+        // Hash each segment with type discrimination
+        for segment in &self.segments {
+            match segment {
+                PathSegment::Literal(s) => {
+                    // Hash type code + string for literal segments
+                    0.hash(state);
+                    s.hash(state);
+                }
+                PathSegment::SingleWildcard => {
+                    // Just hash type code for wildcards
+                    1.hash(state);
+                }
+                PathSegment::MultiWildcard => {
+                    // Just hash type code for wildcards
+                    2.hash(state);
+                }
+            }
+        }
+    }
+}
+
+// Implement PartialEq for TopicPath to enable equality comparisons and HashMap lookups
+impl PartialEq for TopicPath {
+    fn eq(&self, other: &Self) -> bool {
+        // Network IDs must match
+        if self.network_id != other.network_id {
+            return false;
+        }
+        
+        // Segment counts must match
+        if self.segments.len() != other.segments.len() {
+            return false;
+        }
+        
+        // Each segment must match exactly
+        for (s1, s2) in self.segments.iter().zip(other.segments.iter()) {
+            if s1 != s2 {
+                return false;
+            }
+        }
+        
+        true
+    }
+}
+
+// Implement Eq to confirm TopicPath can be used as HashMap keys
+impl Eq for TopicPath {}
 
 impl TopicPath {
     /// Create a new TopicPath from a string
     ///
     /// INTENTION: Validate and construct a TopicPath from a string input,
     /// ensuring it follows the required format conventions.
+    ///
+    /// This method now supports wildcard patterns:
+    /// - "*" matches any single segment
+    /// - ">" matches one or more segments to the end (must be the last segment)
     ///
     /// Example:
     /// ```
@@ -68,93 +183,106 @@ impl TopicPath {
     /// // With network_id prefix
     /// let path = TopicPath::new("main:auth/login", "default").expect("Valid path");
     /// assert_eq!(path.network_id(), "main");
-    /// assert_eq!(path.service_path(), "auth"); // Note: just the service name
+    /// assert_eq!(path.service_path(), "auth");
     /// assert_eq!(path.get_last_segment(), "login");
     ///
-    /// // Without network_id (service path only)
-    /// let default_network_id = "default";
-    /// let service_path = TopicPath::new("auth/login", default_network_id).expect("Valid path");
-    /// // Network ID will be set to the default value
-    /// assert_eq!(service_path.service_path(), "auth");
+    /// // With wildcards
+    /// let pattern = TopicPath::new("main:services/*/state", "default").expect("Valid pattern");
+    /// assert!(pattern.is_pattern());
     /// ```
     pub fn new(path: impl Into<String>, default_network: impl Into<String>) -> Result<Self, String> {
         let path_string = path.into();
         let default_network_string = default_network.into();
-
-        // Check if we have a network_id prefix
-        if path_string.contains(':') {
+        
+        // Parse the network ID and path parts
+        let (network_id, path_without_network) = if path_string.contains(':') {
+            // Split at the first colon to separate network_id and path
             let parts: Vec<&str> = path_string.split(':').collect();
             if parts.len() != 2 {
                 return Err(format!("Invalid path format - should be 'network_id:service_path' or 'service_path': {}", path_string));
             }
             
-            let network_id = parts[0].to_string();
-            let remainder = parts[1].to_string();
-            
-            if network_id.is_empty() {
+            let network = parts[0].to_string();
+            if network.is_empty() {
                 return Err("Network ID cannot be empty".to_string());
             }
             
-            // Split the topic string into service path and action/event
-            let path_parts: Vec<&str> = remainder.split('/').filter(|s| !s.is_empty()).collect();
-            if path_parts.is_empty() {
-                return Err("Topic must have at least a service path".to_string());
-            }
-            
-            // Store just the service name (first segment)
-            let service_path = path_parts[0].to_string();
-            // Store the full path after network ID
-            let full_path = remainder.to_string();
-            
-            let action_or_event = if path_parts.len() > 1 {
-                Some(path_parts[path_parts.len() - 1].to_string())
-            } else {
-                None
-            };
-            
-            let full_path_str = format!("{}:{}", network_id, full_path);
-            
-            return Ok(Self {
-                path: full_path_str,
-                network_id,
-                service_path,
-                full_path,
-                action_or_event,
-            });
-        }
-        
-        // No network_id prefix - treat as service path with default network
-        // If topic already has a network prefix, error out
-        if path_string.contains(':') {
-            return Err(format!("Topic already contains network ID prefix: {}", path_string));
-        }
-        
-        // Split the topic string into service path and action/event
-        let parts: Vec<&str> = path_string.split('/').filter(|s| !s.is_empty()).collect();
-        if parts.is_empty() {
-            return Err("Topic must have at least a service path".to_string());
-        }
-        
-        // Store just the service name (first segment)
-        let service_path = parts[0].to_string();
-        // Store the full path
-        let full_path = path_string.to_string();
-        
-        let action_or_event = if parts.len() > 1 {
-            Some(parts[parts.len() - 1].to_string())
+            (network, parts[1].to_string())
         } else {
-            None
+            // No network ID provided, use the default
+            (default_network_string, path_string)
         };
         
-        let full_path_str = format!("{}:{}", default_network_string, full_path);
+        // Split the path into segments
+        let path_segments: Vec<&str> = path_without_network.split('/')
+            .filter(|s| !s.is_empty())
+            .collect();
+            
+        if path_segments.is_empty() {
+            return Err("Path must have at least a service path segment".to_string());
+        }
+        
+        // Convert string segments to PathSegment enum variants
+        let mut segments = Vec::new();
+        let mut is_pattern = false;
+        let mut _multi_wildcard_found = false;
+        
+        for (i, segment_str) in path_segments.iter().enumerate() {
+            let segment = PathSegment::from_str(segment_str);
+            
+            // Check for pattern and validate multi-wildcards
+            match &segment {
+                PathSegment::SingleWildcard => {
+                    is_pattern = true;
+                }
+                PathSegment::MultiWildcard => {
+                    is_pattern = true;
+                    _multi_wildcard_found = true;
+                    
+                    // Ensure multi-wildcard is the last segment
+                    if i < path_segments.len() - 1 {
+                        return Err("Multi-segment wildcard (>) must be the last segment in a path".to_string());
+                    }
+                }
+                PathSegment::Literal(_) => {}
+            }
+            
+            segments.push(segment);
+        }
+        
+        // Save the service path (first segment) for easy access
+        let service_path = match &segments[0] {
+            PathSegment::Literal(s) => s.clone(),
+            PathSegment::SingleWildcard => "*".to_string(),
+            PathSegment::MultiWildcard => ">".to_string(),
+        };
+        
+        // Create the full path string (for display/serialization)
+        let full_path_str = format!("{}:{}", network_id, path_without_network);
         
         Ok(Self {
             path: full_path_str,
-            network_id: default_network_string,
+            network_id,
+            segments,
+            is_pattern,
             service_path,
-            full_path,
-            action_or_event,
         })
+    }
+    
+    /// Check if this path contains wildcards
+    ///
+    /// INTENTION: Quickly determine if a path is a wildcard pattern,
+    /// which affects how it's used for matching.
+    pub fn is_pattern(&self) -> bool {
+        self.is_pattern
+    }
+    
+    /// Check if this path contains a multi-segment wildcard
+    ///
+    /// INTENTION: Identify paths with multi-segment wildcards which have 
+    /// special matching rules and storage requirements.
+    pub fn has_multi_wildcard(&self) -> bool {
+        self.segments.iter().any(|s| s.is_multi_wildcard())
     }
 
     /// Get the path after the network ID
@@ -174,13 +302,47 @@ impl TopicPath {
     /// assert_eq!(service_only.action_path(), "");
     /// ```
     pub fn action_path(&self) -> String {
-        // If there's an action or event (more than just the service), return the full path
-        if self.action_or_event.is_some() {
-            return self.full_path.clone();
+        if self.segments.len() <= 1 {
+            // If there's only one segment (just the service), return empty string
+            return "".to_string();
         }
         
-        // If there's only a service name, return empty string
-        "".to_string()
+        // Otherwise, reconstruct the path from segments
+        self.segments.iter()
+            .map(|segment| match segment {
+                PathSegment::Literal(s) => s.as_str(),
+                PathSegment::SingleWildcard => "*",
+                PathSegment::MultiWildcard => ">",
+            })
+            .collect::<Vec<&str>>()
+            .join("/")
+    }
+    
+    /// Get the last segment of the path
+    ///
+    /// INTENTION: Extract just the last segment from the path,
+    /// which represents the action or event name. This is helpful
+    /// for identifying what operation is being requested.
+    ///
+    /// Example:
+    /// ```
+    /// use runar_node::routing::TopicPath;
+    ///
+    /// let path = TopicPath::new("main:auth/login", "default").expect("Valid path");
+    /// assert_eq!(path.get_last_segment(), "login");
+    /// ```
+    pub fn get_last_segment(&self) -> String {
+        if self.segments.len() <= 1 {
+            // If there's only one segment, return the service path
+            return self.service_path.clone();
+        }
+        
+        // Otherwise, get the last segment
+        match &self.segments[self.segments.len() - 1] {
+            PathSegment::Literal(s) => s.clone(),
+            PathSegment::SingleWildcard => "*".to_string(),
+            PathSegment::MultiWildcard => ">".to_string(),
+        }
     }
 
     /// Get the path as a string
@@ -254,8 +416,8 @@ impl TopicPath {
             path,
             network_id: network_id_string,
             service_path: service_name_string.clone(),
-            full_path: service_name_string,
-            action_or_event: None,
+            segments: vec![PathSegment::Literal(service_name_string)],
+            is_pattern: false,
         }
     }
 
@@ -302,21 +464,40 @@ impl TopicPath {
         if segment_string.contains('/') {
             return Err(format!("Child segment cannot contain slashes: {}", segment_string));
         }
-
-        let new_full_path = if self.full_path.is_empty() {
+        
+        // Get the service_path if this is the first segment, or build a new path
+        let current_path_str = self.segments.iter()
+            .map(|s| match s {
+                PathSegment::Literal(s) => s.as_str(),
+                PathSegment::SingleWildcard => "*",
+                PathSegment::MultiWildcard => ">",
+            })
+            .collect::<Vec<&str>>()
+            .join("/");
+            
+        // Create the new path
+        let new_path_str = if current_path_str.is_empty() {
             segment_string.clone()
         } else {
-            format!("{}/{}", self.full_path, segment_string)
+            format!("{}/{}", current_path_str, segment_string)
         };
         
-        let new_path = format!("{}:{}", self.network_id, new_full_path);
+        // Create a full path with network ID
+        let full_path_str = format!("{}:{}", self.network_id, new_path_str);
+        
+        // Create a new set of segments based on the current segments plus the new one
+        let mut new_segments = self.segments.clone();
+        new_segments.push(PathSegment::Literal(segment_string.clone()));
+        
+        // Check if this path is a pattern (has wildcards)
+        let is_pattern = self.is_pattern || segment_string == "*" || segment_string == ">";
         
         Ok(Self {
-            path: new_path.clone(),
+            path: full_path_str,
             network_id: self.network_id.clone(),
+            segments: new_segments,
+            is_pattern,
             service_path: self.service_path.clone(),
-            full_path: new_full_path,
-            action_or_event: Some(segment_string),
         })
     }
 
@@ -334,9 +515,12 @@ impl TopicPath {
     /// assert_eq!(segments, vec!["auth", "login", "form"]);
     /// ```
     pub fn get_segments(&self) -> Vec<String> {
-        self.full_path.split('/')
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
+        self.segments.iter()
+            .map(|segment| match segment {
+                PathSegment::Literal(s) => s.clone(),
+                PathSegment::SingleWildcard => "*".to_string(),
+                PathSegment::MultiWildcard => ">".to_string(),
+            })
             .collect()
     }
 
@@ -355,20 +539,36 @@ impl TopicPath {
     /// assert_eq!(parent.as_str(), "main:auth");
     /// ```
     pub fn parent(&self) -> Result<Self, String> {
-        let segments: Vec<&str> = self.full_path.split('/').filter(|s| !s.is_empty()).collect();
-        if segments.len() <= 1 {
+        if self.segments.len() <= 1 {
             return Err("Cannot get parent of root or service-only path".to_string());
         }
 
-        let parent_full_path = segments[..segments.len() - 1].join("/");
-        let parent_path = format!("{}:{}", self.network_id, parent_full_path);
+        // Create a new set of segments without the last segment
+        let parent_segments = self.segments[0..self.segments.len() - 1].to_vec();
+        
+        // Reconstruct the path string from segments
+        let path_str = parent_segments.iter()
+            .map(|segment| match segment {
+                PathSegment::Literal(s) => s.as_str(),
+                PathSegment::SingleWildcard => "*",
+                PathSegment::MultiWildcard => ">",
+            })
+            .collect::<Vec<&str>>()
+            .join("/");
+            
+        // Create the full path with network ID
+        let full_path = format!("{}:{}", self.network_id, path_str);
         
         Ok(Self {
-            path: parent_path,
+            path: full_path,
             network_id: self.network_id.clone(),
-            service_path: self.service_path.clone(),
-            full_path: parent_full_path,
-            action_or_event: None,
+            segments: parent_segments,
+            is_pattern: self.segments[0..self.segments.len() - 1].iter().any(|s| s.is_wildcard()),
+            service_path: match &self.segments[0] {
+                PathSegment::Literal(s) => s.clone(),
+                PathSegment::SingleWildcard => "*".to_string(),
+                PathSegment::MultiWildcard => ">".to_string(),
+            },
         })
     }
 
@@ -387,29 +587,6 @@ impl TopicPath {
     /// ```
     pub fn test_default(path: impl Into<String>) -> Self {
         Self::new(path, "default").unwrap()
-    }
-
-    /// Get the last segment of the path
-    ///
-    /// INTENTION: Extract just the last segment from the path,
-    /// which represents the action or event name. This is helpful
-    /// for identifying what operation is being requested.
-    ///
-    /// Example:
-    /// ```
-    /// use runar_node::routing::TopicPath;
-    ///
-    /// let path = TopicPath::new("main:auth/login", "default").expect("Valid path");
-    /// assert_eq!(path.get_last_segment(), "login");
-    /// ```
-    pub fn get_last_segment(&self) -> String {
-        // If we have an action_or_event, return it
-        if let Some(action) = &self.action_or_event {
-            return action.clone();
-        }
-        
-        // Otherwise, return the service path as it's the only segment
-        self.service_path.clone()
     }
 
     /// Match this path against a template pattern and extract parameters
@@ -542,17 +719,314 @@ impl TopicPath {
                 
                 // Look up the parameter value
                 match params.get(param_name) {
-                    Some(value) => path_segments.push(value.clone()),
+                    Some(value) => path_segments.push(PathSegment::Literal(value.clone())),
                     None => return Err(format!("Missing parameter value for '{}'", param_name)),
                 }
             } else {
                 // This is a literal segment
-                path_segments.push(template_segment.to_string());
+                path_segments.push(PathSegment::Literal(template_segment.to_string()));
             }
         }
         
         // Construct the final path
-        let path_str = path_segments.join("/");
+        let path_str = path_segments.iter()
+            .map(|segment| match segment {
+                PathSegment::Literal(s) => s.as_str(),
+                PathSegment::SingleWildcard => "*",
+                PathSegment::MultiWildcard => ">",
+            })
+            .collect::<Vec<&str>>()
+            .join("/");
         Self::new(path_str, network_id_string)
+    }
+
+    /// Implement pattern matching against another path
+    ///
+    /// INTENTION: Allow checking if a topic matches a pattern with wildcards,
+    /// enabling powerful pattern-based subscriptions.
+    ///
+    /// Example:
+    /// ```
+    /// use runar_node::routing::TopicPath;
+    ///
+    /// let pattern = TopicPath::new("main:services/*/state", "default").expect("Valid pattern");
+    /// let topic1 = TopicPath::new("main:services/math/state", "default").expect("Valid topic");
+    /// let topic2 = TopicPath::new("main:services/math/config", "default").expect("Valid topic");
+    ///
+    /// assert!(pattern.matches(&topic1));
+    /// assert!(!pattern.matches(&topic2));
+    /// ```
+    pub fn matches(&self, topic: &TopicPath) -> bool {
+        // Network ID must match
+        if self.network_id != topic.network_id {
+            return false;
+        }
+        
+        // If this is not a pattern, use exact equality
+        if !self.is_pattern {
+            return self == topic;
+        }
+        
+        // Otherwise, perform segment-by-segment matching
+        self.segments_match(&self.segments, &topic.segments)
+    }
+    
+    // Internal helper for pattern matching
+    fn segments_match(&self, pattern_segments: &[PathSegment], topic_segments: &[PathSegment]) -> bool {
+        // Special case: multi-wildcard at the end
+        if let Some(PathSegment::MultiWildcard) = pattern_segments.last() {
+            // If pattern ends with >, topic must have at least as many segments as pattern minus 1
+            if topic_segments.len() < pattern_segments.len() - 1 {
+                return false;
+            }
+            
+            // Check all segments before the multi-wildcard
+            for i in 0..pattern_segments.len()-1 {
+                match &pattern_segments[i] {
+                    PathSegment::Literal(p) => {
+                        // For literals, the segments must match exactly
+                        match &topic_segments[i] {
+                            PathSegment::Literal(t) if p == t => continue,
+                            _ => return false,
+                        }
+                    }
+                    PathSegment::SingleWildcard => {
+                        // For single wildcards, any segment matches
+                        continue;
+                    }
+                    PathSegment::MultiWildcard => {
+                        // Should not happen, as we're iterating up to len-1
+                        unreachable!("Multi-wildcard found before the end of pattern");
+                    }
+                }
+            }
+            
+            // If we get here, all segments matched
+            return true;
+        }
+        
+        // If pattern doesn't end with multi-wildcard, segment counts must match
+        if pattern_segments.len() != topic_segments.len() {
+            return false;
+        }
+        
+        // Check each segment
+        for (p, t) in pattern_segments.iter().zip(topic_segments.iter()) {
+            match p {
+                PathSegment::Literal(p_str) => {
+                    // For literals, check exact match
+                    match t {
+                        PathSegment::Literal(t_str) if p_str == t_str => continue,
+                        _ => return false,
+                    }
+                }
+                PathSegment::SingleWildcard => {
+                    // Single wildcards match any segment
+                    continue;
+                }
+                PathSegment::MultiWildcard => {
+                    // Multi-wildcards should only appear at the end
+                    return false;
+                }
+            }
+        }
+        
+        // If we get here, all segments matched
+        true
+    }
+}
+
+/// WildcardSubscriptionRegistry provides efficient storage and lookup for subscriptions
+/// with support for wildcard pattern matching.
+///
+/// INTENTION: Optimize subscription storage and lookup based on whether a topic is an
+/// exact match or a wildcard pattern. This gives O(1) lookup for exact matches while
+/// still supporting powerful wildcard pattern matching.
+#[derive(Debug, Clone)]
+pub struct WildcardSubscriptionRegistry<T> {
+    /// Exact matches (no wildcards) - fastest lookup with O(1) complexity
+    exact_matches: HashMap<TopicPath, Vec<T>>,
+    
+    /// Patterns with single wildcards (* only) - separate for optimization
+    single_wildcard_patterns: Vec<(TopicPath, Vec<T>)>,
+    
+    /// Patterns with multi-segment wildcards (> wildcards) - separate for optimization
+    multi_wildcard_patterns: Vec<(TopicPath, Vec<T>)>,
+}
+
+impl<T: Clone> Default for WildcardSubscriptionRegistry<T> {
+    fn default() -> Self {
+        Self {
+            exact_matches: HashMap::new(),
+            single_wildcard_patterns: Vec::new(),
+            multi_wildcard_patterns: Vec::new(),
+        }
+    }
+}
+
+impl<T: Clone> WildcardSubscriptionRegistry<T> {
+    /// Create a new empty registry
+    pub fn new() -> Self {
+        Self::default()
+    }
+    
+    /// Add a subscription for a topic
+    ///
+    /// INTENTION: Store a subscription in the appropriate collection based on
+    /// whether it's an exact match or contains wildcards.
+    pub fn add(&mut self, topic: TopicPath, handler: T) {
+        if topic.is_pattern() {
+            if topic.has_multi_wildcard() {
+                // Handle multi-segment wildcard patterns
+                for (existing_pattern, handlers) in &mut self.multi_wildcard_patterns {
+                    if existing_pattern == &topic {
+                        handlers.push(handler);
+                        return;
+                    }
+                }
+                // If we didn't find an existing pattern, add a new entry
+                self.multi_wildcard_patterns.push((topic, vec![handler]));
+            } else {
+                // Handle single-segment wildcard patterns
+                for (existing_pattern, handlers) in &mut self.single_wildcard_patterns {
+                    if existing_pattern == &topic {
+                        handlers.push(handler);
+                        return;
+                    }
+                }
+                // If we didn't find an existing pattern, add a new entry
+                self.single_wildcard_patterns.push((topic, vec![handler]));
+            }
+        } else {
+            // Handle exact matches
+            self.exact_matches
+                .entry(topic)
+                .or_insert_with(Vec::new)
+                .push(handler);
+        }
+    }
+    
+    /// Remove a subscription
+    ///
+    /// INTENTION: Remove a subscription from the appropriate collection based on
+    /// the topic pattern type.
+    pub fn remove(&mut self, topic: &TopicPath) -> bool {
+        if topic.is_pattern() {
+            if topic.has_multi_wildcard() {
+                // Remove from multi-segment wildcard patterns
+                if let Some(index) = self.multi_wildcard_patterns
+                    .iter()
+                    .position(|(pattern, _)| pattern == topic) {
+                    self.multi_wildcard_patterns.remove(index);
+                    return true;
+                }
+            } else {
+                // Remove from single-segment wildcard patterns
+                if let Some(index) = self.single_wildcard_patterns
+                    .iter()
+                    .position(|(pattern, _)| pattern == topic) {
+                    self.single_wildcard_patterns.remove(index);
+                    return true;
+                }
+            }
+            false
+        } else {
+            // Remove from exact matches
+            self.exact_matches.remove(topic).is_some()
+        }
+    }
+    
+    /// Remove a specific subscription handler
+    ///
+    /// INTENTION: Remove a specific handler from a topic's subscription list
+    /// without removing all handlers for that topic.
+    pub fn remove_handler<F>(&mut self, topic: &TopicPath, predicate: F) -> bool 
+    where
+        F: Fn(&T) -> bool
+    {
+        if topic.is_pattern() {
+            if topic.has_multi_wildcard() {
+                // Remove from multi-segment wildcard patterns
+                if let Some((_, handlers)) = self.multi_wildcard_patterns
+                    .iter_mut()
+                    .find(|(pattern, _)| pattern == topic) {
+                    let original_len = handlers.len();
+                    handlers.retain(|handler| !predicate(handler));
+                    return handlers.len() < original_len;
+                }
+            } else {
+                // Remove from single-segment wildcard patterns
+                if let Some((_, handlers)) = self.single_wildcard_patterns
+                    .iter_mut()
+                    .find(|(pattern, _)| pattern == topic) {
+                    let original_len = handlers.len();
+                    handlers.retain(|handler| !predicate(handler));
+                    return handlers.len() < original_len;
+                }
+            }
+            false
+        } else {
+            // Remove from exact matches
+            if let Some(handlers) = self.exact_matches.get_mut(topic) {
+                let original_len = handlers.len();
+                handlers.retain(|handler| !predicate(handler));
+                handlers.len() < original_len
+            } else {
+                false
+            }
+        }
+    }
+    
+    /// Find all handlers that match a given topic
+    ///
+    /// INTENTION: Efficiently find all subscription handlers that match a given topic,
+    /// including both exact matches and wildcard pattern matches.
+    pub fn find_matches(&self, topic: &TopicPath) -> Vec<T> {
+        let mut matches = Vec::new();
+        
+        // 1. Check exact matches first (O(1) lookup)
+        if let Some(handlers) = self.exact_matches.get(topic) {
+            matches.extend(handlers.clone());
+        }
+        
+        // 2. Check single-wildcard patterns (iterate through patterns)
+        for (pattern, handlers) in &self.single_wildcard_patterns {
+            if pattern.matches(topic) {
+                matches.extend(handlers.clone());
+            }
+        }
+        
+        // 3. Check multi-wildcard patterns (iterate through patterns)
+        for (pattern, handlers) in &self.multi_wildcard_patterns {
+            if pattern.matches(topic) {
+                matches.extend(handlers.clone());
+            }
+        }
+        
+        matches
+    }
+    
+    /// Get all subscriptions in the registry
+    ///
+    /// INTENTION: Retrieve all subscriptions for monitoring or debugging purposes.
+    pub fn get_all_subscriptions(&self) -> Vec<(TopicPath, Vec<T>)> {
+        let mut result = Vec::new();
+        
+        // Add exact matches
+        for (topic, handlers) in &self.exact_matches {
+            result.push((topic.clone(), handlers.clone()));
+        }
+        
+        // Add single-wildcard patterns
+        for (topic, handlers) in &self.single_wildcard_patterns {
+            result.push((topic.clone(), handlers.clone()));
+        }
+        
+        // Add multi-wildcard patterns
+        for (topic, handlers) in &self.multi_wildcard_patterns {
+            result.push((topic.clone(), handlers.clone()));
+        }
+        
+        result
     }
 } 
