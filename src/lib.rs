@@ -15,14 +15,25 @@
 //! using Rust's `impl Into<String>` pattern. This means you can pass string parameters in
 //! various forms:
 //!
-//! ```rust
+//! ```rust,no_run
+//! # use runar_node::node::{Node, NodeConfig};
+//! # use runar_common::types::ValueType;
+//! # use anyhow::Result;
+//! #
+//! # async fn example() -> Result<()> {
+//! # let node = Node::new(NodeConfig::new("default")).await?;
+//! # let data = ValueType::Null;
+//! # let id = "user123";
 //! // All of these are valid
-//! node.publish("status/updated", data).await?;
-//! node.publish(String::from("status/updated"), data).await?;
+//! node.publish("status/updated", data.clone()).await?;
+//! node.publish(String::from("status/updated"), data.clone()).await?;
 //! node.publish(&format!("status/{}", id), data).await?;
 //!
 //! let topic = "notifications";
+//! # let callback = Box::new(|ctx, data| Box::pin(async move { Ok(()) }) as _);
 //! node.subscribe(topic, callback).await?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! This flexibility extends to all public APIs in the codebase including:
@@ -69,3 +80,6 @@ pub use services::{NodeRequestHandler, RequestContext, ServiceRequest, ServiceRe
 pub use services::abstract_service::{AbstractService, ServiceState};
 pub use routing::TopicPath; 
 pub use node::{Node, NodeConfig}; 
+
+// Re-export common macros for convenience
+pub use runar_common::vmap; 
