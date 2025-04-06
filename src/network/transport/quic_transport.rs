@@ -46,9 +46,10 @@ impl Default for QuicTransportOptions {
     fn default() -> Self {
         Self {
             transport_options: TransportOptions::default(),
-            cert_path: None,
-            key_path: None,
-            verify_certificates: true,
+            cert_path: None,  // No certificate by default, will generate self-signed for development
+            key_path: None,   // No key by default, will generate self-signed for development
+            // This setting is true by default for security, only disable in development
+            verify_certificates: true, 
             keep_alive_interval_ms: 5000,  // 5 seconds
             max_concurrent_bidi_streams: 100,
         }
@@ -169,7 +170,10 @@ impl QuicTransport {
             .with_no_client_auth();
             
         // Disable certificate verification if needed
+        // IMPORTANT: This should ONLY be used for development/testing and NEVER in production
+        // Security will be improved in a future update
         if !self.options.verify_certificates {
+            self.logger.warn("SECURITY WARNING: Certificate verification is disabled. This configuration is NOT secure for production use!");
             crypto_config.dangerous().set_certificate_verifier(Arc::new(NoVerification {}));
         }
         
@@ -208,6 +212,10 @@ impl QuicTransport {
     
     /// Generate a self-signed certificate for development
     fn generate_self_signed_cert(&self) -> Result<ServerConfig> {
+        // IMPORTANT: Self-signed certificates should ONLY be used for development/testing
+        // This is NOT secure for production use and will be improved in future updates
+        self.logger.warn("SECURITY WARNING: Using self-signed certificate. This is NOT secure for production use!");
+        
         // For development only - generate a self-signed certificate
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let cert_der = cert.serialize_der().unwrap();
