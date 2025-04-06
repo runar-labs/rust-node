@@ -18,9 +18,6 @@
 use anyhow::Result;
 use std::hash::{Hash, Hasher};
 use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use uuid::Uuid;
 
 /// Type of a path, indicating what kind of resource is being addressed
 ///

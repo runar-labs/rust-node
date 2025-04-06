@@ -1,7 +1,7 @@
 // Root module for the runar-node-new crate
 //
-// This crate implements a new version of the ServiceRegistry and related
-// functionality using a test-driven approach.
+// INTENTION: Define the core interfaces and implementations for the node runtime
+// including services, routing, and network communication capabilities.
 
 //! # Runar Node
 //!
@@ -70,16 +70,43 @@
 //! }
 //! ```
 
+// Public modules
+pub mod node;
 pub mod services;
 pub mod routing;
-pub mod node;
+pub mod network;
+pub mod config;
+pub mod utils;
+
+// Re-export the main types from the node module
+pub use node::{Node, NodeConfig};
+
+// Re-export the main types from the services module
+pub use services::{
+    ActionHandler, EventContext, LifecycleContext, NodeDelegate, PublishOptions,
+    RequestContext, RegistryDelegate, ServiceRequest, ServiceResponse, SubscriptionOptions
+};
+pub use services::service_registry::ServiceRegistry;
+pub use services::abstract_service::{AbstractService, ActionMetadata, CompleteServiceMetadata, ServiceState};
+
+// Re-export the main types from the routing module
+pub use routing::TopicPath;
+
+// Re-export the main types from the network module
+pub use network::{
+    NetworkTransport, NodeIdentifier, TransportOptions, NetworkMessage, 
+    TransportFactory, NetworkMessageType,
+    NodeDiscovery, NodeInfo, DiscoveryOptions
+};
+// Re-export peer registry types from transport
+pub use network::transport::{PeerRegistry, PeerStatus, PeerEntry};
 
 // Re-export common types
-pub use services::service_registry::ServiceRegistry;
-pub use services::{NodeRequestHandler, RequestContext, ServiceRequest, ServiceResponse, ResponseStatus};
-pub use services::abstract_service::{AbstractService, ServiceState};
-pub use routing::TopicPath; 
-pub use node::{Node, NodeConfig}; 
+pub use runar_common::types::ValueType;
 
 // Re-export common macros for convenience
-pub use runar_common::vmap; 
+pub use runar_common::vmap;
+
+// Version information
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const NAME: &str = env!("CARGO_PKG_NAME"); 

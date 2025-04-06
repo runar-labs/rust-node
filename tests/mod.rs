@@ -1,7 +1,12 @@
-// Main test module for the runar-node-new crate
+// Test module for runar_node
+//
+// This module organizes tests for the runar_node crate
 
-// Include test fixtures
+// Unit tests
+pub mod unit;
+
+// Test fixtures
 pub mod fixtures;
 
-// Include unit tests
-pub mod unit; 
+// Integration tests
+pub mod integration; 

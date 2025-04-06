@@ -11,9 +11,14 @@ use std::time::Duration;
 use tokio::time::timeout;
 
 use runar_common::types::ValueType;
+use runar_common::{Component, Logger};
 use runar_node::node::{Node, NodeConfig};
 use runar_node::services::{EventContext, NodeRequestHandler};
 use runar_node::services::abstract_service::AbstractService;
+use runar_node::services::abstract_service::ServiceState;
+use runar_node::services::LifecycleContext;
+use runar_node::routing::TopicPath;
+use runar_node::services::NodeDelegate;
 
 // Import the test fixtures
 use crate::fixtures::math_service::MathService;
@@ -67,7 +72,7 @@ async fn test_node_add_service() {
         node.add_service(service).await.unwrap();
         
         // List services to verify it was added
-        println!("Registered services: {:?}", node.list_services());
+        println!("Registered services: {:?}", node.list_services().await);
     }).await {
         Ok(_) => (), // Test completed within the timeout
         Err(_) => panic!("Test timed out after 10 seconds"),
@@ -98,7 +103,7 @@ async fn test_node_request() {
         node.add_service(service).await.unwrap();
         
         // List services to verify it was added
-        println!("Registered services: {:?}", node.list_services());
+        println!("Registered services: {:?}", node.list_services().await);
         
         // Create parameters for the add operation
         let params = ValueType::Map([
@@ -192,38 +197,46 @@ async fn test_node_publish() {
 /// It also verifies LifecycleContext can be used for initialization.
 #[tokio::test]
 async fn test_service_lifecycle() {
-    // Wrap the test in a timeout to prevent it from hanging
-    match timeout(Duration::from_secs(10), async {
-        // Create a node for context creation
-        let config = NodeConfig::new("test_network");
-        let node = Node::new(config).await.unwrap();
+    // Use a timeout to ensure the test doesn't hang
+    if let Err(_) = timeout(Duration::from_secs(5), async {
+        // Create a node
+        let node_config = NodeConfig::new("test");
+        let node = Node::new(node_config).await.unwrap();
         
-        // Create a MathService for testing
+        // Create a math service instance
         let service = MathService::new("math", "math");
         
-        // Create proper lifecycle contexts using the node
-        let init_context = node.create_context("math");
+        // Create a logger for testing
+        let logger = Logger::new_root(Component::Service, "test");
+        
+        // Create the math service path
+        let math_path = TopicPath::new("test:math", "test").expect("Valid path");
+        
+        // Create lifecycle contexts with node delegate
+        let init_context = LifecycleContext::new(&math_path, logger.clone())
+            .with_node_delegate(Arc::new(node.clone()) as Arc<dyn NodeDelegate + Send + Sync>);
         
         // Initialize the service
         let init_result = service.init(init_context).await;
-        assert!(init_result.is_ok(), "Service initialization failed");
+        assert!(init_result.is_ok());
         
         // Create a new context for start
-        let start_context = node.create_context("math");
+        let start_context = LifecycleContext::new(&math_path, logger.clone())
+            .with_node_delegate(Arc::new(node.clone()) as Arc<dyn NodeDelegate + Send + Sync>);
         
         // Start the service
         let start_result = service.start(start_context).await;
-        assert!(start_result.is_ok(), "Service start failed");
+        assert!(start_result.is_ok());
         
         // Create a new context for stop
-        let stop_context = node.create_context("math");
+        let stop_context = LifecycleContext::new(&math_path, logger.clone())
+            .with_node_delegate(Arc::new(node.clone()) as Arc<dyn NodeDelegate + Send + Sync>);
         
         // Stop the service
         let stop_result = service.stop(stop_context).await;
-        assert!(stop_result.is_ok(), "Service stop failed");
+        assert!(stop_result.is_ok());
     }).await {
-        Ok(_) => (), // Test completed within the timeout
-        Err(_) => panic!("Test timed out after 10 seconds"),
+        panic!("Test timed out");
     }
 }
 

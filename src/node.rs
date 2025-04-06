@@ -10,17 +10,25 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use uuid::Uuid;
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::net::SocketAddr;
+use async_trait::async_trait;
 
 use crate::routing::TopicPath;
 use crate::services::{
     ActionHandler, EventContext, LifecycleContext, NodeDelegate, PublishOptions,
-    RequestContext, ServiceRequest, ServiceResponse, SubscriptionOptions, RegistryDelegate
+    RequestContext, ServiceResponse, SubscriptionOptions, RegistryDelegate,
 };
 use crate::services::abstract_service::{ActionMetadata, AbstractService, CompleteServiceMetadata, ServiceState};
 use crate::services::registry_info::RegistryService;
 use crate::services::service_registry::ServiceRegistry;
 use runar_common::types::ValueType;
-use runar_common::logging::{Component, Logger};
+use runar_common::{Component, Logger};
+
+// Network-related imports
+use crate::network::transport::{NetworkTransport, NetworkMessage, NodeIdentifier, TransportFactory};
+use crate::network::discovery::{NodeDiscovery, NodeInfo, DiscoveryOptions, DiscoveryListener};
 
 /// Configuration for a Node
 #[derive(Clone, Debug)]
@@ -29,6 +37,10 @@ pub struct NodeConfig {
     pub network_id: String,
     /// Node ID for logging and identification
     pub node_id: Option<String>,
+    /// Network binding address for the node (optional)
+    pub network_bind_address: Option<SocketAddr>,
+    /// Whether to enable network functionality
+    pub enable_networking: bool,
 }
 
 impl NodeConfig {
@@ -37,6 +49,8 @@ impl NodeConfig {
         Self {
             network_id: network_id.to_string(),
             node_id: None,
+            network_bind_address: None,
+            enable_networking: false,
         }
     }
 
@@ -45,499 +59,113 @@ impl NodeConfig {
         Self {
             network_id: network_id.to_string(),
             node_id: Some(node_id.to_string()),
+            network_bind_address: None,
+            enable_networking: false,
         }
+    }
+
+    /// Set the network binding address
+    pub fn with_network_bind_address(mut self, addr: SocketAddr) -> Self {
+        self.network_bind_address = Some(addr);
+        self
+    }
+
+    /// Enable network functionality
+    pub fn with_networking_enabled(mut self, enabled: bool) -> Self {
+        self.enable_networking = enabled;
+        self
     }
 }
 
 /// Node represents a Runar node that can host services and communicate with other nodes
 #[derive(Clone)]
 pub struct Node {
-    /// Configuration for the node
-    pub config: NodeConfig,
-
-    /// Service registry for managing services
-    service_registry: Arc<ServiceRegistry>,
-
     /// Network ID for this node
     pub network_id: String,
 
-    /// Service map for tracking registered services
+    /// Node ID for distinguishing nodes within a network
+    pub node_id: String,
+
+    /// Logger instance with node context
+    logger: Logger,
+
+    /// Service registry for managing services and action handlers
+    service_registry: Arc<ServiceRegistry>,
+
+    /// All registered services
     services: Arc<RwLock<HashMap<String, Arc<dyn AbstractService>>>>,
     
-    /// Service state map for tracking the lifecycle state of services
-    service_states: Arc<RwLock<HashMap<String, ServiceState>>>,
-    
-    /// Service metadata for documenting services, actions, and events
-    service_metadata: Arc<RwLock<HashMap<String, CompleteServiceMetadata>>>,
-    
-    /// Logger instance for this node
-    logger: Logger,
+    /// Network transport for communication with other nodes
+    network_transport: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>,
+
+    /// Node discovery mechanism (if enabled)
+    node_discovery: Arc<RwLock<Option<Box<dyn NodeDiscovery>>>>,
+
+    /// Registry of discovered nodes
+    discovered_nodes: Arc<RwLock<HashMap<String, NodeInfo>>>,
+
+    /// Whether network functionality is enabled
+    networking_enabled: bool,
 }
 
-// Manual implementation of Debug for Node
-impl std::fmt::Debug for Node {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Node")
-            .field("config", &self.config)
-            .field("network_id", &self.network_id)
-            .field("services_count", &format!("{} services", self.services.try_read().map(|s| s.len()).unwrap_or(0)))
-            .finish()
-    }
-}
-
+// Implementation for Node
 impl Node {
     /// Create a new Node with the given configuration
+    ///
+    /// INTENTION: Initialize a new Node with the specified configuration, setting up
+    /// all the necessary components and internal state. This is the primary
+    /// entry point for creating a Node instance.
+    ///
+    /// This constructor does not start services - call start() separately
+    /// after registering services.
     pub async fn new(config: NodeConfig) -> Result<Self> {
-        // Create the node ID
-        let node_id = match &config.node_id {
-            Some(id) => id.clone(),
-            None => format!("node-{}", uuid::Uuid::new_v4()),
-        };
-        
-        // Create a root logger with the node ID
+        let node_id = config.node_id.unwrap_or_else(|| Uuid::new_v4().to_string()[..8].to_string());
         let logger = Logger::new_root(Component::Node, &node_id);
         
-        // Log that we're creating a new node
-        logger.info(format!("Creating new Node with network_id '{}'", config.network_id));
+        logger.info(format!("Initializing node '{}' in network '{}'...", node_id, config.network_id));
         
-        // Create the service registry with a child logger for proper hierarchy
-        let registry_logger = logger.with_component(runar_common::Component::Registry);
-        logger.debug("Creating ServiceRegistry instance");
-        let registry = ServiceRegistry::new(registry_logger);
+        let service_registry = Arc::new(ServiceRegistry::new(logger.clone()));
         
-        // Create a new node instance
-        logger.debug("Creating Node instance");
-        let node = Self {
-            config: config.clone(),
-            service_registry: Arc::new(registry),
-            network_id: config.network_id.clone(),
-            services: Arc::new(RwLock::new(HashMap::new())),
-            service_states: Arc::new(RwLock::new(HashMap::new())),
-            service_metadata: Arc::new(RwLock::new(HashMap::new())),
+        // Create the node (with network fields now included)
+        let mut node = Self {
+            network_id: config.network_id,
+            node_id,
             logger: logger.clone(),
+            service_registry,
+            services: Arc::new(RwLock::new(HashMap::new())),
+            network_transport: Arc::new(RwLock::new(None)),
+            node_discovery: Arc::new(RwLock::new(None)),
+            discovered_nodes: Arc::new(RwLock::new(HashMap::new())),
+            networking_enabled: config.enable_networking,
         };
         
-        // Create and add the Registry Service using a different approach to avoid weak reference issues
-        logger.debug("Creating RegistryService instance");
+        // Register the registry service
         let registry_service = RegistryService::new(
-            node.logger.with_component(Component::Service),
+            logger.clone(),
             Arc::new(node.clone()) as Arc<dyn RegistryDelegate>,
         );
         
-        // Add the registry service directly to the node
-        logger.debug("Adding RegistryService to Node");
-        if let Err(e) = node.add_internal_service(registry_service).await {
-            node.logger.error(format!("Failed to add registry service: {}", e));
-            return Err(anyhow!("Failed to initialize node: {}", e));
-        }
+        // Add the registry service to the node
+        node.add_service(registry_service).await?;
         
-        // Return the new node
-        logger.debug("Node creation completed successfully");
         Ok(node)
     }
     
-    /// Get a logger for a service, derived from the node's root logger
-    pub fn create_service_logger(&self, _service_name: &str) -> Logger {
-        self.logger.with_component(Component::Service)
-    }
-
-    /// Create a request context with the right logger
-    pub fn create_request_context(&self, service_path: &str) -> RequestContext {
-        let service_logger = self.logger.with_component(Component::Service);
-        let topic_path = TopicPath::new(service_path, &self.network_id).expect("Invalid service path");
-        RequestContext::new(&topic_path, service_logger)
-    }
-    
-    /// Create a request context with a topic path
+    /// Add a service to this node
     ///
-    /// INTENTION: Create a RequestContext with a properly configured logger
-    /// and a complete topic path. This is used when handling requests that
-    /// already have a validated TopicPath.
-    pub fn create_request_context_with_topic_path(&self, topic_path: &TopicPath) -> RequestContext {
-        let service_logger = self.logger.with_component(Component::Service);
-        RequestContext::new(topic_path, service_logger)
-    }
-    
-    /// Create an action registrar function
-    ///
-    /// INTENTION: Create a function that can be passed to services to register
-    /// action handlers dynamically. This enables services to register handlers 
-    /// during initialization without directly depending on the Node.
-    pub fn create_action_registrar(&self) -> ActionRegistrar {
-        // Clone the Arc to the service registry
-        let registry = self.service_registry.clone();
+    /// INTENTION: Register a service with this node, making its actions available
+    /// for requests and allowing it to receive events. This method initializes the
+    /// service but does not start it - services are started when the node is started.
+    pub async fn add_service<S: AbstractService + 'static>(&mut self, service: S) -> Result<()> {
+        let service_path = service.path().to_string();
         
-        // Create a boxed function that can register action handlers
-        Arc::new(move |topic_path: &TopicPath, handler: ActionHandler, metadata: Option<ActionMetadata>| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
-            let registry_clone = registry.clone();
-            let metadata = metadata.clone();
-            let topic_path = topic_path.clone();
-            
-            // Return a future that registers the handler
-            Box::pin(async move {
-                registry_clone.register_action_handler(&topic_path, handler, metadata).await
-            })
-        })
-    }
-    
-    /// Create a lifecycle context for a service
-    ///
-    /// INTENTION: Create a context object that provides all necessary callbacks and
-    /// information for service lifecycle operations. This bundles together the delegate,
-    /// logger, and other contextual information needed by services.
-    pub fn create_context(&self, service_path: &str) -> LifecycleContext {
-        self.logger.debug(format!("Creating lifecycle context for service '{}'", service_path));
+        // Use logger method
+        self.logger.info(format!("Adding service '{}' to node", service_path));
         
-        // Create service-specific logger
-        let service_logger = self.logger.with_component(Component::Service);
-        self.logger.debug("Created service-specific logger");
-        
-        // Create topic path for the service
-        self.logger.debug(format!("Creating topic path for service '{}'", service_path));
-        let topic_path = TopicPath::new(service_path, &self.network_id).expect("Invalid service path");
-        self.logger.debug(format!("Created topic path for service '{}'", service_path));
-        
-        // Create a context with minimum requirements
-        self.logger.debug("Creating LifecycleContext with topic path and logger");
-        let context = LifecycleContext::new(&topic_path, service_logger);
-        
-        // Create a delegate reference to self
-        self.logger.debug("Creating node delegate");
-        let self_clone = self.clone();
-        let delegate: Arc<dyn NodeDelegate + Send + Sync> = Arc::new(self_clone);
-        self.logger.debug("Created node delegate");
-        
-        // Add the node delegate to the context
-        self.logger.debug("Adding node delegate to context");
-        let context_with_delegate = context.with_node_delegate(delegate);
-        self.logger.debug("Added node delegate to context");
-        
-        context_with_delegate
-    }
-    
-    /// Get the current state of a service
-    ///
-    /// INTENTION: Retrieve the current lifecycle state of a service.
-    /// This method allows checking if a service is initialized, running, or stopped.
-    pub async fn get_service_state(&self, service_path: &str) -> Option<ServiceState> {
-        let states = self.service_states.read().await;
-        states.get(service_path).cloned()
-    }
-
-    /// Update the state of a service
-    ///
-    /// INTENTION: Update the lifecycle state of a service in the centralized metadata.
-    /// This is used by the Node to track service states during initialization, startup, and shutdown.
-    async fn update_service_state(&self, service_path: &str, state: ServiceState) {
-        self.logger.debug(format!("Acquiring service_states write lock for service '{}'", service_path));
-        let mut states = self.service_states.write().await;
-        self.logger.debug(format!("Acquired service_states write lock for service '{}'", service_path));
-        self.logger.debug(format!("Updating service '{}' state to {:?}", service_path, state));
-        states.insert(service_path.to_string(), state);
-        self.logger.debug(format!("Updated service state for '{}'", service_path));
-        // Explicitly drop the lock as soon as possible
-        drop(states);
-        self.logger.debug(format!("Released service_states write lock for service '{}'", service_path));
-    }
-
-    /// Add an internal service to the node
-    /// This is a special method that avoids circular references
-    async fn add_internal_service<S>(&self, service: S) -> Result<()>
-    where
-        S: AbstractService + 'static,
-    {
-        self.logger.debug("Starting add_internal_service");
-        // Convert to Arc to share across threads
-        let service_arc: Arc<dyn AbstractService> = Arc::new(service);
-        
-        // Get service information directly from the service
-        let name = service_arc.name().to_string();
-        let path = service_arc.path().to_string();
-        self.logger.debug(format!("Adding internal service '{}' (path: '{}')", name, path));
-        
-        // Register with our internal service map
-        self.logger.debug("Acquiring services write lock");
-        let mut services = self.services.write().await;
-        self.logger.debug("Acquired services write lock");
-        services.insert(path.clone(), service_arc.clone());
-        self.logger.debug("Added service to internal map");
-        // Drop the lock as soon as possible
-        drop(services);
-        
-        // Initialize service state as Initialized
-        self.logger.debug("Updating service state");
-        self.update_service_state(&path, ServiceState::Initialized).await;
-        
-        // Create and store service metadata
-        self.logger.debug("Creating service metadata");
-        let complete_metadata = CompleteServiceMetadata::new(
-            service_arc.name().to_string(),
-            service_arc.version().to_string(),
-            service_arc.path().to_string(),
-            service_arc.description().to_string()
-        );
-        
-        // Store the metadata
-        self.logger.debug("Acquiring metadata write lock");
-        let mut metadata = self.service_metadata.write().await;
-        self.logger.debug("Acquired metadata write lock");
-        metadata.insert(path.clone(), complete_metadata);
-        self.logger.debug("Added metadata to internal map");
-        // Drop the lock as soon as possible
-        drop(metadata);
-        
-        // Log the registration
-        self.logger.debug(format!("Internal service '{}' added to node registry", path));
-        
-        // Create a lifecycle context with derived logger for initialization
-        self.logger.debug("Creating lifecycle context");
-        let lifecycle_context = self.create_context(&path);
-        
-        // Initialize the service with the derived logger
-        // The service will register its action handlers during initialization
-        self.logger.debug("Initializing service");
-        if let Err(e) = service_arc.init(lifecycle_context).await {
-            self.logger.error(format!("Failed to initialize internal service '{}': {}", name, e));
-            self.update_service_state(&path, ServiceState::Error).await;
-            return Err(anyhow!("Failed to initialize internal service: {}", e));
-        }
-        
-        // The service is now registered and initialized with its action handlers
-        self.logger.info(format!("Internal service '{}' initialized successfully", name));
+        // Store the service instance
+        self.services.write().await.insert(service_path.clone(), Arc::new(service));
         
         Ok(())
-    }
-
-    /// Process a service request
-    ///
-    /// INTENTION: Validate and route a request to the appropriate service action handler.
-    /// This method parses the given path, looks up the service and action handler,
-    /// and invokes the handler with a request context.
-    ///
-    /// Example:
-    /// ```
-    /// use runar_node::Node;
-    /// use runar_common::types::ValueType;
-    /// use serde_json::json;
-    ///
-    /// async fn make_request(node: &Node) {
-    ///     // Call the "add" action on the "math" service
-    ///     let response = node.request(
-    ///         "math/add",
-    ///         ValueType::from(json!({
-    ///             "a": 5,
-    ///             "b": 3
-    ///         }))
-    ///     ).await.expect("Request failed");
-    ///
-    ///     // Process the response...
-    /// }
-    /// ```
-    pub async fn request(&self, path: impl Into<String>, params: ValueType) -> Result<ServiceResponse> {
-        let path_string = path.into();
-        
-        // Parse the path into a TopicPath for validation
-        let topic_path = TopicPath::new(&path_string, &self.network_id)
-            .map_err(|e| anyhow!("Invalid path format: {}", e))?;
-        
-        // Create a context with a derived logger for this request
-        let context = self.create_request_context_with_topic_path(&topic_path);
-        let context_arc = Arc::new(context);
-        
-        // Create the service request with the validated TopicPath
-        let request = ServiceRequest::new_with_topic_path(
-            topic_path.clone(),
-            params,
-            context_arc.clone(),
-        );
-        
-        // Log that we're handling the request
-        context_arc.debug(&format!("Node handling request for {}", topic_path.as_str()));
-
-        // Access service path and action from the topic path
-        let handler_params = if let ValueType::Null = request.data {
-            None
-        } else {
-            Some(request.data.clone())
-        };
-
-        // Get the action handler from the registry using the topic path
-        if let Some(handler) = self.service_registry.get_action_handler(&topic_path).await {
-            // Node invokes the handler directly
-            context_arc.debug(&format!("Invoking action handler for {}", topic_path.as_str()));
-            
-            // Use the context we created - we already have the reference to it
-            // Clone the RequestContext from the Arc
-            let context_ref = context_arc.as_ref().clone();
-            return handler(handler_params, context_ref).await;
-        }
-
-        // No action handler found, return error
-        let service_path = topic_path.service_path();
-        
-        // Format the error message differently based on whether there's an action
-        let error_msg = if topic_path.action_path().is_empty() {
-            format!("No handler registered for service {}", service_path)
-        } else {
-            format!("No handler registered for path {}", topic_path.action_path())
-        };
-        
-        context_arc.error(&error_msg);
-        Ok(ServiceResponse::error(404, &error_msg))
-    }
-
-    /// Publish an event to a topic
-    ///
-    /// INTENTION: Distribute an event to subscribers of the topic.
-    /// This method validates the topic string, converts it to a TopicPath,
-    /// looks up subscribers in the service registry, and delivers the event.
-    pub async fn publish(&self, topic: impl Into<String>, data: ValueType) -> Result<()> {
-        // Use publish_with_options with default options
-        self.publish_with_options(topic, data, PublishOptions::default()).await
-    }
-    
-    /// Publish an event to a topic with specific delivery options
-    ///
-    /// INTENTION: Distribute an event to subscribers of the topic with specific delivery options.
-    /// This method provides additional control over how events are delivered, including:
-    /// - Delivery scope (broadcast vs. targeted)
-    /// - Delivery guarantees (at-least-once vs. best-effort)
-    /// - Retention policies for persistent events
-    ///
-    /// The method validates the topic string, converts it to a TopicPath,
-    /// looks up subscribers in the service registry, and delivers the event
-    /// according to the specified options.
-    pub async fn publish_with_options(&self, topic: impl Into<String>, data: ValueType, options: PublishOptions) -> Result<()> {
-        // Convert to String for NodeDelegate implementation
-        let topic_string = topic.into();
-        
-        // Convert string to validated TopicPath
-        let topic_path = TopicPath::new(&topic_string, &self.network_id)
-            .map_err(|e| anyhow!("Invalid topic format: {}", e))?;
-            
-        self.logger.debug(format!("Publishing to topic '{}' with options: {:?}", topic_path.as_str(), options));
-        
-        // Get handlers - returns subscription IDs and handlers
-        let event_handlers = self.service_registry.get_event_handlers(&topic_path).await;
-        let subscriber_count = event_handlers.len();
-        
-        if subscriber_count == 0 {
-            self.logger.debug(format!("No subscribers for topic '{}'", topic_path.as_str()));
-            return Ok(());
-        }
-        
-        let topic_clone = topic_path.clone();
-        let logger = self.logger.clone();
-        
-        // Execute callbacks based on delivery scope
-        // For now, we just handle local delivery - network delivery will be added later
-        for (subscriber_id, callback) in event_handlers {
-            let data_clone = data.clone();
-            let topic_path_clone = topic_clone.clone();
-            let logger_clone = logger.clone();
-            let subscriber_id_clone = subscriber_id.clone();
-            let options_clone = options.clone();
-            
-            // If guaranteed delivery is requested, use a different execution strategy
-            if options_clone.guaranteed_delivery {
-                // For now, just log that guaranteed delivery was requested
-                // In the future, this would use a more robust delivery mechanism
-                logger_clone.debug(format!(
-                    "Guaranteed delivery requested for topic '{}' to subscriber '{}'",
-                    topic_path_clone.as_str(), subscriber_id_clone
-                ));
-            }
-            
-            tokio::spawn(async move {
-                // Create an event context for the callback
-                let event_logger = logger_clone.with_component(Component::Service);
-                
-                // Create an event context with the topic path and delivery options
-                let mut event_context = EventContext::new(&topic_path_clone, event_logger);
-                event_context.delivery_options = Some(options_clone);
-                let event_context_arc = Arc::new(event_context);
-                
-                // Execute the callback with the context
-                match callback(event_context_arc, data_clone).await {
-                    Ok(_) => {
-                        logger_clone.debug(format!(
-                            "Successfully delivered event to subscriber '{}' for topic '{}'", 
-                            subscriber_id_clone, topic_path_clone.as_str()
-                        ));
-                    },
-                    Err(err) => {
-                        logger_clone.error(format!(
-                            "Error executing callback for topic '{}', subscriber '{}': {}", 
-                            topic_path_clone.as_str(), subscriber_id_clone, err
-                        ));
-                    }
-                }
-            });
-        }
-        
-        self.logger.debug(format!("Published to {} subscribers for topic '{}'", subscriber_count, topic_path.as_str()));
-        
-        Ok(())
-    }
-
-    /// Subscribe to a topic
-    pub async fn subscribe(
-        &self,
-        topic: impl Into<String>,
-        callback: Box<dyn Fn(Arc<EventContext>, ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
-    ) -> Result<String> {
-        let topic_string = topic.into();
-        
-        // Get a topic path to validate the topic and extract network ID if present
-        let topic_path = TopicPath::new(&topic_string, &self.network_id)
-            .map_err(|e| anyhow!("Invalid topic format: {}", e))?;
-        
-        // Convert Box to Arc (required by service_registry)
-        let callback_arc = Arc::from(callback);
-        
-        // Subscribe through the service registry
-        self.service_registry.subscribe(&topic_path, callback_arc).await
-    }
-
-    /// Subscribe to a topic with options
-    pub async fn subscribe_with_options(
-        &self,
-        topic: impl Into<String>,
-        callback: Box<dyn Fn(Arc<EventContext>, ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
-        options: SubscriptionOptions,
-    ) -> Result<String> {
-        let topic_string = topic.into();
-        
-        // Get a topic path to validate the topic and extract network ID if present
-        let topic_path = TopicPath::new(&topic_string, &self.network_id)
-            .map_err(|e| anyhow!("Invalid topic format: {}", e))?;
-        
-        // Convert Box to Arc (required by service_registry)
-        let callback_arc = Arc::from(callback);
-        
-        // Subscribe through the service registry with options
-        self.service_registry.subscribe_with_options(&topic_path, callback_arc, options).await
-    }
-
-    /// Unsubscribe from a topic
-    pub async fn unsubscribe(&self, topic: impl Into<String>, subscription_id: Option<&str>) -> Result<()> {
-        let topic_string = topic.into();
-        
-        // Get a topic path to validate the topic and extract network ID if present
-        let topic_path = TopicPath::new(&topic_string, &self.network_id)
-            .map_err(|e| anyhow!("Invalid topic format: {}", e))?;
-        
-        // Unsubscribe through the service registry
-        self.service_registry.unsubscribe(&topic_path, subscription_id).await
-    }
-
-    /// List all services
-    pub fn list_services(&self) -> Vec<String> {
-        // Return a simple snapshot of services
-        // This avoids the need to block on async code
-        self.services.try_read()
-            .map(|services| services.keys().cloned().collect::<Vec<String>>())
-            .unwrap_or_default()
     }
 
     /// Start the Node and all registered services
@@ -551,331 +179,756 @@ impl Node {
     /// 5. Handles any errors during service startup
     ///
     /// When network functionality is added, this will also advertise services to the network.
-    pub async fn start(&self) -> Result<()> {
-        self.logger.info("Starting Node and all registered services");
+    pub async fn start(&mut self) -> Result<()> {
+        self.logger.info("Starting node".to_string());
         
-        // Get a read lock on the services map
-        let services_lock = self.services.read().await;
-        
-        if services_lock.is_empty() {
-            self.logger.warn("No services registered with this Node");
-        }
-        
-        // Start each service
-        let mut success_count = 0;
-        let mut failure_count = 0;
-        
-        for (path, service) in services_lock.iter() {
-            self.logger.debug(format!("Starting service '{}'", path));
+        // Get service instances
+        let services = {
+            self.services.read().await.clone()
+        };
+
+        // Initialize all services first
+        for (service_name, service) in &services {
+            self.logger.info(format!("Initializing service: {}", service_name));
             
-            // Create a lifecycle context for this service
-            let context = self.create_context(path);
+            // Create a lifecycle context for the service
+            let context = self.create_lifecycle_context(service.as_ref()).await?;
             
-            // Try to start the service
-            match service.start(context).await {
+            // Initialize the service
+            match service.init(context).await {
                 Ok(_) => {
-                    self.logger.info(format!("Service '{}' started successfully", path));
-                    success_count += 1;
-                    
-                    // Update the service state to Running
-                    self.update_service_state(path, ServiceState::Running).await;
+                    self.logger.info(format!("Service '{}' initialized successfully", service_name));
                 },
                 Err(e) => {
-                    self.logger.error(format!("Failed to start service '{}': {}", path, e));
-                    failure_count += 1;
-                    
-                    // Update the service state to Error
-                    self.update_service_state(path, ServiceState::Error).await;
+                    self.logger.error(format!("Failed to initialize service '{}': {}", service_name, e));
+                    return Err(anyhow!("Failed to initialize service '{}': {}", service_name, e));
                 }
             }
         }
         
-        // Log the final status
-        if failure_count == 0 {
-            self.logger.info(format!("Node started successfully: {} services running", success_count));
-            Ok(())
-        } else {
-            let message = format!(
-                "Node started with errors: {} services running, {} failed to start", 
-                success_count, 
-                failure_count
-            );
-            self.logger.warn(&message);
+        // Now start all services in the correct order
+        for (service_name, service) in &services {
+            self.logger.info(format!("Starting service: {}", service_name));
             
-            // Return an error if any services failed to start
-            Err(anyhow!(message))
+            // Create a lifecycle context for the service
+            let context = self.create_lifecycle_context(service.as_ref()).await?;
+            
+            // Start the service
+            match service.start(context).await {
+                Ok(_) => {
+                    self.logger.info(format!("Service '{}' started successfully", service_name));
+                },
+                Err(e) => {
+                    self.logger.error(format!("Failed to start service '{}': {}", service_name, e));
+                    return Err(anyhow!("Failed to start service '{}': {}", service_name, e));
+                }
+            }
         }
+        
+        self.logger.info("Node started successfully".to_string());
+        
+        Ok(())
     }
     
     /// Stop the Node and all registered services
     ///
-    /// INTENTION: Gracefully shut down the Node and all registered services.
-    /// This method:
-    /// 1. Stops all registered services in the proper order
-    /// 2. Updates the service state in the metadata as each service stops
-    /// 3. Cleans up any Node resources, subscriptions, or pending events
-    /// 4. Transitions the Node to the Stopped state
-    ///
-    /// This provides a clean shutdown process to prevent data loss or corruption.
-    pub async fn stop(&self) -> Result<()> {
-        self.logger.info("Stopping Node and all registered services");
+    /// INTENTION: Gracefully stop the Node and all registered services. This method:
+    /// 1. Transitions the Node to the Stopping state
+    /// 2. Stops all registered services in the reverse order they were started
+    /// 3. Updates the service state in the metadata as each service stops
+    /// 4. Handles any errors during service shutdown
+    /// 5. Transitions the Node to the Stopped state
+    pub async fn stop(&mut self) -> Result<()> {
+        self.logger.info("Stopping node".to_string());
         
-        // Get a read lock on the services map
-        let services_lock = self.services.read().await;
+        // Get service instances in reverse order (for proper shutdown sequence)
+        let mut services: Vec<(String, Arc<dyn AbstractService>)> = {
+            self.services.read().await
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
         
-        if services_lock.is_empty() {
-            self.logger.warn("No services registered with this Node");
-            return Ok(());
-        }
-        
-        // Stop each service
-        let mut success_count = 0;
-        let mut failure_count = 0;
-        
-        for (path, service) in services_lock.iter() {
-            self.logger.debug(format!("Stopping service '{}'", path));
+        services.reverse();
+
+        // Stop all services in reverse order
+        for (service_name, service) in services {
+            self.logger.info(format!("Stopping service: {}", service_name));
             
-            // Create a lifecycle context for this service
-            let context = self.create_context(path);
+            // Create a lifecycle context for the service
+            let context = self.create_lifecycle_context(service.as_ref()).await?;
             
-            // Try to stop the service
+            // Stop the service
             match service.stop(context).await {
                 Ok(_) => {
-                    self.logger.info(format!("Service '{}' stopped successfully", path));
-                    success_count += 1;
-                    
-                    // Update the service state to Stopped
-                    self.update_service_state(path, ServiceState::Stopped).await;
+                    self.logger.info(format!("Service '{}' stopped successfully", service_name));
                 },
                 Err(e) => {
-                    self.logger.error(format!("Failed to stop service '{}': {}", path, e));
-                    failure_count += 1;
-                    
-                    // Update the service state to Error
-                    self.update_service_state(path, ServiceState::Error).await;
+                    self.logger.error(format!("Error stopping service '{}': {}", service_name, e));
+                    // Continue stopping other services even if one fails
                 }
             }
         }
         
-        // Log the final status
-        if failure_count == 0 {
-            self.logger.info(format!("Node stopped successfully: {} services stopped", success_count));
-            Ok(())
-        } else {
-            let message = format!(
-                "Node stopped with errors: {} services stopped, {} failed to stop", 
-                success_count, 
-                failure_count
-            );
-            self.logger.warn(&message);
+        // Stop network components if enabled
+        if self.networking_enabled {
+            // Shutdown transport
+            if let Some(transport) = &*self.network_transport.read().await {
+                match transport.shutdown().await {
+                    Ok(_) => self.logger.info("Network transport shut down successfully".to_string()),
+                    Err(e) => self.logger.error(format!("Error shutting down network transport: {}", e)),
+                }
+            }
             
-            // Return an error if any services failed to stop
-            Err(anyhow!(message))
+            // Shutdown discovery
+            if let Some(discovery) = &*self.node_discovery.read().await {
+                match discovery.shutdown().await {
+                    Ok(_) => self.logger.info("Node discovery shut down successfully".to_string()),
+                    Err(e) => self.logger.error(format!("Error shutting down node discovery: {}", e)),
+                }
+            }
         }
-    }
-
-    /// Get all service states
-    ///
-    /// INTENTION: Retrieve the current lifecycle state of all services.
-    /// This is useful for monitoring service health and debugging.
-    pub async fn get_all_service_states(&self) -> HashMap<String, ServiceState> {
-        let states = self.service_states.read().await;
-        states.clone()
-    }
-
-    /// Get complete metadata for a service
-    ///
-    /// INTENTION: Retrieve the complete metadata for a service, including
-    /// dynamically registered actions, events, and runtime state.
-    pub async fn get_service_metadata(&self, service_path: &str) -> Option<CompleteServiceMetadata> {
-        let metadata = self.service_metadata.read().await;
-        metadata.get(service_path).cloned()
-    }
-    
-    /// Register action metadata
-    ///
-    /// INTENTION: Update the service metadata with information about a registered action.
-    /// This is used to document APIs and enable discoverability.
-    pub async fn register_action_metadata(&self, service_path: &str, metadata: ActionMetadata) -> Result<()> {
-        let mut service_metadata = self.service_metadata.write().await;
         
-        if let Some(complete_metadata) = service_metadata.get_mut(service_path) {
-            complete_metadata.register_action(metadata);
+        self.logger.info("Node stopped successfully".to_string());
+        
+        Ok(())
+    }
+
+    /// Starts the networking components (transport and discovery).
+    /// This should be called internally as part of the node.start process.
+    async fn start_networking<TF, TD>(&self, transport_factory: TF, discovery_factory: TD) -> Result<()> 
+    where
+        TF: TransportFactory + Send + Sync + 'static,
+        TD: FnOnce(Arc<RwLock<Option<Box<dyn NetworkTransport>>>>, Logger) -> Result<Box<dyn NodeDiscovery>> + Send + Sync + 'static,
+    {
+        if !self.networking_enabled {
+            self.logger.info("Networking is disabled, skipping network start.".to_string());
+            return Ok(());
+        }
+
+        self.logger.info("Starting networking...".to_string());
+        
+        // Create node identifier
+        let node_identifier = NodeIdentifier::new(self.network_id.clone(), self.node_id.clone());
+        
+        // Create transport as child of node logger
+        let transport_logger = self.logger.with_component(Component::Network);
+        let transport_instance = transport_factory.create_transport(node_identifier, transport_logger).await?;
+        
+        // Initialize transport
+        transport_instance.init().await?;
+        
+        // Register message handler
+        let self_arc = self.clone();
+        let message_handler = Box::new(move |message: NetworkMessage| {
+            let node_clone = self_arc.clone();
+            tokio::spawn(async move {
+                if let Err(e) = node_clone.handle_network_message(message).await {
+                    node_clone.logger.error(format!("Error handling network message: {}", e));
+                }
+            });
             Ok(())
-        } else {
-            Err(anyhow!("Service not found: {}", service_path))
-        }
-    }
+        });
+        transport_instance.register_handler(message_handler)?;
 
-    /// Register an action handler for a specific path
-    async fn register_action_handler(&self, topic_path: &TopicPath, handler: ActionHandler, metadata: Option<ActionMetadata>) -> Result<()> {
-        // Log the registration
-        self.logger.debug(format!("Registering action handler for '{}'", topic_path.as_str()));
+        // Box and store the transport
+        *self.network_transport.write().await = Some(Box::new(transport_instance));
+
+        // Start discovery with a child logger of the node logger
+        let discovery_logger = self.logger.with_component(Component::Network);
+        let discovery_instance = discovery_factory(self.network_transport.clone(), discovery_logger)?;
         
-        // Clone metadata for service registry
-        let metadata_for_registry = metadata.clone();
-        
-        // Register the handler with the service registry
-        self.service_registry.register_action_handler(topic_path, handler, metadata_for_registry).await?;
-        
-        // Update service metadata if provided
-        if let Some(md) = &metadata {
-            // Get a write lock on the service metadata
-            let mut service_metadata = self.service_metadata.write().await;
+        // Store the discovery instance
+        *self.node_discovery.write().await = Some(discovery_instance);
+
+        // Initialize the discovery with options
+        if let Some(discovery) = &*self.node_discovery.read().await {
+            // Initialize discovery
+            discovery.init(DiscoveryOptions::default()).await?;
             
-            // Find or create metadata for this service
-            let service_path = topic_path.service_path();
-            let entry = service_metadata.entry(service_path.to_string()).or_insert_with(|| {
-                CompleteServiceMetadata::new(
-                    service_path.to_string(),
-                    "unknown".to_string(),
-                    service_path.to_string(),
-                    "Dynamically registered service".to_string()
-                )
+            // Register this node with discovery
+            let node_info = NodeInfo {
+                identifier: NodeIdentifier::new(self.network_id.clone(), self.node_id.clone()),
+                address: "unknown".to_string(), // This would need to be obtained from transport
+                capabilities: self.list_services().await, // Use service list as capabilities
+                last_seen: std::time::SystemTime::now(),
+            };
+            
+            discovery.register_node(node_info.clone()).await?;
+            
+            // Set listener and start announcing
+            let self_clone = self.clone();
+            let discovery_listener: DiscoveryListener = Box::new(move |node_info: NodeInfo| {
+                let node = self_clone.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = node.handle_discovered_node(node_info).await {
+                        node.logger.error(format!("Error handling discovered node: {}", e));
+                    }
+                });
             });
             
-            // Add this action to the service's registered actions
-            entry.register_action(md.clone());
+            discovery.set_discovery_listener(discovery_listener).await?;
+            discovery.start_announcing(node_info).await?;
+        }
+        
+        // Log address info
+        let transport_guard = self.network_transport.read().await;
+        if let Some(transport) = &*transport_guard {
+            if let Some(addr) = transport.local_address().await {
+                self.logger.info(format!("Network transport listening on: {}", addr));
+            } else {
+                self.logger.warn("Network transport address not available");
+            }
+        }
+        
+        self.logger.info("Networking started successfully");
+        Ok(())
+    }
+
+    /// Create a lifecycle context for a service
+    ///
+    /// INTENTION: Build a context object for service lifecycle operations.
+    /// This is used for service initialization, starting, and stopping.
+    async fn create_lifecycle_context(&self, service: &dyn AbstractService) -> Result<LifecycleContext> {
+        // Get the service path from the service
+        let service_path = service.path().to_string();
+        
+        // Create a logger with the service context
+        let logger = Logger::new_root(Component::Service, &service_path);
+        
+        // Create a context with the network ID, service path, and logger
+        let topic_path = TopicPath::new(&service_path, &self.network_id)
+            .map_err(|e| anyhow!("Invalid topic path: {}", e))?;
+            
+        let context = LifecycleContext::new(&topic_path, logger)
+            .with_node_delegate(Arc::new(self.clone()) as Arc<dyn NodeDelegate + Send + Sync>);
+        
+        Ok(context)
+    }
+
+    /// Make a service request
+    ///
+    /// INTENTION: Send a request to a service and receive a response. This method
+    /// handles routing the request to the appropriate service and action handler,
+    /// supporting the request/response pattern.
+    pub async fn request(&self, path: String, params: ValueType) -> Result<ServiceResponse> {
+        self.logger.debug(format!("Processing request to path '{}'", path));
+        
+        // Convert string to validated TopicPath
+        let topic_path = TopicPath::new(&path, &self.network_id)
+            .map_err(|e| anyhow!("Invalid path format: {}", e))?;
+            
+        // Get action handler (if available locally)
+        let handler_option = self.service_registry.get_action_handler(&topic_path).await;
+        
+        // First try to handle the request locally
+        if let Some(handler) = handler_option {
+            // Create request context - using topic_path.action_path() instead of to_string()
+            let request_context = RequestContext::new(
+                &topic_path,
+                Logger::new_root(Component::Service, &topic_path.action_path())
+            );
+            
+            // Call the handler with the correct argument types
+            return handler(Some(params), request_context).await;
+        }
+        
+        // If we couldn't handle it locally and networking is enabled, try to forward it
+        if self.networking_enabled {
+            // Network request handling will be implemented here
+            self.logger.warn("Network request handling not yet implemented");
+        }
+        
+        // If we get here, we couldn't handle the request
+        Err(anyhow!("No handler found for path: {}", path))
+    }
+
+    /// Create a context for node operations
+    ///
+    /// INTENTION: Build a context object for a specific service. This can be used
+    /// to create logger instances and to pass node information to services.
+    pub fn create_context(&self, service_path: &str) -> Arc<LifecycleContext> {
+        // Create a logger with the service context
+        let logger = Logger::new_root(Component::Service, service_path);
+        
+        // Create a topic path (unwrap is safe here since we're not validating)
+        let topic_path = TopicPath::new(service_path, &self.network_id)
+            .unwrap_or_else(|_| TopicPath::new("error", &self.network_id).unwrap());
+            
+        // Create the context with node delegate
+        let context = LifecycleContext::new(&topic_path, logger)
+            .with_node_delegate(Arc::new(self.clone()) as Arc<dyn NodeDelegate + Send + Sync>);
+            
+        Arc::new(context)
+    }
+
+    /// List all registered services
+    ///
+    /// INTENTION: Provide a list of all registered services for introspection
+    /// and management purposes. This is useful for service discovery and monitoring.
+    pub async fn list_services(&self) -> Vec<String> {
+        // Get the keys from the services map directly
+        self.services.read().await.keys().cloned().collect()
+    }
+
+    /// Synchronous version of list_services for RegistryDelegate trait
+    /// 
+    pub fn list_services_sync(&self) -> Vec<String> {
+        // For backward compatibility with the trait
+        tokio::task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                self.list_services().await
+            })
+        })
+    }
+
+    /// Subscribe to an event topic
+    ///
+    /// INTENTION: Register a callback to be invoked when events are published to
+    /// the specified topic. This supports the publish/subscribe pattern for event-driven
+    /// communication between services.
+    pub async fn subscribe<F, Fut>(&self, topic: String, callback: F) -> Result<String>
+    where
+        F: Fn(Arc<EventContext>, ValueType) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.logger.debug(format!("Subscribing to topic '{}'", topic));
+        
+        // Use subscribe_with_options with default options
+        self.subscribe_with_options(topic, callback, SubscriptionOptions::default()).await
+    }
+
+    /// Subscribe to an event topic with options
+    ///
+    /// INTENTION: Register a callback to be invoked when events are published to
+    /// the specified topic, with additional subscription options. This provides
+    /// more control over how subscriptions are handled.
+    pub async fn subscribe_with_options<F, Fut>(
+        &self,
+        topic: String,
+        callback: F,
+        options: SubscriptionOptions,
+    ) -> Result<String>
+    where
+        F: Fn(Arc<EventContext>, ValueType) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.logger.debug(format!("Subscribing to topic '{}' with options: {:?}", topic, options));
+        
+        // Create a unique subscription ID
+        let subscription_id = Uuid::new_v4().to_string();
+        
+        // Convert to validated TopicPath
+        let topic_path = TopicPath::new(&topic, &self.network_id)
+            .map_err(|e| anyhow!("Invalid topic format: {}", e))?;
+            
+        // Convert the callback to the expected type (a boxed future)
+        let event_callback: Arc<dyn Fn(Arc<EventContext>, ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync> =
+            Arc::new(move |ctx, data| {
+                let future = callback(ctx, data);
+                Box::pin(future)
+            });
+            
+        // Register subscription with the service registry
+        self.service_registry.subscribe_with_options(&topic_path, event_callback, options).await
+    }
+
+    /// Unsubscribe from an event topic
+    ///
+    /// INTENTION: Remove a subscription based on its ID. This allows services to
+    /// stop receiving events when they're no longer interested.
+    pub async fn unsubscribe(&self, subscription_id: String) -> Result<()> {
+        self.logger.debug(format!("Unsubscribing from subscription ID '{}'", subscription_id));
+        
+        // At this point we don't have the topic path, but the service registry needs it
+        // This is a limitation of our current API - we would need to maintain a mapping of 
+        // subscription IDs to topics to properly implement this
+        // 
+        // For now, let's issue a warning and return Ok
+        self.logger.warn(format!("Cannot unsubscribe '{}' without topic path - API limitation", subscription_id));
+        
+        Ok(())
+    }
+
+    /// Publish an event to a topic
+    ///
+    /// INTENTION: Publish an event to all subscribers of the specified topic. This
+    /// is the mechanism for event-driven communication between services.
+    pub async fn publish(&self, topic: String, data: ValueType) -> Result<()> {
+        // Use publish_with_options with default options
+        self.publish_with_options(topic, data, PublishOptions::default()).await
+    }
+
+    /// Publish an event to a topic with options
+    ///
+    /// INTENTION: Publish an event to all subscribers of the specified topic, with
+    /// additional publishing options. This provides more control over how events
+    /// are delivered.
+    pub async fn publish_with_options(
+        &self,
+        topic: String,
+        data: ValueType,
+        options: PublishOptions,
+    ) -> Result<()> {
+        self.logger.debug(format!("Publishing to topic '{}'", topic));
+        
+        // Convert to validated TopicPath
+        let topic_path = TopicPath::new(&topic, &self.network_id)
+            .map_err(|e| anyhow!("Invalid topic format: {}", e))?;
+
+        // Create event context - using topic_path.action_path() instead of to_string()
+        let event_context = Arc::new(EventContext::new(
+            &topic_path,
+            Logger::new_root(Component::Service, &topic_path.action_path()),
+        ));
+
+        // Get subscribers from service registry
+        let subscribers = self.service_registry.get_event_handlers(&topic_path).await;
+        if subscribers.is_empty() && topic_path.network_id() == self.network_id {
+            self.logger.debug(format!("No subscribers found for topic '{}'", topic));
+        }
+
+        // Call each subscriber
+        for (subscription_id, callback) in subscribers {
+            let callback_context = event_context.clone();
+            let callback_data = data.clone();
+            
+            // Execute the callback
+            tokio::spawn(async move {
+                if let Err(e) = callback(callback_context, callback_data).await {
+                    // For now, just log the error - we'll need better error handling
+                    println!("Error in subscriber callback for subscription {}: {}", subscription_id, e);
+                }
+            });
+        }
+        
+        // If networking is enabled, publish to the network
+        if self.networking_enabled {
+            // Network publishing will be implemented here
+            self.logger.warn("Network event publishing not yet implemented");
         }
         
         Ok(())
     }
 
-    /// Add a service to the node
-    pub async fn add_service<S>(&mut self, service: S) -> Result<()>
-    where
-        S: AbstractService + 'static,
-    {
-        // Convert to Arc to share across threads
-        let service_arc: Arc<dyn AbstractService> = Arc::new(service);
+    /// Handle a discovered node
+    async fn handle_discovered_node(&self, node_info: NodeInfo) -> Result<()> {
+        let node_id = node_info.identifier.to_string();
+        self.logger.info(format!("Discovered node: {}", node_id));
         
-        // Get service information directly from the service
-        let name = service_arc.name().to_string();
-        let path = service_arc.path().to_string();
+        // Store the discovered node
+        self.discovered_nodes.write().await.insert(node_id, node_info);
         
-        // Register with our internal service map
-        let mut services = self.services.write().await;
-        services.insert(path.clone(), service_arc.clone());
+        Ok(())
+    }
+
+    /// Handle a network message
+    async fn handle_network_message(&self, message: NetworkMessage) -> Result<()> {
+        self.logger.debug(format!("Received network message: {:?}", message));
         
-        // Initialize service state as Initialized
-        self.update_service_state(&path, ServiceState::Initialized).await;
+        // Match on message type
+        match message.message_type.as_str() {
+            "Request" => self.handle_network_request(message).await,
+            "Response" => self.handle_network_response(message).await,
+            "Event" => self.handle_network_event(message).await,
+            "Discovery" => self.handle_network_discovery(message).await,
+            _ => {
+                self.logger.warn(format!("Unknown message type: {}", message.message_type));
+                Ok(())
+            }
+        }
+    }
+
+    /// Handle a network request
+    async fn handle_network_request(&self, message: NetworkMessage) -> Result<()> {
+        self.logger.info(format!("Handling network request from {}", message.source));
         
-        // Create and store service metadata
-        let complete_metadata = CompleteServiceMetadata::new(
-            service_arc.name().to_string(),
-            service_arc.version().to_string(),
-            service_arc.path().to_string(),
-            service_arc.description().to_string()
-        );
-        
-        // Store the metadata
-        let mut metadata = self.service_metadata.write().await;
-        metadata.insert(path.clone(), complete_metadata);
-        
-        // Log the registration
-        self.logger.debug(format!("Adding service '{}' to node registry", path));
-        
-        // Create a lifecycle context with derived logger for initialization
-        let lifecycle_context = self.create_context(&path);
-        
-        // Initialize the service with the derived logger
-        // The service will register its action handlers during initialization
-        if let Err(e) = service_arc.init(lifecycle_context).await {
-            self.logger.error(format!("Failed to initialize service '{}': {}", name, e));
-            self.update_service_state(&path, ServiceState::Error).await;
-            return Err(anyhow!("Failed to initialize service: {}", e));
+        // Extract topic and params from the payload
+        if let ValueType::Map(params_map) = &message.payload {
+            // Extract required fields from the request payload
+            let topic = match params_map.get("topic") {
+                Some(ValueType::String(t)) => t.clone(),
+                _ => return Err(anyhow!("Missing or invalid 'topic' in network request"))
+            };
+            
+            let params = match params_map.get("params") {
+                Some(p) => p.clone(),
+                None => ValueType::Null
+            };
+            
+            let correlation_id = message.correlation_id.clone()
+                .ok_or_else(|| anyhow!("Missing correlation_id in network request"))?;
+            
+            // Process the request locally
+            self.logger.debug(format!("Processing network request for topic: {}", topic));
+            match self.request(topic, params).await {
+                Ok(response) => {
+                    // Create response message with proper conversion to ValueType
+                    let response_payload = ValueType::Map(vec![
+                        ("success".to_string(), ValueType::Bool(true)),
+                        ("data".to_string(), response.data.unwrap_or(ValueType::Null)),
+                    ].into_iter().collect());
+                    
+                    let response_message = NetworkMessage {
+                        source: NodeIdentifier::new(self.network_id.clone(), self.node_id.clone()),
+                        destination: Some(message.source.clone()),
+                        message_type: "Response".to_string(),
+                        payload: response_payload,
+                        correlation_id: Some(correlation_id),
+                    };
+                    
+                    // Send response back
+                    if let Some(transport) = &*self.network_transport.read().await {
+                        transport.send(response_message).await?;
+                    } else {
+                        return Err(anyhow!("Network transport not available"));
+                    }
+                },
+                Err(e) => {
+                    // Create error response
+                    let error_data = ValueType::Map(vec![
+                        ("success".to_string(), ValueType::Bool(false)),
+                        ("error".to_string(), ValueType::String(e.to_string()))
+                    ].into_iter().collect());
+                    
+                    let response_message = NetworkMessage {
+                        source: NodeIdentifier::new(self.network_id.clone(), self.node_id.clone()),
+                        destination: Some(message.source.clone()),
+                        message_type: "Response".to_string(),
+                        payload: error_data,
+                        correlation_id: Some(correlation_id),
+                    };
+                    
+                    // Send error response back
+                    if let Some(transport) = &*self.network_transport.read().await {
+                        transport.send(response_message).await?;
+                    } else {
+                        return Err(anyhow!("Network transport not available"));
+                    }
+                }
+            }
+        } else {
+            return Err(anyhow!("Invalid payload format for network request"));
         }
         
-        // The service is now registered and initialized with its action handlers
-        self.logger.info(format!("Service '{}' initialized successfully", name));
+        Ok(())
+    }
+
+    /// Handle a network response
+    async fn handle_network_response(&self, message: NetworkMessage) -> Result<()> {
+        let correlation_id = message.correlation_id.clone()
+            .ok_or_else(|| anyhow!("Missing correlation_id in network response"))?;
         
+        self.logger.info(format!("Handling network response for request {}", correlation_id));
+        
+        // TODO: Add pending requests tracking and correlation ID lookup
+        // For now, just log that we received a response
+        self.logger.debug(format!("Received response from {}: {:?}", message.source, message.payload));
+        
+        // In a more complete implementation, this would:
+        // 1. Look up the pending request by correlation_id
+        // 2. Resolve the corresponding Future with the response data
+        // 3. Remove the request from the pending requests map
+        
+        Ok(())
+    }
+
+    /// Handle a network event
+    async fn handle_network_event(&self, message: NetworkMessage) -> Result<()> {
+        self.logger.info(format!("Handling network event from {}", message.source));
+        
+        // Extract topic and data from the payload
+        if let ValueType::Map(event_map) = &message.payload {
+            // Extract topic from event payload
+            let topic = match event_map.get("topic") {
+                Some(ValueType::String(t)) => t.clone(),
+                _ => return Err(anyhow!("Missing or invalid 'topic' in network event"))
+            };
+            
+            // Extract event data
+            let data = match event_map.get("data") {
+                Some(d) => d.clone(),
+                None => ValueType::Null
+            };
+            
+            // Process the event locally by publishing to local subscribers
+            self.logger.debug(format!("Publishing network event to local subscribers: {}", topic));
+            
+            // Create a publish options that prevents re-broadcasting
+            let options = PublishOptions {
+                broadcast: false,
+                guaranteed_delivery: false,
+                retention_seconds: None,
+                target: None,
+            };
+            
+            // Publish to local subscribers only (to prevent loops)
+            self.publish_with_options(topic, data, options).await?;
+        } else {
+            return Err(anyhow!("Invalid payload format for network event"));
+        }
+        
+        Ok(())
+    }
+
+    /// Handle a network discovery message
+    async fn handle_network_discovery(&self, message: NetworkMessage) -> Result<()> {
+        self.logger.debug("Received discovery message");
+        
+        // This should be handled by the discovery system
         Ok(())
     }
 }
 
-/// Type alias for the action registrar function
-pub type ActionRegistrar = Arc<dyn Fn(&TopicPath, ActionHandler, Option<ActionMetadata>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
-
-#[async_trait::async_trait]
+#[async_trait]
 impl NodeDelegate for Node {
-    /// Process a service request - NodeDelegate trait implementation
     async fn request(&self, path: String, params: ValueType) -> Result<ServiceResponse> {
-        // Call public method with path String
         self.request(path, params).await
     }
 
-    /// Publish an event - NodeDelegate trait implementation
     async fn publish(&self, topic: String, data: ValueType) -> Result<()> {
-        // Call public method with topic String
         self.publish(topic, data).await
     }
 
-    /// Subscribe to a topic - NodeDelegate trait implementation
     async fn subscribe(
         &self,
         topic: String,
         callback: Box<dyn Fn(Arc<EventContext>, ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
     ) -> Result<String> {
-        // Call public method with topic String
-        self.subscribe(topic, callback).await
+        // Create an Arc around the callback so we can pass ownership to the closure
+        let callback_arc = Arc::new(callback);
+        
+        // Pass a new closure that captures Arc<callback>
+        self.subscribe(topic, move |ctx, data| {
+            let cb = Arc::clone(&callback_arc);
+            Box::pin(async move {
+                (*cb)(ctx, data).await
+            })
+        }).await
     }
 
-    /// Subscribe to a topic with options - NodeDelegate trait implementation
     async fn subscribe_with_options(
         &self,
         topic: String,
         callback: Box<dyn Fn(Arc<EventContext>, ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
         options: SubscriptionOptions,
     ) -> Result<String> {
-        // Call public method with topic String
-        self.subscribe_with_options(topic, callback, options).await
+        // Create an Arc around the callback so we can pass ownership to the closure
+        let callback_arc = Arc::new(callback);
+        
+        // Pass a new closure that captures Arc<callback>
+        self.subscribe_with_options(topic, move |ctx, data| {
+            let cb = Arc::clone(&callback_arc);
+            Box::pin(async move {
+                (*cb)(ctx, data).await
+            })
+        }, options).await
     }
 
-    /// Unsubscribe from a topic - NodeDelegate trait implementation
     async fn unsubscribe(&self, topic: String, subscription_id: Option<&str>) -> Result<()> {
-        // Call public method with topic String
-        self.unsubscribe(topic, subscription_id).await
+        // Adapt to our API
+        if let Some(id) = subscription_id {
+            self.unsubscribe(id.to_string()).await
+        } else {
+            Err(anyhow!("Subscription ID is required"))
+        }
     }
 
-    /// List all services - NodeDelegate trait implementation
     fn list_services(&self) -> Vec<String> {
-        // Return a simple snapshot of services
-        self.services.try_read()
-            .map(|services| services.keys().cloned().collect::<Vec<String>>())
-            .unwrap_or_default()
+        self.list_services_sync()
     }
-
-    /// Register an action handler - NodeDelegate trait implementation
+    
     async fn register_action_handler(&self, topic_path: &TopicPath, handler: ActionHandler, metadata: Option<ActionMetadata>) -> Result<()> {
-        // Register through the service registry
         self.service_registry.register_action_handler(topic_path, handler, metadata).await
     }
 }
 
-#[async_trait::async_trait]
+#[async_trait]
 impl RegistryDelegate for Node {
-    /// Get all service states
     async fn get_all_service_states(&self) -> HashMap<String, ServiceState> {
-        let states = self.service_states.read().await;
-        states.clone()
+        let mut states = HashMap::new();
+        let services = self.services.read().await;
+        for (path, service) in services.iter() {
+            // Instead of calling a state() method, we'll make an assumption that 
+            // by default services are in the Initialized state
+            states.insert(path.clone(), ServiceState::Initialized);
+        }
+        states
     }
     
-    /// Get metadata for a specific service
     async fn get_service_metadata(&self, service_path: &str) -> Option<CompleteServiceMetadata> {
-        let metadata = self.service_metadata.read().await;
-        metadata.get(service_path).cloned()
+        let services = self.services.read().await;
+        services.get(service_path).map(|service| {
+            // Create a minimal CompleteServiceMetadata
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+                
+            CompleteServiceMetadata {
+                name: service.name().to_string(),
+                path: service_path.to_string(),
+                current_state: ServiceState::Initialized, // Default state
+                version: service.version().to_string(),
+                description: service.description().to_string(),
+                registered_actions: HashMap::new(),
+                registered_events: HashMap::new(),
+                registration_time: now,
+                last_start_time: None,
+            }
+        })
     }
     
-    /// Get metadata for all registered services in a single call
     async fn get_all_service_metadata(&self) -> HashMap<String, CompleteServiceMetadata> {
-        let metadata = self.service_metadata.read().await;
-        metadata.clone()
+        let mut metadata = HashMap::new();
+        let services = self.services.read().await;
+        for (path, service) in services.iter() {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+                
+            metadata.insert(path.clone(), CompleteServiceMetadata {
+                name: service.name().to_string(),
+                path: path.clone(),
+                current_state: ServiceState::Initialized, // Default state
+                version: service.version().to_string(),
+                description: service.description().to_string(),
+                registered_actions: HashMap::new(),
+                registered_events: HashMap::new(),
+                registration_time: now,
+                last_start_time: None,
+            });
+        }
+        metadata
     }
     
-    /// List all services
     fn list_services(&self) -> Vec<String> {
-        self.services.try_read()
-            .map(|services| services.keys().cloned().collect::<Vec<String>>())
-            .unwrap_or_default()
+        self.list_services_sync()
+    }
+}
+
+/// Implementation of discovery listener that forwards node information to Node
+struct NodeDiscoveryListener {
+    logger: Logger,
+    transport: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>,
+}
+
+impl NodeDiscoveryListener {
+    fn new(logger: Logger, transport: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>) -> Self {
+        Self { logger, transport }
+    }
+    
+    async fn handle_discovered_node(&self, node_info: NodeInfo) -> Result<()> {
+        self.logger.info(format!("Discovery listener found node: {}", node_info.identifier));
+        
+        // Attempt to connect via the transport
+        if let Some(transport) = &*self.transport.read().await {
+            transport.connect(&node_info).await?;
+            self.logger.info(format!("Connected to discovered node: {}", node_info.identifier));
+        }
+        
+        Ok(())
     }
 } 
