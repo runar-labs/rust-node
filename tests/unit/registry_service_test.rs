@@ -3,12 +3,10 @@
 // INTENTION: Verify that the Registry Service correctly provides
 // information about registered services through standard requests.
 
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
 use runar_common::types::ValueType;
 use runar_node::node::{Node, NodeConfig};
-use runar_node::services::abstract_service::ServiceState;
 
 // Import the test fixtures
 use crate::fixtures::math_service::MathService;

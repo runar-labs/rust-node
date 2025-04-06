@@ -15,7 +15,7 @@
 // The routing system is a foundational layer that enables the service architecture
 // to function in a decentralized, loosely-coupled manner.
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 
 /// Type of a path, indicating what kind of resource is being addressed
 ///

@@ -16,16 +16,12 @@
 // how all services behave and interact with the system.
 
 use anyhow::Result;
-use async_trait::async_trait;
 use std::fmt;
-use std::sync::Arc;
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
-use crate::services::{
-    LifecycleContext, RequestContext, ServiceFuture, ServiceResponse,
-};
+use crate::services::LifecycleContext;
 use runar_common::types::ValueType;
 
 /// Represents a service's current state

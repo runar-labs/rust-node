@@ -10,13 +10,11 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use uuid::Uuid;
 
 use crate::routing::TopicPath;
 use crate::services::{
     ActionHandler, EventContext, LifecycleContext, NodeDelegate, PublishOptions,
-    RequestContext, ServiceRequest, ServiceResponse, SubscriptionOptions, RegistryDelegate,
-    ActionRegistrationOptions, EventRegistrationOptions
+    RequestContext, ServiceRequest, ServiceResponse, SubscriptionOptions, RegistryDelegate
 };
 use crate::services::abstract_service::{ActionMetadata, AbstractService, CompleteServiceMetadata, ServiceState};
 use crate::services::registry_info::RegistryService;

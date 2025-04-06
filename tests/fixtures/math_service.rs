@@ -8,15 +8,12 @@
 // Any changes to the service interface or semantics may break numerous tests across the codebase.
 
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicU8, Ordering};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use serde_json::json;
 
 use runar_common::types::ValueType;
-use runar_common::logging::{Component, Logger};
-use runar_node::services::abstract_service::{AbstractService, ServiceState};
-use runar_node::services::{RequestContext, ServiceRequest, ServiceResponse, LifecycleContext, ArcContextLogging, ActionRegistrationOptions};
+use runar_node::services::abstract_service::AbstractService;
+use runar_node::services::{RequestContext, ServiceResponse, LifecycleContext, ArcContextLogging};
 
 /// A simple math service for testing
 /// 

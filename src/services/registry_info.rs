@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::services::abstract_service::{AbstractService, CompleteServiceMetadata, ServiceState};
-use crate::services::{ActionHandler, LifecycleContext, RequestContext, ServiceResponse, RegistryDelegate};
+use crate::services::abstract_service::{AbstractService, ServiceState};
+use crate::services::{LifecycleContext, RequestContext, ServiceResponse, RegistryDelegate};
 use runar_common::logging::Logger;
 use runar_common::types::ValueType;
 

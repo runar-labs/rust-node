@@ -1,4 +1,3 @@
-use anyhow::Result;
 use runar_node::routing::TopicPath;
 
 /// Comprehensive test suite for TopicPath

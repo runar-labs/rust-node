@@ -18,22 +18,20 @@
 // It should NOT handle service discovery or lifecycle - that's the responsibility of the Node.
 // Request routing and handling is also the Node's responsibility.
 
-use anyhow::{anyhow, Result};
-use async_trait::async_trait;
-use log::{debug, error, info, warn};
-use std::collections::{HashMap, HashSet};
+use anyhow::Result;
+use log::debug;
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use runar_common::utils::logging::{debug_log, info_log, Component};
 use runar_common::logging::Logger;
 use runar_common::types::ValueType;
 use crate::routing::TopicPath;
-use crate::services::abstract_service::{CompleteServiceMetadata, ServiceState, ActionMetadata, AbstractService};
+use crate::services::abstract_service::ActionMetadata;
 use crate::services::{
-    NodeRequestHandler, RequestContext, ServiceRequest, ServiceResponse, SubscriptionOptions, 
-    ActionHandler, LifecycleContext, ArcContextLogging, EventContext
+    NodeRequestHandler, ServiceResponse, SubscriptionOptions, 
+    ActionHandler, ArcContextLogging, EventContext
 };
 
 /// Type definition for event callbacks
