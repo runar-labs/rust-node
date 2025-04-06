@@ -81,17 +81,6 @@ impl LifecycleContext {
         }
     }
     
-    /// Legacy constructor for backward compatibility
-    pub fn new_from_path(network_id: &str, service_path: &str, logger: Logger) -> Self {
-        Self {
-            network_id: network_id.to_string(),
-            service_path: service_path.to_string(),
-            config: None,
-            logger,
-            node_delegate: None,
-        }
-    }
-    
     /// Add configuration to a LifecycleContext
     ///
     /// Use builder-style methods instead of specialized constructors.
@@ -107,23 +96,6 @@ impl LifecycleContext {
     pub fn with_node_delegate(mut self, delegate: Arc<dyn NodeDelegate + Send + Sync>) -> Self {
         self.node_delegate = Some(delegate);
         self
-    }
-    
-    /// Create a new LifecycleContext with a provided node delegate
-    ///
-    /// INTENTION: Create a fully functional LifecycleContext with all needed components
-    /// for proper service initialization, including the delegate that allows services
-    /// to register handlers and interact with the node.
-    /// 
-    /// This is kept for backward compatibility until all code is migrated to the builder pattern.
-    pub fn new_with_delegate(
-        network_id: &str,
-        service_path: &str,
-        logger: Logger,
-        delegate: Arc<dyn NodeDelegate + Send + Sync>
-    ) -> Self {
-        let topic_path = TopicPath::new(service_path, network_id).expect("Invalid service path");
-        Self::new(&topic_path, logger).with_node_delegate(delegate)
     }
 
     /// Helper method to log debug level message
@@ -373,11 +345,6 @@ impl LifecycleContext {
         
         // Register the action with the provided template name
         delegate.register_action_handler(&topic_path, action_handler, None).await
-    }
-    
-    /// Helper method to format a service-specific path
-    fn format_path(&self, path: &str) -> String {
-        format!("{}/{}", self.service_path, path)
     }
 }
 

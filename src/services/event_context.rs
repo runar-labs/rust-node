@@ -87,23 +87,6 @@ impl EventContext {
         }
     }
     
-    /// Legacy constructor for backward compatibility
-    pub fn new_from_path(network_id: &str, topic: &str, service_path: &str, logger: Logger) -> Self {
-        // Create a path string combining service path and topic
-        let path_string = format!("{}/{}", service_path, topic);
-        
-        // Create a TopicPath
-        let topic_path = TopicPath::new(&path_string, network_id)
-            .expect("Invalid path format");
-            
-        Self {
-            topic_path,
-            logger,
-            node_delegate: None,
-            delivery_options: None,
-        }
-    }
-    
     /// Add node delegate to an EventContext
     ///
     /// Used to make service requests from within an event handler.
@@ -145,9 +128,33 @@ impl EventContext {
     /// INTENTION: Allow event handlers to publish their own events.
     /// This method provides a convenient way to publish events from within
     /// an event handler.
-    pub async fn publish(&self, topic: String, data: ValueType) -> Result<()> {
+    ///
+    /// Handles different path formats:
+    /// - Full path with network ID: "network:service/topic" (used as is)
+    /// - Path with service: "service/topic" (network ID added)
+    /// - Simple topic: "topic" (both service path and network ID added)
+    pub async fn publish(&self, topic: impl Into<String>, data: ValueType) -> Result<()> {
         if let Some(delegate) = &self.node_delegate {
-            delegate.publish(topic, data).await
+            let topic_string = topic.into();
+            
+            // Process the topic based on its format
+            let full_topic = if topic_string.contains(':') {
+                // Already has network ID, use as is
+                topic_string
+            } else if topic_string.contains('/') {
+                // Has service/topic but no network ID
+                format!("{}:{}", self.topic_path.network_id(), topic_string)
+            } else {
+                // Simple topic name - add service path and network ID
+                format!("{}:{}/{}", 
+                    self.topic_path.network_id(), 
+                    self.topic_path.service_path(), 
+                    topic_string
+                )
+            };
+            
+            self.logger.debug(format!("Publishing to processed topic: {}", full_topic));
+            delegate.publish(full_topic, data).await
         } else {
             Err(anyhow!("No node delegate available in this context"))
         }
@@ -158,9 +165,33 @@ impl EventContext {
     /// INTENTION: Allow event handlers to make requests to other services.
     /// This method provides a convenient way to call service actions from
     /// within an event handler.
-    pub async fn request(&self, path: String, params: ValueType) -> Result<ServiceResponse> {
+    ///
+    /// Handles different path formats:
+    /// - Full path with network ID: "network:service/action" (used as is)
+    /// - Path with service: "service/action" (network ID added)
+    /// - Simple action: "action" (both service path and network ID added - calls own service)
+    pub async fn request(&self, path: impl Into<String>, params: ValueType) -> Result<ServiceResponse> {
         if let Some(delegate) = &self.node_delegate {
-            delegate.request(path, params).await
+            let path_string = path.into();
+            
+            // Process the path based on its format
+            let full_path = if path_string.contains(':') {
+                // Already has network ID, use as is
+                path_string
+            } else if path_string.contains('/') {
+                // Has service/action but no network ID
+                format!("{}:{}", self.topic_path.network_id(), path_string)
+            } else {
+                // Simple action name - add both service path and network ID
+                format!("{}:{}/{}", 
+                    self.topic_path.network_id(), 
+                    self.topic_path.service_path(), 
+                    path_string
+                )
+            };
+            
+            self.logger.debug(format!("Making request to processed path: {}", full_path));
+            delegate.request(full_path, params).await
         } else {
             Err(anyhow!("No node delegate available in this context"))
         }
