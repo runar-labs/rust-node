@@ -29,6 +29,7 @@ pub mod abstract_service;
 pub mod registry_info;
 pub mod request_context;
 pub mod event_context;
+pub mod remote_service;
 
 use runar_common::types::ValueType;
 use runar_common::logging::{Component, LoggingContext, Logger};
@@ -36,6 +37,7 @@ use crate::services::abstract_service::{ActionMetadata, EventMetadata, CompleteS
 // Re-export the context types from their dedicated modules
 pub use crate::services::request_context::RequestContext;
 pub use crate::services::event_context::EventContext;
+pub use crate::services::remote_service::RemoteService;
 
 /// Handler for a service action
 ///
@@ -116,11 +118,10 @@ impl LifecycleContext {
         self.logger.error(message);
     }
 
-    /// Register an action handler for a specific action
+    /// Register an action handler
     ///
-    /// INTENTION: Allow a service to register a handler function for one of its actions.
-    /// This is typically done during service initialization to set up handlers
-    /// for all supported actions.
+    /// INTENTION: Allow a service to register a handler function for a specific action.
+    /// This is the main way for services to expose functionality to the Node.
     ///
     /// Example:
     /// ```
@@ -155,8 +156,17 @@ impl LifecycleContext {
         
         // Create a topic path for this action
         let action_path = format!("{}/{}", self.service_path, action_name_string);
-        let topic_path = TopicPath::new(&action_path, &self.network_id)
+        
+        // Debug logs for action registration
+        self.logger.debug(format!("REGISTER_ACTION: Building TopicPath for action_name={}, service_path={}, action_path={}",
+                                  action_name_string, self.service_path, action_path));
+        
+        let topic_path: TopicPath = TopicPath::new(&action_path, &self.network_id)
             .map_err(|e| anyhow!("Invalid action path: {}", e))?;
+        
+        // More detailed debug after TopicPath creation
+        self.logger.debug(format!("REGISTER_ACTION: Created TopicPath with topic_path={}, service_path={}, action_path={}, segments={:?}",
+                                  topic_path.as_str(), topic_path.service_path(), topic_path.action_path(), topic_path.get_segments()));
         
         // Call the delegate with no metadata
         delegate.register_action_handler(&topic_path, handler, None).await
@@ -263,6 +273,8 @@ impl LifecycleContext {
         Ok(())
     }
     
+
+    //TODO: remove this.. the  register_action already handle patthern. no need for thsi separate mnethod..
     /// Register an action handler with template pattern matching
     ///
     /// INTENTION: Allow services to register handlers for path templates with named parameters,

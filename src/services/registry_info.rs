@@ -67,6 +67,8 @@ impl RegistryService {
     /// Register the list services action
     async fn register_list_services_action(&self, context: &LifecycleContext) -> Result<()> {
         let self_clone = self.clone();
+        // Add debug to see what is registered
+        context.logger.debug(format!("Registering list_services handler with path: services/list"));
         context.register_action(
             "services/list", 
             Arc::new(move |params, ctx| {
@@ -83,6 +85,9 @@ impl RegistryService {
     /// Register the service info action
     async fn register_service_info_action(&self, context: &LifecycleContext) -> Result<()> {
         let self_clone = self.clone();
+        
+        // Add debug to see what is registered
+        context.logger.debug(format!("Registering service_info handler with path: services/{{service_path}}"));
         
         // Use register_action directly since we don't need special options
         context.register_action(
@@ -112,8 +117,10 @@ impl RegistryService {
     /// Register the service state action
     async fn register_service_state_action(&self, context: &LifecycleContext) -> Result<()> {
         let self_clone = self.clone();
+
+        // Add debug to see what is registered
+        context.logger.debug(format!("Registering service_state handler with path: services/{{service_path}}/state"));
         
-        // Use register_action directly since we don't need special options
         context.register_action(
             "services/{service_path}/state", 
             Arc::new(move |params, ctx| {

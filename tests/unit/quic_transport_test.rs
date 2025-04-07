@@ -92,13 +92,15 @@ mod tests {
         // Connect transport1 to transport2
         transport1.connect(&node_info2).await?;
         
-        // Create a test message
+        // Set up a test message
         let test_message = NetworkMessage {
-            source: NodeIdentifier::new("test-network".to_string(), "node1".to_string()),
-            destination: Some(NodeIdentifier::new("test-network".to_string(), "node2".to_string())),
+            source: NodeIdentifier::new("test".to_string(), "node1".to_string()),
+            destination: Some(NodeIdentifier::new("test".to_string(), "node2".to_string())),
             message_type: "Request".to_string(),
-            payload: ValueType::String("test payload".to_string()),
             correlation_id: Some("test-correlation-id".to_string()),
+            topic: "test/service/action".to_string(),
+            params: ValueType::String("test-params".to_string()),
+            payload: ValueType::Null,
         };
         
         // Send message from transport1 to transport2

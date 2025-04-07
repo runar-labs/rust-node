@@ -95,6 +95,9 @@ pub struct Node {
     /// All registered services
     services: Arc<RwLock<HashMap<String, Arc<dyn AbstractService>>>>,
     
+    /// Service states
+    service_states: Arc<RwLock<HashMap<String, ServiceState>>>,
+    
     /// Network transport for communication with other nodes
     network_transport: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>,
 
@@ -133,6 +136,7 @@ impl Node {
             logger: logger.clone(),
             service_registry,
             services: Arc::new(RwLock::new(HashMap::new())),
+            service_states: Arc::new(RwLock::new(HashMap::new())),
             network_transport: Arc::new(RwLock::new(None)),
             node_discovery: Arc::new(RwLock::new(None)),
             discovered_nodes: Arc::new(RwLock::new(HashMap::new())),
@@ -164,6 +168,9 @@ impl Node {
         
         // Store the service instance
         self.services.write().await.insert(service_path.clone(), Arc::new(service));
+        
+        // Set the initial state to Created
+        self.service_states.write().await.insert(service_path.clone(), ServiceState::Created);
         
         Ok(())
     }
@@ -198,9 +205,13 @@ impl Node {
             match service.init(context).await {
                 Ok(_) => {
                     self.logger.info(format!("Service '{}' initialized successfully", service_name));
+                    // Update state to Initialized
+                    self.service_states.write().await.insert(service_name.clone(), ServiceState::Initialized);
                 },
                 Err(e) => {
                     self.logger.error(format!("Failed to initialize service '{}': {}", service_name, e));
+                    // Update state to Error
+                    self.service_states.write().await.insert(service_name.clone(), ServiceState::Error);
                     return Err(anyhow!("Failed to initialize service '{}': {}", service_name, e));
                 }
             }
@@ -217,9 +228,13 @@ impl Node {
             match service.start(context).await {
                 Ok(_) => {
                     self.logger.info(format!("Service '{}' started successfully", service_name));
+                    // Update state to Running
+                    self.service_states.write().await.insert(service_name.clone(), ServiceState::Running);
                 },
                 Err(e) => {
                     self.logger.error(format!("Failed to start service '{}': {}", service_name, e));
+                    // Update state to Error
+                    self.service_states.write().await.insert(service_name.clone(), ServiceState::Error);
                     return Err(anyhow!("Failed to start service '{}': {}", service_name, e));
                 }
             }
@@ -262,9 +277,13 @@ impl Node {
             match service.stop(context).await {
                 Ok(_) => {
                     self.logger.info(format!("Service '{}' stopped successfully", service_name));
+                    // Update state to Stopped
+                    self.service_states.write().await.insert(service_name.clone(), ServiceState::Stopped);
                 },
                 Err(e) => {
                     self.logger.error(format!("Error stopping service '{}': {}", service_name, e));
+                    // Update state to Error
+                    self.service_states.write().await.insert(service_name.clone(), ServiceState::Error);
                     // Continue stopping other services even if one fails
                 }
             }
@@ -644,72 +663,59 @@ impl Node {
     async fn handle_network_request(&self, message: NetworkMessage) -> Result<()> {
         self.logger.info(format!("Handling network request from {}", message.source));
         
-        // Extract topic and params from the payload
-        if let ValueType::Map(params_map) = &message.payload {
-            // Extract required fields from the request payload
-            let topic = match params_map.get("topic") {
-                Some(ValueType::String(t)) => t.clone(),
-                _ => return Err(anyhow!("Missing or invalid 'topic' in network request"))
-            };
-            
-            let params = match params_map.get("params") {
-                Some(p) => p.clone(),
-                None => ValueType::Null
-            };
-            
-            let correlation_id = message.correlation_id.clone()
-                .ok_or_else(|| anyhow!("Missing correlation_id in network request"))?;
-            
-            // Process the request locally
-            self.logger.debug(format!("Processing network request for topic: {}", topic));
-            match self.request(topic, params).await {
-                Ok(response) => {
-                    // Create response message with proper conversion to ValueType
-                    let response_payload = ValueType::Map(vec![
-                        ("success".to_string(), ValueType::Bool(true)),
-                        ("data".to_string(), response.data.unwrap_or(ValueType::Null)),
-                    ].into_iter().collect());
-                    
-                    let response_message = NetworkMessage {
-                        source: NodeIdentifier::new(self.network_id.clone(), self.node_id.clone()),
-                        destination: Some(message.source.clone()),
-                        message_type: "Response".to_string(),
-                        payload: response_payload,
-                        correlation_id: Some(correlation_id),
-                    };
-                    
-                    // Send response back
-                    if let Some(transport) = &*self.network_transport.read().await {
-                        transport.send(response_message).await?;
-                    } else {
-                        return Err(anyhow!("Network transport not available"));
-                    }
-                },
-                Err(e) => {
-                    // Create error response
-                    let error_data = ValueType::Map(vec![
-                        ("success".to_string(), ValueType::Bool(false)),
-                        ("error".to_string(), ValueType::String(e.to_string()))
-                    ].into_iter().collect());
-                    
-                    let response_message = NetworkMessage {
-                        source: NodeIdentifier::new(self.network_id.clone(), self.node_id.clone()),
-                        destination: Some(message.source.clone()),
-                        message_type: "Response".to_string(),
-                        payload: error_data,
-                        correlation_id: Some(correlation_id),
-                    };
-                    
-                    // Send error response back
-                    if let Some(transport) = &*self.network_transport.read().await {
-                        transport.send(response_message).await?;
-                    } else {
-                        return Err(anyhow!("Network transport not available"));
-                    }
+        // Extract topic and params directly from the message
+        let topic = message.topic.clone();
+        let params = message.params.clone();
+        
+        // Process the request locally
+        self.logger.debug(format!("Processing network request for topic: {}", topic));
+        match self.request(topic.clone(), params).await {
+            Ok(response) => {
+                // Create response message with proper conversion to ValueType
+                let response_payload = ValueType::Map(vec![
+                    ("success".to_string(), ValueType::Bool(true)),
+                    ("data".to_string(), response.data.unwrap_or(ValueType::Null)),
+                ].into_iter().collect());
+                
+                let response_message = NetworkMessage {
+                    source: NodeIdentifier::new(self.network_id.clone(), self.node_id.clone()),
+                    destination: Some(message.source.clone()),
+                    message_type: "Response".to_string(),
+                    correlation_id: message.correlation_id.clone(),
+                    topic: topic.clone(),
+                    params: ValueType::Null,
+                    payload: response_payload,
+                };
+                
+                // Send response back
+                if let Some(transport) = &*self.network_transport.read().await {
+                    transport.send(response_message).await?;
+                } else {
+                    return Err(anyhow!("Network transport not available"));
+                }
+            },
+            Err(e) => {
+                // Create error response
+                let response_message = NetworkMessage {
+                    source: NodeIdentifier::new(self.network_id.clone(), self.node_id.clone()),
+                    destination: Some(message.source.clone()),
+                    message_type: "Response".to_string(),
+                    correlation_id: message.correlation_id.clone(), 
+                    topic: topic.clone(),
+                    params: ValueType::Null,
+                    payload: ValueType::Map(HashMap::from([
+                        ("error".to_string(), ValueType::Bool(true)),
+                        ("message".to_string(), ValueType::String(e.to_string())),
+                    ])),
+                };
+                
+                // Send error response back
+                if let Some(transport) = &*self.network_transport.read().await {
+                    transport.send(response_message).await?;
+                } else {
+                    return Err(anyhow!("Network transport not available"));
                 }
             }
-        } else {
-            return Err(anyhow!("Invalid payload format for network request"));
         }
         
         Ok(())
@@ -738,36 +744,25 @@ impl Node {
     async fn handle_network_event(&self, message: NetworkMessage) -> Result<()> {
         self.logger.info(format!("Handling network event from {}", message.source));
         
-        // Extract topic and data from the payload
-        if let ValueType::Map(event_map) = &message.payload {
-            // Extract topic from event payload
-            let topic = match event_map.get("topic") {
-                Some(ValueType::String(t)) => t.clone(),
-                _ => return Err(anyhow!("Missing or invalid 'topic' in network event"))
-            };
-            
-            // Extract event data
-            let data = match event_map.get("data") {
-                Some(d) => d.clone(),
-                None => ValueType::Null
-            };
-            
-            // Process the event locally by publishing to local subscribers
-            self.logger.debug(format!("Publishing network event to local subscribers: {}", topic));
-            
-            // Create a publish options that prevents re-broadcasting
-            let options = PublishOptions {
-                broadcast: false,
-                guaranteed_delivery: false,
-                retention_seconds: None,
-                target: None,
-            };
-            
-            // Publish to local subscribers only (to prevent loops)
-            self.publish_with_options(topic, data, options).await?;
-        } else {
-            return Err(anyhow!("Invalid payload format for network event"));
-        }
+        // Extract topic directly from the message
+        let topic = message.topic.clone();
+        
+        // Extract event data from params
+        let data = message.params.clone();
+        
+        // Process the event locally by publishing to local subscribers
+        self.logger.debug(format!("Publishing network event to local subscribers: {}", topic));
+        
+        // Create a publish options that prevents re-broadcasting
+        let options = PublishOptions {
+            broadcast: false,
+            guaranteed_delivery: false,
+            retention_seconds: None,
+            target: None,
+        };
+        
+        // Publish to local subscribers only (to prevent loops)
+        self.publish_with_options(topic, data, options).await?;
         
         Ok(())
     }
@@ -847,18 +842,14 @@ impl NodeDelegate for Node {
 #[async_trait]
 impl RegistryDelegate for Node {
     async fn get_all_service_states(&self) -> HashMap<String, ServiceState> {
-        let mut states = HashMap::new();
-        let services = self.services.read().await;
-        for (path, service) in services.iter() {
-            // Instead of calling a state() method, we'll make an assumption that 
-            // by default services are in the Initialized state
-            states.insert(path.clone(), ServiceState::Initialized);
-        }
-        states
+        // Return a clone of the service states map
+        self.service_states.read().await.clone()
     }
     
     async fn get_service_metadata(&self, service_path: &str) -> Option<CompleteServiceMetadata> {
         let services = self.services.read().await;
+        let states = self.service_states.read().await;
+        
         services.get(service_path).map(|service| {
             // Create a minimal CompleteServiceMetadata
             let now = SystemTime::now()
@@ -866,10 +857,12 @@ impl RegistryDelegate for Node {
                 .unwrap_or_default()
                 .as_secs();
                 
+            let state = states.get(service_path).copied().unwrap_or(ServiceState::Created);
+                
             CompleteServiceMetadata {
                 name: service.name().to_string(),
                 path: service_path.to_string(),
-                current_state: ServiceState::Initialized, // Default state
+                current_state: state, // Use tracked state
                 version: service.version().to_string(),
                 description: service.description().to_string(),
                 registered_actions: HashMap::new(),
@@ -883,16 +876,20 @@ impl RegistryDelegate for Node {
     async fn get_all_service_metadata(&self) -> HashMap<String, CompleteServiceMetadata> {
         let mut metadata = HashMap::new();
         let services = self.services.read().await;
+        let states = self.service_states.read().await;
+        
         for (path, service) in services.iter() {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
                 
+            let state = states.get(path).copied().unwrap_or(ServiceState::Created);
+                
             metadata.insert(path.clone(), CompleteServiceMetadata {
                 name: service.name().to_string(),
                 path: path.clone(),
-                current_state: ServiceState::Initialized, // Default state
+                current_state: state, // Use tracked state
                 version: service.version().to_string(),
                 description: service.description().to_string(),
                 registered_actions: HashMap::new(),

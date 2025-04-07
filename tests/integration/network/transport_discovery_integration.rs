@@ -160,12 +160,14 @@ impl TestNode {
             source: self.node_id.clone(),
             destination: Some(destination.clone()),
             message_type: msg_type.to_string(),
-            payload,
             correlation_id: Some(format!("test-{}", rand::random::<u32>())),
+            topic: "test/message".to_string(),
+            params: payload,
+            payload: ValueType::Null,
         };
         
-        self.transport.send(message).await?;
-        Ok(())
+        println!("Sending message: {:?}", message);
+        self.transport.send(message).await
     }
     
     /// Discover nodes in the network
@@ -226,6 +228,8 @@ async fn test_two_nodes_connect_exchange_messages() -> Result<()> {
         message_type: "dummy".to_string(),
         payload: ValueType::Null,
         correlation_id: None,
+        topic: "system/dummy".to_string(),
+        params: ValueType::Null,
     });
     
     let _ = node2.message_tx.send(NetworkMessage {
@@ -234,6 +238,8 @@ async fn test_two_nodes_connect_exchange_messages() -> Result<()> {
         message_type: "dummy".to_string(),
         payload: ValueType::Null,
         correlation_id: None,
+        topic: "system/dummy".to_string(),
+        params: ValueType::Null,
     });
     
     println!("Connecting node1 to node2...");
@@ -263,10 +269,10 @@ async fn test_two_nodes_connect_exchange_messages() -> Result<()> {
         println!("Node2 received message: {:?}", msg);
         assert_eq!(msg.source.node_id, "node1");
         assert_eq!(msg.message_type, "TestMessage");
-        if let ValueType::String(payload) = msg.payload {
+        if let ValueType::String(payload) = msg.params {
             assert_eq!(payload, "Hello from node1");
         } else {
-            panic!("Expected String payload");
+            panic!("Expected String payload in params field");
         }
     }
     
@@ -301,6 +307,9 @@ async fn test_two_nodes_connect_exchange_messages() -> Result<()> {
             if let Some(msg) = response {
                 assert_eq!(msg.source.node_id, "node2");
                 assert_eq!(msg.message_type, "Response");
+                if let ValueType::String(payload) = &msg.params {
+                    assert_eq!(payload, "Hello back from node2");
+                }
             }
             
             break;

@@ -164,6 +164,55 @@ impl PartialEq for TopicPath {
 impl Eq for TopicPath {}
 
 impl TopicPath {
+    /// Creates a new TopicPath for an action based on this service path
+    ///
+    /// INTENTION: Provide a simple way to create an action path from a service path,
+    /// ensuring consistent formatting and proper path type.
+    ///
+    /// Example:
+    /// ```
+    /// let service_path = TopicPath::new("main:auth", "default").expect("Valid path");
+    /// let action_path = service_path.new_action_topic("login").expect("Valid action path");
+    ///
+    /// assert_eq!(action_path.action_path(), "auth/login");
+    /// ```
+    pub fn new_action_topic(&self, action_name: &str) -> Result<Self, String> {
+        // Combine full service path with action name
+        // If this is a nested path with multiple segments, we need to use all segments
+        let service_path = if self.segments.len() > 1 {
+            // Use the existing path (all segments except the last one if it's not just a service path)
+            self.action_path()
+        } else {
+            // For simple service paths with just one segment
+            self.service_path.clone()
+        };
+        
+        // Create the full path with the action name
+        let full_path = format!("{}:{}/{}", self.network_id, service_path, action_name);
+        TopicPath::new(full_path, &self.network_id)
+    }
+    
+    /// Creates a new TopicPath for an event based on this service path
+    ///
+    /// INTENTION: Provide a simple way to create an event path from a service path,
+    /// ensuring consistent formatting and proper path type.
+    ///
+    /// Example:
+    /// ```
+    /// let service_path = TopicPath::new("main:auth", "default").expect("Valid path");
+    /// let event_path = service_path.new_event_topic("user_logged_in").expect("Valid event path");
+    ///
+    /// assert_eq!(event_path.action_path(), "auth/user_logged_in");
+    /// ```
+    pub fn new_event_topic(&self, event_name: &str) -> Result<Self, String> {
+        // For now, the format is the same as action_topic, but we'll mark it as an event
+        let path = self.new_action_topic(event_name)?;
+        
+        // In the future, we might want to distinguish events from actions in the path format
+        // For now, we'll just create a path with the event name
+        Ok(path)
+    }
+
     /// Create a new TopicPath from a string
     ///
     /// INTENTION: Validate and construct a TopicPath from a string input,
@@ -181,7 +230,7 @@ impl TopicPath {
     /// let path = TopicPath::new("main:auth/login", "default").expect("Valid path");
     /// assert_eq!(path.network_id(), "main");
     /// assert_eq!(path.service_path(), "auth");
-    /// assert_eq!(path.get_last_segment(), "login");
+    /// assert_eq!(path.action_path(), "auth/login");
     ///
     /// // With wildcards
     /// let pattern = TopicPath::new("main:services/*/state", "default").expect("Valid pattern");
@@ -315,33 +364,6 @@ impl TopicPath {
             .join("/")
     }
     
-    /// Get the last segment of the path
-    ///
-    /// INTENTION: Extract just the last segment from the path,
-    /// which represents the action or event name. This is helpful
-    /// for identifying what operation is being requested.
-    ///
-    /// Example:
-    /// ```
-    /// use runar_node::routing::TopicPath;
-    ///
-    /// let path = TopicPath::new("main:auth/login", "default").expect("Valid path");
-    /// assert_eq!(path.get_last_segment(), "login");
-    /// ```
-    pub fn get_last_segment(&self) -> String {
-        if self.segments.len() <= 1 {
-            // If there's only one segment, return the service path
-            return self.service_path.clone();
-        }
-        
-        // Otherwise, get the last segment
-        match &self.segments[self.segments.len() - 1] {
-            PathSegment::Literal(s) => s.clone(),
-            PathSegment::SingleWildcard => "*".to_string(),
-            PathSegment::MultiWildcard => ">".to_string(),
-        }
-    }
-
     /// Get the path as a string
     ///
     /// INTENTION: Access the raw path string for this TopicPath,

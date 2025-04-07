@@ -91,10 +91,25 @@ pub enum NetworkMessageType {
 /// Represents a message exchanged between nodes
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NetworkMessage {
+    /// Source node identifier
     pub source: NodeIdentifier,
+    
+    /// Destination node identifier (None for broadcasts)
     pub destination: Option<NodeIdentifier>,
+    
+    /// Message type (Request, Response, Event, etc.)
     pub message_type: String,
+    
+    /// Topic path for the message (service/action or event paths)
+    pub topic: String,
+    
+    /// Parameters for the action or event
+    pub params: ValueType,
+    
+    /// Additional payload data (if needed)
     pub payload: ValueType,
+    
+    /// Correlation ID for request-response matching
     pub correlation_id: Option<String>,
 }
 

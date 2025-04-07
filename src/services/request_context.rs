@@ -87,8 +87,10 @@ impl RequestContext {
     /// This is the primary constructor that takes the minimum required parameters.
     pub fn new(topic_path: &TopicPath, logger: Logger) -> Self {
         // Add action path to logger if available from topic_path
-        let action_logger = if !topic_path.get_last_segment().is_empty() {
-            logger.with_action_path(format!("{}/{}", topic_path.service_path(), topic_path.get_last_segment()))
+        let action_path = topic_path.action_path();
+        let action_logger = if !action_path.is_empty() {
+            // If there's an action path, add it to the logger
+            logger.with_action_path(action_path)
         } else {
             logger
         };

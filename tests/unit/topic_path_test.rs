@@ -15,7 +15,8 @@ mod topic_path_tests {
         let path = TopicPath::new("main:auth/login", "default").expect("Valid path");
         assert_eq!(path.network_id(), "main");
         assert_eq!(path.service_path(), "auth");
-        assert_eq!(path.get_last_segment(), "login");
+        let segments = path.get_segments();
+        assert_eq!(segments.last().unwrap(), "login");
         assert_eq!(path.as_str(), "main:auth/login");
         assert_eq!(path.action_path(), "auth/login");
 
@@ -23,7 +24,8 @@ mod topic_path_tests {
         let path = TopicPath::new("auth/login", "default").expect("Valid path");
         assert_eq!(path.network_id(), "default");
         assert_eq!(path.service_path(), "auth");
-        assert_eq!(path.get_last_segment(), "login");
+        let segments = path.get_segments();
+        assert_eq!(segments.last().unwrap(), "login");
         assert_eq!(path.as_str(), "default:auth/login");
         assert_eq!(path.action_path(), "auth/login");
 
@@ -151,29 +153,13 @@ mod topic_path_tests {
         assert_eq!(segments3, vec!["auth"]);
     }
 
-    /// Test TopicPath::get_last_segment() for extracting the action or event
-    #[test]
-    fn test_get_last_segment() {
-        // Simple path
-        let path1 = TopicPath::new("main:auth/login", "default").expect("Valid path");
-        assert_eq!(path1.get_last_segment(), "login");
-        
-        // Complex path with multiple segments
-        let path2 = TopicPath::new("main:auth/users/profile/edit", "default").expect("Valid path");
-        assert_eq!(path2.get_last_segment(), "edit");
-        
-        // Path with service name only
-        let path3 = TopicPath::new("main:auth", "default").expect("Valid path");
-        assert_eq!(path3.get_last_segment(), "auth");
-    }
-
     /// Test TopicPath::test_default() helper for tests
     #[test]
     fn test_default_helper() {
         let path = TopicPath::test_default("auth/login");
         assert_eq!(path.network_id(), "default");
         assert_eq!(path.service_path(), "auth");
-        assert_eq!(path.get_last_segment(), "login");
+        assert_eq!(path.action_path(), "auth/login");
         assert_eq!(path.as_str(), "default:auth/login");
     }
 
@@ -190,9 +176,6 @@ mod topic_path_tests {
         assert_eq!(segments.len(), 2);
         assert_eq!(segments[0], "service");
         assert_eq!(segments[1], "action");
-        
-        // The last segment should be the action
-        assert_eq!(path.get_last_segment(), "action");
         
         // The action_path should include everything after the network ID
         assert_eq!(path.action_path(), "service/action");
@@ -212,8 +195,9 @@ mod topic_path_tests {
         
         // Long paths with many segments
         let path3 = TopicPath::new("main:service/a/b/c/d/e/f", "default").expect("Valid path");
-        assert_eq!(path3.get_last_segment(), "f");
-        assert_eq!(path3.get_segments().len(), 7);
+        let segments3 = path3.get_segments();
+        assert_eq!(segments3.len(), 7);
+        assert_eq!(path3.action_path(), "service/a/b/c/d/e/f");
     }
 
     /// Test service paths with embedded slashes
@@ -270,5 +254,115 @@ mod topic_path_tests {
         // Extract parameters from the path
         let params = service_state_path.extract_params(template).expect("Template should match");
         assert_eq!(params.get("service_path"), Some(&"math".to_string()));
+    }
+
+    #[test]
+    fn test_new_action_topic() {
+        // Create a service path
+        let service_path = TopicPath::new("main:auth", "default").expect("Valid path");
+        
+        // Create an action path
+        let action_path = service_path.new_action_topic("login").expect("Valid action path");
+        
+        // Verify the path components
+        assert_eq!(action_path.network_id(), "main");
+        assert_eq!(action_path.service_path(), "auth");
+        assert_eq!(action_path.action_path(), "auth/login");
+    }
+    
+    #[test]
+    fn test_new_event_topic() {
+        // Create a service path
+        let service_path = TopicPath::new("main:auth", "default").expect("Valid path");
+        
+        // Create an event path
+        let event_path = service_path.new_event_topic("user_logged_in").expect("Valid event path");
+        
+        // Verify the path components
+        assert_eq!(event_path.network_id(), "main");
+        assert_eq!(event_path.service_path(), "auth");
+        // Check the full path instead of the last segment
+        assert_eq!(event_path.action_path(), "auth/user_logged_in");
+    }
+    
+    #[test]
+    fn test_nested_service_path() {
+        // Create a nested service path
+        let service_path = TopicPath::new("main:services/auth", "default").expect("Valid path");
+        
+        // Create an action path from the nested service
+        let action_path = service_path.new_action_topic("verify_token").expect("Valid action path");
+        
+        // Verify the path components
+        assert_eq!(action_path.network_id(), "main");
+        // The service_path method only returns the first segment of the path
+        assert_eq!(action_path.service_path(), "services");
+        // Check that the path contains the expected segments
+        assert_eq!(action_path.action_path(), "services/auth/verify_token");
+    }
+    
+    #[test]
+    fn test_default_network_id() {
+        // Create a service path with default network ID
+        let service_path = TopicPath::new("auth", "test-network").expect("Valid path");
+        
+        // Create an action path
+        let action_path = service_path.new_action_topic("login").expect("Valid action path");
+        
+        // Verify the network ID was preserved
+        assert_eq!(action_path.network_id(), "test-network");
+        assert_eq!(action_path.service_path(), "auth");
+        assert_eq!(action_path.action_path(), "auth/login");
+    }
+    
+    #[test]
+    fn test_invalid_action_name() {
+        // Create a service path
+        let service_path = TopicPath::new("main:auth", "default").expect("Valid path");
+        
+        // Try to create an action path with an invalid name (containing a colon)
+        let action_result = service_path.new_action_topic("invalid:name");
+        
+        // Verify the result is an error
+        assert!(action_result.is_err());
+    }
+
+    // Test basic path parsing
+    #[test]
+    fn test_basic_parse() {
+        // Parse a path with network ID and action
+        let path = TopicPath::new("default:auth/login", "fallback").expect("Valid path");
+        assert_eq!(path.network_id(), "default");
+        assert_eq!(path.service_path(), "auth");
+        assert_eq!(path.action_path(), "auth/login");
+        assert_eq!(path.as_str(), "default:auth/login");
+        
+        // Parse a path with just service path and default network ID
+        let path = TopicPath::new("auth/login", "default").expect("Valid path");
+        assert_eq!(path.network_id(), "default");
+        assert_eq!(path.service_path(), "auth");
+        assert_eq!(path.action_path(), "auth/login");
+    }
+
+    // Test with various path formats
+    #[test]
+    fn test_various_formats() {
+        // Format 1: Full path with network ID and action
+        let path1 = TopicPath::new("network:auth/login", "default").expect("Valid path");
+        assert_eq!(path1.network_id(), "network");
+        assert_eq!(path1.service_path(), "auth");
+        assert_eq!(path1.action_path(), "auth/login");
+        
+        // Format 2: Network and service only
+        let path2 = TopicPath::new("network:auth", "default").expect("Valid path");
+        assert_eq!(path2.network_id(), "network");
+        assert_eq!(path2.service_path(), "auth");
+        assert_eq!(path2.action_path(), "");
+        
+        // Format 3: Service and action without network (uses default)
+        let path3 = TopicPath::new("auth/login", "default").expect("Valid path");
+        assert_eq!(path3.network_id(), "default");
+        assert_eq!(path3.service_path(), "auth");
+        assert_eq!(path3.action_path(), "auth/login");
     }
 } 

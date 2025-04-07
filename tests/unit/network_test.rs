@@ -203,8 +203,10 @@ mod tests {
             source: NodeIdentifier::new("test-network".to_string(), "node-1".to_string()),
             destination: Some(NodeIdentifier::new("test-network".to_string(), "node-2".to_string())),
             message_type: "Request".to_string(),
-            payload: ValueType::String("test payload".to_string()),
             correlation_id: Some("test-correlation-id".to_string()),
+            topic: "test/service/action".to_string(),
+            params: ValueType::String("test params".to_string()),
+            payload: ValueType::Null,
         };
         
         transport.send(message.clone()).await?;
@@ -269,8 +271,10 @@ mod tests {
             source: NodeIdentifier::new("test-network".to_string(), "node-2".to_string()),
             destination: Some(NodeIdentifier::new("test-network".to_string(), "node-1".to_string())),
             message_type: "Request".to_string(),
-            payload: ValueType::String("test payload".to_string()),
             correlation_id: Some("test-correlation-id".to_string()),
+            topic: "test/service/action".to_string(),
+            params: ValueType::String("test params".to_string()),
+            payload: ValueType::Null,
         };
         
         // Send the message

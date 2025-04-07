@@ -78,8 +78,10 @@ impl EventContext {
     /// This is the primary constructor that takes the minimum required parameters.
     pub fn new(topic_path: &TopicPath, logger: Logger) -> Self {
         // Add event path to logger if available from topic_path
-        let event_logger = if !topic_path.get_last_segment().is_empty() {
-            logger.with_event_path(format!("{}/{}", topic_path.service_path(), topic_path.get_last_segment()))
+        let event_path = topic_path.action_path();
+        let event_logger = if !event_path.is_empty() {
+            // If there's an event path, add it to the logger
+            logger.with_event_path(event_path)
         } else {
             logger
         };

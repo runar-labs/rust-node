@@ -20,7 +20,7 @@
 
 use anyhow::Result;
 use log::debug;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -28,11 +28,12 @@ use tokio::sync::RwLock;
 use runar_common::logging::Logger;
 use runar_common::types::ValueType;
 use crate::routing::{TopicPath, WildcardSubscriptionRegistry};
-use crate::services::abstract_service::ActionMetadata;
+use crate::services::abstract_service::{ActionMetadata, AbstractService};
 use crate::services::{
     NodeRequestHandler, ServiceResponse, SubscriptionOptions, 
-    ActionHandler, EventContext
+    ActionHandler, EventContext, RemoteService
 };
+use crate::network::transport::NodeIdentifier;
 
 /// Type definition for event callbacks
 ///
@@ -74,6 +75,15 @@ pub struct ServiceRegistry {
     /// Wildcard subscription registry for efficient topic matching
     event_subscriptions: RwLock<WildcardSubscriptionRegistry<(String, EventCallback)>>,
     
+    /// Local services registry
+    local_services: RwLock<HashMap<String, Arc<dyn AbstractService>>>,
+    
+    /// Remote services registry indexed by service path
+    remote_services: RwLock<HashMap<String, Vec<Arc<RemoteService>>>>,
+    
+    /// Remote services registry indexed by peer ID
+    peer_services: RwLock<HashMap<NodeIdentifier, HashSet<String>>>,
+    
     logger: Logger,
 }
 
@@ -88,6 +98,9 @@ impl Clone for ServiceRegistry {
         ServiceRegistry {
             action_handlers: RwLock::new(HashMap::new()),
             event_subscriptions: RwLock::new(WildcardSubscriptionRegistry::new()),
+            local_services: RwLock::new(HashMap::new()),
+            remote_services: RwLock::new(HashMap::new()),
+            peer_services: RwLock::new(HashMap::new()),
             logger: self.logger.clone(),
         }
     }
@@ -108,6 +121,9 @@ impl ServiceRegistry {
         Self {
             action_handlers: RwLock::new(HashMap::new()),
             event_subscriptions: RwLock::new(WildcardSubscriptionRegistry::new()),
+            local_services: RwLock::new(HashMap::new()),
+            remote_services: RwLock::new(HashMap::new()),
+            peer_services: RwLock::new(HashMap::new()),
             logger,
         }
     }
@@ -118,6 +134,140 @@ impl ServiceRegistry {
     /// is available. This is primarily used for testing or standalone usage.
     pub fn new_with_default_logger() -> Self {
         Self::new(Logger::new_root(runar_common::Component::Registry, "global"))
+    }
+    
+    /// Register a local service
+    ///
+    /// INTENTION: Register a local service implementation for use by the node.
+    pub async fn register_local_service(&self, service: Arc<dyn AbstractService>) -> Result<()> {
+        let service_path = service.path().to_string();
+        self.logger.info(format!("Registering local service: {}", service_path));
+        
+        // Store the service in the local services registry
+        self.local_services.write().await.insert(service_path, service);
+        
+        Ok(())
+    }
+    
+    /// Register a remote service
+    ///
+    /// INTENTION: Register a service that exists on a remote node, making it available for local requests.
+    pub async fn register_remote_service(&self, service: Arc<RemoteService>) -> Result<()> {
+        let service_path = service.path().to_string();
+        let peer_id = service.peer_id().clone();
+        
+        self.logger.info(format!("Registering remote service: {} from peer: {}", service_path, peer_id));
+        
+        // Add to remote services registry indexed by service path
+        {
+            let mut remote_services = self.remote_services.write().await;
+            let services = remote_services.entry(service_path.clone()).or_insert_with(Vec::new);
+            services.push(service.clone());
+        }
+        
+        // Add to peer services registry indexed by peer ID
+        {
+            let mut peer_services = self.peer_services.write().await;
+            let services = peer_services.entry(peer_id).or_insert_with(HashSet::new);
+            services.insert(service_path);
+        }
+        
+        Ok(())
+    }
+    
+    /// Remove all services for a peer
+    ///
+    /// INTENTION: Remove all services associated with a peer when it disconnects or is no longer available.
+    pub async fn remove_peer_services(&self, peer_id: &NodeIdentifier) -> Result<()> {
+        self.logger.info(format!("Removing all services for peer: {}", peer_id));
+        
+        // Get all service paths for this peer
+        let service_paths = {
+            let mut peer_services = self.peer_services.write().await;
+            peer_services.remove(peer_id).unwrap_or_default()
+        };
+        
+        // Remove these services from the remote services registry
+        {
+            let mut remote_services = self.remote_services.write().await;
+            for path in &service_paths {
+                if let Some(services) = remote_services.get_mut(path) {
+                    // Filter out services from this peer
+                    services.retain(|service| service.peer_id() != peer_id);
+                    
+                    // If no services remain, remove the entry
+                    if services.is_empty() {
+                        remote_services.remove(path);
+                    }
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Get a local service by path
+    ///
+    /// INTENTION: Retrieve a local service implementation by its path.
+    pub async fn get_local_service(&self, service_path: &str) -> Option<Arc<dyn AbstractService>> {
+        self.local_services.read().await.get(service_path).cloned()
+    }
+    
+    /// Get remote services by path
+    ///
+    /// INTENTION: Retrieve all remote service implementations for a given path.
+    pub async fn get_remote_services(&self, service_path: &str) -> Vec<Arc<RemoteService>> {
+        self.remote_services.read().await.get(service_path).cloned().unwrap_or_default()
+    }
+    
+    /// Check if a service path has local implementations
+    ///
+    /// INTENTION: Determine if a service is available locally.
+    pub async fn has_local_service(&self, service_path: &str) -> bool {
+        self.local_services.read().await.contains_key(service_path)
+    }
+    
+    /// Check if a service path has remote implementations
+    ///
+    /// INTENTION: Determine if a service is available on remote nodes.
+    pub async fn has_remote_services(&self, service_path: &str) -> bool {
+        self.remote_services.read().await.get(service_path).map_or(false, |services| !services.is_empty())
+    }
+    
+    /// List all registered service paths (both local and remote)
+    ///
+    /// INTENTION: Get a complete list of all available service paths.
+    pub async fn list_all_services(&self) -> Vec<String> {
+        let local_services = self.local_services.read().await;
+        let remote_services = self.remote_services.read().await;
+        
+        let mut result = HashSet::new();
+        
+        // Add all local services
+        for path in local_services.keys() {
+            result.insert(path.clone());
+        }
+        
+        // Add all remote services
+        for path in remote_services.keys() {
+            result.insert(path.clone());
+        }
+        
+        result.into_iter().collect()
+    }
+    
+    /// List all local service paths
+    ///
+    /// INTENTION: Get a list of all locally registered service paths.
+    pub async fn list_local_services(&self) -> Vec<String> {
+        self.local_services.read().await.keys().cloned().collect()
+    }
+    
+    /// List all remote service paths
+    ///
+    /// INTENTION: Get a list of all remotely available service paths.
+    pub async fn list_remote_services(&self) -> Vec<String> {
+        self.remote_services.read().await.keys().cloned().collect()
     }
     
     /// Subscribe to a topic

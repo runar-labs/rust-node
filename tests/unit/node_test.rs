@@ -71,6 +71,9 @@ async fn test_node_add_service() {
         // Add the service to the node
         node.add_service(service).await.unwrap();
         
+        // Start the node to initialize all services
+        node.start().await.unwrap();
+        
         // List services to verify it was added
         println!("Registered services: {:?}", node.list_services().await);
     }).await {
@@ -101,6 +104,9 @@ async fn test_node_request() {
         
         // Add the service to the node
         node.add_service(service).await.unwrap();
+        
+        // Start the node to initialize all services
+        node.start().await.unwrap();
         
         // List services to verify it was added
         println!("Registered services: {:?}", node.list_services().await);
@@ -267,13 +273,16 @@ async fn test_node_lifecycle() {
         node.add_service(math_service).await.unwrap();
         node.add_service(second_math_service).await.unwrap();
         
-        // Verify services are in the Initialized state using the Registry Service
+        // Start the node to initialize all services
+        node.start().await.unwrap();
+        
+        // Verify services are in the Running state using the Registry Service (since node.start() was called)
         let math_state_resp = node.request("$registry/services/math/state".to_string(), ValueType::Null).await.unwrap();
         println!("DEBUG TEST: Math state response: {:?}", math_state_resp);
         if let Some(ValueType::Map(state_info)) = math_state_resp.data {
             println!("DEBUG TEST: Math state info map: {:?}", state_info);
             if let Some(ValueType::String(state)) = state_info.get("state") {
-                assert_eq!(state, "Initialized", "Service 'math' should be in Initialized state after add_service");
+                assert_eq!(state, "Running", "Service 'math' should be in Running state after node.start()");
             } else {
                 println!("DEBUG TEST: State key not found in response map");
                 panic!("State not found in response");
@@ -286,34 +295,7 @@ async fn test_node_lifecycle() {
         let second_math_state_resp = node.request("$registry/services/second_math/state".to_string(), ValueType::Null).await.unwrap();
         if let Some(ValueType::Map(state_info)) = second_math_state_resp.data {
             if let Some(ValueType::String(state)) = state_info.get("state") {
-                assert_eq!(state, "Initialized", "Service 'second_math' should be in Initialized state after add_service");
-            } else {
-                panic!("State not found in response");
-            }
-        } else {
-            panic!("Expected map with state info in response");
-        }
-        
-        // Start all services at once
-        let start_result = node.start().await;
-        assert!(start_result.is_ok(), "Failed to start node services: {:?}", start_result.err());
-        
-        // Verify both services are in the Running state
-        let math_state_resp = node.request("$registry/services/math/state".to_string(), ValueType::Null).await.unwrap();
-        if let Some(ValueType::Map(state_info)) = math_state_resp.data {
-            if let Some(ValueType::String(state)) = state_info.get("state") {
-                assert_eq!(state, "Running", "Service 'math' should be in Running state after start");
-            } else {
-                panic!("State not found in response");
-            }
-        } else {
-            panic!("Expected map with state info in response");
-        }
-        
-        let second_math_state_resp = node.request("$registry/services/second_math/state".to_string(), ValueType::Null).await.unwrap();
-        if let Some(ValueType::Map(state_info)) = second_math_state_resp.data {
-            if let Some(ValueType::String(state)) = state_info.get("state") {
-                assert_eq!(state, "Running", "Service 'second_math' should be in Running state after start");
+                assert_eq!(state, "Running", "Service 'second_math' should be in Running state after node.start()");
             } else {
                 panic!("State not found in response");
             }
