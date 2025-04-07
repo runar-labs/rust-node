@@ -40,6 +40,12 @@ pub struct RemoteService {
     
     /// Local node identifier (for sending messages)
     local_node_id: NodeIdentifier,
+    
+    /// Pending requests awaiting responses
+    pending_requests: Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<Result<ServiceResponse>>>>>,
+    
+    /// Request timeout in milliseconds
+    request_timeout_ms: u64,
 }
 
 impl RemoteService {
@@ -68,6 +74,8 @@ impl RemoteService {
             actions: Arc::new(RwLock::new(HashMap::new())),
             logger,
             local_node_id,
+            pending_requests: Arc::new(RwLock::new(HashMap::new())),
+            request_timeout_ms: 30000, // Default 30 seconds timeout
         }
     }
     
@@ -107,6 +115,97 @@ impl RemoteService {
         })
     }
     
+    /// Register a response handler for incoming network messages
+    ///
+    /// INTENTION: Set up this service to receive responses for its requests.
+    /// This should be called once when the service is created.
+    pub async fn register_response_handler(&self, node: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>) -> Result<()> {
+        let service_clone = self.clone();
+        
+        // Create a response handler that will resolve pending requests
+        let handler = Box::new(move |message: NetworkMessage| {
+            let service = service_clone.clone();
+            
+            // Only handle response messages
+            if message.message_type == "Response" {
+                if let Some(correlation_id) = message.correlation_id.clone() {
+                    let message_clone = message.clone();
+                    // Spawn a task to handle the response
+                    tokio::spawn(async move {
+                        // Handle the response
+                        if let Err(e) = service.handle_response(&correlation_id, message_clone).await {
+                            service.logger.error(format!("Error handling response: {}", e));
+                        }
+                    });
+                }
+            }
+            
+            Ok(())
+        });
+        
+        // Register the handler with the transport
+        if let Some(transport) = &*node.read().await {
+            transport.register_handler(handler)?;
+        } else {
+            return Err(anyhow!("Network transport not available"));
+        }
+        
+        Ok(())
+    }
+    
+    /// Handle a response for a pending request
+    ///
+    /// INTENTION: Process an incoming response and resolve the corresponding pending request.
+    async fn handle_response(&self, correlation_id: &str, message: NetworkMessage) -> Result<()> {
+        // Extract the sender for this correlation ID
+        let sender = {
+            let mut pending = self.pending_requests.write().await;
+            pending.remove(correlation_id)
+        };
+        
+        if let Some(sender) = sender {
+            // Parse the response message
+            if message.message_type == "Response" {
+                if let ValueType::Map(map) = &message.payload {
+                    if let Some(error) = map.get("error") {
+                        if let Some(true) = error.as_bool() {
+                            // This is an error response
+                            let error_message = map.get("message")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Unknown error").to_string();
+                            
+                            // Send the error response
+                            let _ = sender.send(Ok(ServiceResponse::error(400, error_message)));
+                        } else {
+                            // This is a successful response
+                            let data = map.get("data")
+                                .unwrap_or(&ValueType::Null);
+                            
+                            // Send the successful response
+                            let _ = sender.send(Ok(ServiceResponse::ok(data.clone())));
+                        }
+                    } else {
+                        // Legacy format or direct data
+                        let _ = sender.send(Ok(ServiceResponse::ok(message.payload)));
+                    }
+                } else {
+                    // Not a map, just send as is
+                    let _ = sender.send(Ok(ServiceResponse::ok(message.payload)));
+                }
+            } else {
+                // Unexpected message type
+                let _ = sender.send(Ok(ServiceResponse::error(
+                    400, 
+                    format!("Unexpected message type: {}", message.message_type)
+                )));
+            }
+        } else {
+            self.logger.warn(format!("Received response for unknown correlation ID: {}", correlation_id));
+        }
+        
+        Ok(())
+    }
+    
     /// Handle a request for a remote action
     async fn handle_remote_action(
         &self, 
@@ -119,6 +218,15 @@ impl RemoteService {
         
         // Get the full action path
         let action_path = action_topic_path.action_path();
+        
+        // Create a channel for the response
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        
+        // Store the sender in the pending requests map
+        {
+            let mut pending = self.pending_requests.write().await;
+            pending.insert(correlation_id.clone(), sender);
+        }
         
         // Create a network message with the request
         let message = NetworkMessage {
@@ -136,15 +244,33 @@ impl RemoteService {
         // Send the message to the remote node
         self.network_transport.send(message).await?;
         
-        // In a real implementation, we would now wait for a response with the matching correlation_id
-        // For now, we'll return a placeholder response
-        // TODO: Implement waiting for response with timeout
-        
-        // Extract action name from the last segment of the action path
-        let action_name = action_path.split('/').last().unwrap_or("unknown");
-        
-        // Mock response for now
-        Ok(ServiceResponse::ok(ValueType::String(format!("Remote action '{}' called", action_name))))
+        // Wait for the response with a timeout
+        match tokio::time::timeout(
+            std::time::Duration::from_millis(self.request_timeout_ms),
+            receiver
+        ).await {
+            Ok(result) => {
+                match result {
+                    Ok(response) => response,
+                    Err(_) => {
+                        // The sender was dropped without sending a value
+                        self.logger.error(format!("Request channel closed without response: {}", correlation_id));
+                        Ok(ServiceResponse::error(500, "Request channel closed without response"))
+                    }
+                }
+            },
+            Err(_) => {
+                // Timeout occurred
+                // Remove the pending request since we're no longer waiting for it
+                {
+                    let mut pending = self.pending_requests.write().await;
+                    pending.remove(&correlation_id);
+                }
+                
+                self.logger.error(format!("Request timed out: {}", correlation_id));
+                Ok(ServiceResponse::error(408, "Request timed out"))
+            }
+        }
     }
 }
 

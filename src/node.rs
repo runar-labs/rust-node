@@ -109,6 +109,9 @@ pub struct Node {
 
     /// Whether network functionality is enabled
     networking_enabled: bool,
+
+    /// Pending network requests awaiting responses
+    pending_requests: Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<NetworkMessage>>>>,
 }
 
 // Implementation for Node
@@ -141,6 +144,7 @@ impl Node {
             node_discovery: Arc::new(RwLock::new(None)),
             discovered_nodes: Arc::new(RwLock::new(HashMap::new())),
             networking_enabled: config.enable_networking,
+            pending_requests: Arc::new(RwLock::new(HashMap::new())),
         };
         
         // Register the registry service
@@ -425,11 +429,82 @@ impl Node {
         Ok(context)
     }
 
-    /// Make a service request
+    /// Send a request to a remote node and wait for a response
     ///
-    /// INTENTION: Send a request to a service and receive a response. This method
-    /// handles routing the request to the appropriate service and action handler,
-    /// supporting the request/response pattern.
+    /// INTENTION: Provide a way to make requests to remote nodes and handle the response.
+    /// This is used by the Node when handling requests that need to be forwarded to remote services.
+    pub async fn network_request(
+        &self,
+        destination: NodeIdentifier,
+        topic: String,
+        params: ValueType
+    ) -> Result<NetworkMessage> {
+        if !self.networking_enabled {
+            return Err(anyhow!("Network functionality is disabled"));
+        }
+        
+        // Generate a correlation ID for this request
+        let correlation_id = uuid::Uuid::new_v4().to_string();
+        
+        // Create a channel for the response
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        
+        // Store the sender in the pending requests map
+        {
+            let mut pending = self.pending_requests.write().await;
+            pending.insert(correlation_id.clone(), sender);
+        }
+        
+        // Create the network message
+        let message = NetworkMessage {
+            source: NodeIdentifier::new(self.network_id.clone(), self.node_id.clone()),
+            destination: Some(destination.clone()),
+            message_type: "Request".to_string(),
+            correlation_id: Some(correlation_id.clone()),
+            topic: topic.clone(),
+            params,
+            payload: ValueType::Null,
+        };
+        
+        self.logger.info(format!("Sending network request to {}: {}", destination, topic));
+        
+        // Send the message
+        if let Some(transport) = &*self.network_transport.read().await {
+            transport.send(message).await?;
+        } else {
+            return Err(anyhow!("Network transport not available"));
+        }
+        
+        // Wait for the response with a timeout
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(30), // 30 second timeout
+            receiver
+        ).await {
+            Ok(result) => {
+                match result {
+                    Ok(response) => Ok(response),
+                    Err(_) => {
+                        // The sender was dropped without sending a value
+                        self.logger.error(format!("Request channel closed without response: {}", correlation_id));
+                        Err(anyhow!("Request channel closed without response"))
+                    }
+                }
+            },
+            Err(_) => {
+                // Timeout occurred
+                // Remove the pending request since we're no longer waiting for it
+                {
+                    let mut pending = self.pending_requests.write().await;
+                    pending.remove(&correlation_id);
+                }
+                
+                self.logger.error(format!("Request timed out: {}", correlation_id));
+                Err(anyhow!("Request timed out"))
+            }
+        }
+    }
+
+    // Update the request method to use network_request when needed
     pub async fn request(&self, path: String, params: ValueType) -> Result<ServiceResponse> {
         self.logger.debug(format!("Processing request to path '{}'", path));
         
@@ -454,11 +529,75 @@ impl Node {
         
         // If we couldn't handle it locally and networking is enabled, try to forward it
         if self.networking_enabled {
-            // Network request handling will be implemented here
-            self.logger.warn("Network request handling not yet implemented");
+            self.logger.debug(format!("No local handler found for '{}', checking for remote services", path));
+            
+            // Extract service path from topic path
+            let service_path = topic_path.service_path();
+            
+            // Check if we have remote services registered for this service path
+            let remote_services = self.service_registry.get_remote_services(&service_path).await;
+            
+            if !remote_services.is_empty() {
+                // For now, just use the first available remote service
+                // In the future, we could implement more sophisticated selection
+                let remote_service = &remote_services[0];
+                
+                self.logger.info(format!("Forwarding request '{}' to remote service on node {}", 
+                    path, remote_service.peer_id()));
+                
+                // Extract action name from topic path
+                let action_name = match topic_path.get_segments().last() {
+                    Some(segment) => segment.clone(),
+                    None => return Err(anyhow!("Invalid action path: {}", path)),
+                };
+                
+                // Create a full topic path for the remote action
+                let remote_topic = format!("{}/{}", service_path, action_name);
+                
+                // Send request to remote node and wait for response
+                let network_response = match self.network_request(
+                    remote_service.peer_id().clone(),
+                    remote_topic,
+                    params
+                ).await {
+                    Ok(response) => response,
+                    Err(e) => return Ok(ServiceResponse::error(500, format!("Failed to forward request: {}", e))),
+                };
+                
+                // Convert network response to ServiceResponse
+                if network_response.message_type == "Response" {
+                    if let ValueType::Map(map) = &network_response.payload {
+                        if let Some(error) = map.get("error") {
+                            if let Some(true) = error.as_bool() {
+                                // Error response
+                                let error_message = map.get("message")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("Unknown error").to_string();
+                                
+                                return Ok(ServiceResponse::error(400, error_message));
+                            }
+                        }
+                        
+                        // Success response
+                        let data = map.get("data")
+                            .unwrap_or(&ValueType::Null);
+                        
+                        return Ok(ServiceResponse::ok(data.clone()));
+                    }
+                    
+                    // If not a map, just return the payload as is
+                    return Ok(ServiceResponse::ok(network_response.payload));
+                }
+                
+                // Unexpected response type
+                return Ok(ServiceResponse::error(500, 
+                    format!("Unexpected response type: {}", network_response.message_type)));
+            } else {
+                self.logger.warn(format!("No remote services found for path '{}'", path));
+            }
         }
         
-        // If we get here, we couldn't handle the request
+        // If we get here, we couldn't handle the request locally or remotely
         Err(anyhow!("No handler found for path: {}", path))
     }
 
@@ -728,14 +867,22 @@ impl Node {
         
         self.logger.info(format!("Handling network response for request {}", correlation_id));
         
-        // TODO: Add pending requests tracking and correlation ID lookup
-        // For now, just log that we received a response
-        self.logger.debug(format!("Received response from {}: {:?}", message.source, message.payload));
+        // Look up the pending request by correlation ID
+        let sender = {
+            let mut pending = self.pending_requests.write().await;
+            pending.remove(&correlation_id)
+        };
         
-        // In a more complete implementation, this would:
-        // 1. Look up the pending request by correlation_id
-        // 2. Resolve the corresponding Future with the response data
-        // 3. Remove the request from the pending requests map
+        // If we found a pending request, resolve it with the response
+        if let Some(sender) = sender {
+            if sender.send(message.clone()).is_err() {
+                self.logger.warn(format!("Failed to send response to pending request {}: receiver dropped", correlation_id));
+            } else {
+                self.logger.debug(format!("Successfully sent response to pending request {}", correlation_id));
+            }
+        } else {
+            self.logger.warn(format!("Received response for unknown correlation ID: {}", correlation_id));
+        }
         
         Ok(())
     }
