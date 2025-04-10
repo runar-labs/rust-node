@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use std::time::Duration;
 use serde::{Serialize, Deserialize};
 
-use crate::network::transport::NodeIdentifier;
+use crate::network::transport::PeerId;
 
 pub mod memory_discovery;
 pub mod multicast_discovery;
@@ -53,15 +53,24 @@ impl Default for DiscoveryOptions {
 pub const DEFAULT_MULTICAST_ADDR: &str = "239.255.42.98";
 
 /// Information about a node in the network
+///
+/// INTENTION: Represents a snapshot of a node's presence and capabilities
+/// within one or more networks. This information is shared via discovery mechanisms.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NodeInfo {
-    /// The node's identifier
-    pub identifier: NodeIdentifier,
-    /// The node's network address
+    /// The node's unique identifier
+    pub peer_id: PeerId,
+    /// The list of network IDs this node participates in and handles traffic for.
+    /// A node can be part of multiple networks simultaneously.
+    pub network_ids: Vec<String>,
+    /// The node's primary network address (e.g., "IP:PORT")
     pub address: String,
-    /// Node capabilities (services, features, etc.)
+    //FIX lets expand this.. capabiliteis shuold be a Vec<Capability> and Capability should be anstriuct with type action, 
+    // subscription path action_input_schema and action_output_schema for actions  and event_schema for subscriptions
+    /// Node capabilities (e.g., list of services, features) represented as strings.
+    /// The format and content of these strings need further definition.
     pub capabilities: Vec<String>,
-    /// When this node was last seen
+    /// Timestamp when this node information was last confirmed or updated.
     pub last_seen: std::time::SystemTime,
 }
 

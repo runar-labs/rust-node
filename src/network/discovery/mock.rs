@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use super::{NodeDiscovery, NodeInfo, DiscoveryOptions, DiscoveryListener};
-use crate::network::transport::NodeIdentifier;
+use crate::network::transport::PeerId;
 
 /// A mock implementation of NodeDiscovery that stores nodes in memory
 pub struct MockNodeDiscovery {
@@ -35,7 +35,7 @@ impl MockNodeDiscovery {
 
     /// Add a test node to the discovery service
     pub fn add_test_node(&self, info: NodeInfo) {
-        self.nodes.write().unwrap().insert(info.identifier.node_id.clone(), info);
+        self.nodes.write().unwrap().insert(info.peer_id.node_id.clone(), info);
     }
 
     /// Clear all nodes
@@ -45,7 +45,7 @@ impl MockNodeDiscovery {
 
     /// Helper to add nodes for testing
     pub async fn add_mock_node(&self, node_info: NodeInfo) {
-        let key = node_info.identifier.to_string();
+        let key = node_info.peer_id.to_string();
         self.nodes.write().unwrap().insert(key, node_info.clone());
         // Notify listeners
         for listener in self.listeners.read().unwrap().iter() {
@@ -72,7 +72,7 @@ impl NodeDiscovery for MockNodeDiscovery {
     async fn discover_nodes(&self, network_id: Option<&str>) -> Result<Vec<NodeInfo>> {
         let nodes_map = self.nodes.read().unwrap();
         Ok(nodes_map.values()
-            .filter(|info| network_id.map_or(true, |net_id| info.identifier.network_id == net_id))
+            .filter(|info| network_id.map_or(true, |net_id| info.network_ids.contains(&net_id.to_string())))
             .cloned()
             .collect())
     }
@@ -99,7 +99,7 @@ impl NodeDiscovery for MockNodeDiscovery {
 
     async fn find_node(&self, network_id: &str, node_id: &str) -> Result<Option<NodeInfo>> {
         let nodes = self.nodes.read().unwrap();
-        let key = NodeIdentifier::new(network_id.to_string(), node_id.to_string()).to_string();
+        let key = PeerId::new(node_id.to_string()).to_string();
         Ok(nodes.get(&key).cloned())
     }
 } 

@@ -3,37 +3,40 @@
 // INTENTION:
 // This module provides action handler and event subscription management capabilities for the node.
 // It acts as a central registry for action handlers and event subscriptions, enabling the node to
-// find he correct subscribers and actions handlers.. THE Registry does not CALL ANY CALLBACKS/Handler directly
+// find the correct subscribers and actions handlers. THE Registry does not CALL ANY CALLBACKS/Handler directly
 //.. this is NODEs functions.
 //
 // ARCHITECTURAL PRINCIPLES:
 // 1. Handler Registration - Manages registration of action handlers
-// 2. Event Subscription  Registration - Manages registration of event handlers 
+// 2. Event Subscription Registration - Manages registration of event handlers 
 // 3. Network Isolation - Respects network boundaries for handlers and subscriptions
 // 4. Path Consistency - ALL Registry APIs use TopicPath objects for proper validation
 //    and consistent path handling, NEVER raw strings
+// 5. Separate Storage - Local and remote handlers are stored separately for clear responsibility
 //
 // IMPORTANT NOTE:
 // The Registry should focus solely on managing action handlers and subscriptions.
 // It should NOT handle service discovery or lifecycle - that's the responsibility of the Node.
 // Request routing and handling is also the Node's responsibility.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use log::debug;
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 use runar_common::logging::Logger;
 use runar_common::types::ValueType;
 use crate::routing::{TopicPath, WildcardSubscriptionRegistry};
-use crate::services::abstract_service::{ActionMetadata, AbstractService};
+use crate::services::abstract_service::{ActionMetadata, AbstractService, ServiceState, CompleteServiceMetadata};
 use crate::services::{
-    NodeRequestHandler, ServiceResponse, SubscriptionOptions, 
-    ActionHandler, EventContext, RemoteService
+    ServiceResponse, SubscriptionOptions, 
+    ActionHandler, EventContext, RemoteService,
+    RegistryDelegate
 };
-use crate::network::transport::NodeIdentifier;
+use crate::network::transport::PeerId;
 
 /// Type definition for event callbacks
 ///
@@ -69,21 +72,41 @@ pub type ActionRegistrar = Arc<dyn Fn(&str, &str, ActionHandler, Option<ActionMe
 /// Service discovery and routing should be centralized for consistency and
 /// to ensure proper service isolation.
 pub struct ServiceRegistry {
-    /// Action handlers organized by network and then by path
+    /// Local action handlers organized by path
+    local_action_handlers: RwLock<HashMap<TopicPath, ActionHandler>>,
+    
+    /// Remote action handlers organized by path, with multiple handlers per path
+    remote_action_handlers: RwLock<HashMap<TopicPath, Vec<ActionHandler>>>,
+    
+    /// Legacy action handlers organized by network and then by path 
+    /// Will be deprecated once migration is complete
     action_handlers: RwLock<HashMap<String, HashMap<String, ActionHandler>>>,
     
-    /// Wildcard subscription registry for efficient topic matching
-    event_subscriptions: RwLock<WildcardSubscriptionRegistry<(String, EventCallback)>>,
+    /// Local event subscriptions using wildcard registry
+    local_event_subscriptions: RwLock<WildcardSubscriptionRegistry<(String, EventCallback)>>,
+    
+    /// Remote event subscriptions using wildcard registry
+    remote_event_subscriptions: RwLock<WildcardSubscriptionRegistry<(String, EventCallback)>>,
+    
+    /// REMOVED - dont remote.. just remore change codfe that is using it
+    //event_subscriptions: RwLock<WildcardSubscriptionRegistry<(String, EventCallback)>>,
     
     /// Local services registry
     local_services: RwLock<HashMap<String, Arc<dyn AbstractService>>>,
     
     /// Remote services registry indexed by service path
-    remote_services: RwLock<HashMap<String, Vec<Arc<RemoteService>>>>,
+    remote_services: RwLock<HashMap<TopicPath, Vec<Arc<RemoteService>>>>,
+    
+    /// Legacy remote services registry - will be deprecated
+    legacy_remote_services: RwLock<HashMap<String, Vec<Arc<RemoteService>>>>,
     
     /// Remote services registry indexed by peer ID
-    peer_services: RwLock<HashMap<NodeIdentifier, HashSet<String>>>,
+    peer_services: RwLock<HashMap<PeerId, HashSet<String>>>,
     
+    /// Service lifecycle states - moved from Node
+    service_states: Arc<RwLock<HashMap<String, ServiceState>>>,
+    
+    /// Logger instance
     logger: Logger,
 }
 
@@ -96,11 +119,16 @@ impl Clone for ServiceRegistry {
         debug!("WARNING: ServiceRegistry clone was called - creating empty registry!");
         
         ServiceRegistry {
+            local_action_handlers: RwLock::new(HashMap::new()),
+            remote_action_handlers: RwLock::new(HashMap::new()),
             action_handlers: RwLock::new(HashMap::new()),
-            event_subscriptions: RwLock::new(WildcardSubscriptionRegistry::new()),
+            local_event_subscriptions: RwLock::new(WildcardSubscriptionRegistry::new()),
+            remote_event_subscriptions: RwLock::new(WildcardSubscriptionRegistry::new()), 
             local_services: RwLock::new(HashMap::new()),
             remote_services: RwLock::new(HashMap::new()),
+            legacy_remote_services: RwLock::new(HashMap::new()),
             peer_services: RwLock::new(HashMap::new()),
+            service_states: Arc::new(RwLock::new(HashMap::new())),
             logger: self.logger.clone(),
         }
     }
@@ -119,11 +147,17 @@ impl ServiceRegistry {
     /// component (typically the Node). This ensures proper logger hierarchy.
     pub fn new(logger: Logger) -> Self {
         Self {
+            local_action_handlers: RwLock::new(HashMap::new()),
+            remote_action_handlers: RwLock::new(HashMap::new()),
             action_handlers: RwLock::new(HashMap::new()),
-            event_subscriptions: RwLock::new(WildcardSubscriptionRegistry::new()),
+            local_event_subscriptions: RwLock::new(WildcardSubscriptionRegistry::new()),
+            remote_event_subscriptions: RwLock::new(WildcardSubscriptionRegistry::new()),
+             
             local_services: RwLock::new(HashMap::new()),
             remote_services: RwLock::new(HashMap::new()),
+            legacy_remote_services: RwLock::new(HashMap::new()),
             peer_services: RwLock::new(HashMap::new()),
+            service_states: Arc::new(RwLock::new(HashMap::new())),
             logger,
         }
     }
@@ -158,11 +192,24 @@ impl ServiceRegistry {
         
         self.logger.info(format!("Registering remote service: {} from peer: {}", service_path, peer_id));
         
-        // Add to remote services registry indexed by service path
+        // Add to legacy remote services registry indexed by service path
         {
-            let mut remote_services = self.remote_services.write().await;
+            let mut remote_services = self.legacy_remote_services.write().await;
             let services = remote_services.entry(service_path.clone()).or_insert_with(Vec::new);
             services.push(service.clone());
+        }
+        
+        // Try to convert the service path to a TopicPath using the service's network ID
+        match TopicPath::new(&service_path, service.network_id()) {
+            Ok(topic_path) => {
+                // Add to new remote services registry indexed by TopicPath
+                let mut remote_services = self.remote_services.write().await;
+                let services = remote_services.entry(topic_path).or_insert_with(Vec::new);
+                services.push(service.clone());
+            },
+            Err(e) => {
+                self.logger.warn(format!("Failed to create TopicPath for remote service: {}, error: {}", service_path, e));
+            }
         }
         
         // Add to peer services registry indexed by peer ID
@@ -175,384 +222,360 @@ impl ServiceRegistry {
         Ok(())
     }
     
-    /// Remove all services for a peer
+    /// Register a local action handler
     ///
-    /// INTENTION: Remove all services associated with a peer when it disconnects or is no longer available.
-    pub async fn remove_peer_services(&self, peer_id: &NodeIdentifier) -> Result<()> {
-        self.logger.info(format!("Removing all services for peer: {}", peer_id));
-        
-        // Get all service paths for this peer
-        let service_paths = {
-            let mut peer_services = self.peer_services.write().await;
-            peer_services.remove(peer_id).unwrap_or_default()
-        };
-        
-        // Remove these services from the remote services registry
-        {
-            let mut remote_services = self.remote_services.write().await;
-            for path in &service_paths {
-                if let Some(services) = remote_services.get_mut(path) {
-                    // Filter out services from this peer
-                    services.retain(|service| service.peer_id() != peer_id);
-                    
-                    // If no services remain, remove the entry
-                    if services.is_empty() {
-                        remote_services.remove(path);
-                    }
-                }
-            }
-        }
-        
-        Ok(())
-    }
-    
-    /// Get a local service by path
-    ///
-    /// INTENTION: Retrieve a local service implementation by its path.
-    pub async fn get_local_service(&self, service_path: &str) -> Option<Arc<dyn AbstractService>> {
-        self.local_services.read().await.get(service_path).cloned()
-    }
-    
-    /// Get remote services by path
-    ///
-    /// INTENTION: Retrieve all remote service implementations for a given path.
-    pub async fn get_remote_services(&self, service_path: &str) -> Vec<Arc<RemoteService>> {
-        self.remote_services.read().await.get(service_path).cloned().unwrap_or_default()
-    }
-    
-    /// Check if a service path has local implementations
-    ///
-    /// INTENTION: Determine if a service is available locally.
-    pub async fn has_local_service(&self, service_path: &str) -> bool {
-        self.local_services.read().await.contains_key(service_path)
-    }
-    
-    /// Check if a service path has remote implementations
-    ///
-    /// INTENTION: Determine if a service is available on remote nodes.
-    pub async fn has_remote_services(&self, service_path: &str) -> bool {
-        self.remote_services.read().await.get(service_path).map_or(false, |services| !services.is_empty())
-    }
-    
-    /// List all registered service paths (both local and remote)
-    ///
-    /// INTENTION: Get a complete list of all available service paths.
-    pub async fn list_all_services(&self) -> Vec<String> {
-        let local_services = self.local_services.read().await;
-        let remote_services = self.remote_services.read().await;
-        
-        let mut result = HashSet::new();
-        
-        // Add all local services
-        for path in local_services.keys() {
-            result.insert(path.clone());
-        }
-        
-        // Add all remote services
-        for path in remote_services.keys() {
-            result.insert(path.clone());
-        }
-        
-        result.into_iter().collect()
-    }
-    
-    /// List all local service paths
-    ///
-    /// INTENTION: Get a list of all locally registered service paths.
-    pub async fn list_local_services(&self) -> Vec<String> {
-        self.local_services.read().await.keys().cloned().collect()
-    }
-    
-    /// List all remote service paths
-    ///
-    /// INTENTION: Get a list of all remotely available service paths.
-    pub async fn list_remote_services(&self) -> Vec<String> {
-        self.remote_services.read().await.keys().cloned().collect()
-    }
-    
-    /// Subscribe to a topic
-    ///
-    /// INTENTION: Register a callback to be notified when events are published
-    /// to a specific topic. This is the primary way for components to receive
-    /// events from the system.
-    ///
-    /// Returns a unique subscription ID that can be used for unsubscribing.
-    pub async fn subscribe(
-        &self,
-        topic: &TopicPath,
-        callback: Arc<dyn Fn(Arc<EventContext>, ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
-    ) -> Result<String> {
-        self.subscribe_with_options(topic, callback, SubscriptionOptions::default()).await
-    }
-    
-    /// Subscribe to a topic with options
-    ///
-    /// INTENTION: Register a callback with specific options for controlling
-    /// how events are delivered. This extended version of subscribe allows
-    /// for more fine-grained control of subscription behavior.
-    ///
-    /// Note: Currently, options are not used, but the parameter exists for
-    /// future extension.
-    pub async fn subscribe_with_options(
-        &self,
-        topic: &TopicPath,
-        callback: Arc<dyn Fn(Arc<EventContext>, ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
-        _options: SubscriptionOptions,
-    ) -> Result<String> {
-        // Generate a unique subscription ID
-        let subscription_id = uuid::Uuid::new_v4().to_string();
-        
-        self.logger.debug(format!("Subscribing to topic '{}' with ID '{}'", topic.as_str(), subscription_id));
-        
-        // Store subscription in the wildcard registry
-        {
-            let mut subscriptions = self.event_subscriptions.write().await;
-            subscriptions.add(topic.clone(), (subscription_id.clone(), callback));
-        }
-        
-        // Return the subscription ID
-        Ok(subscription_id)
-    }
-    
-    /// Unsubscribe from a topic
-    ///
-    /// INTENTION: Remove a subscription from a topic, either by specific
-    /// subscription ID or all subscriptions for the topic if no ID is provided.
-    ///
-    /// ARCHITECTURAL PRINCIPLE:
-    /// Subscriptions should be explicitly managed, with the ability to clean up
-    /// when no longer needed to prevent resource leaks and unwanted callbacks.
-    pub async fn unsubscribe(&self, topic: &TopicPath, subscription_id: Option<&str>) -> Result<()> {
-        match subscription_id {
-            Some(id) => {
-                self.logger.debug(format!("Unsubscribing from topic '{}' with ID '{}'", topic.as_str(), id));
-                
-                // Remove specific subscription ID from the wildcard registry
-                let mut subscriptions = self.event_subscriptions.write().await;
-                subscriptions.remove_handler(topic, |(sub_id, _)| sub_id == id);
-            },
-            None => {
-                self.logger.debug(format!("Unsubscribing from all callbacks for topic '{}'", topic.as_str()));
-                
-                // Remove all subscriptions for this topic from the wildcard registry
-                let mut subscriptions = self.event_subscriptions.write().await;
-                subscriptions.remove(topic);
-            }
-        }
-        
-        Ok(())
-    }
-    
-    /// Register an action handler
-    ///
-    /// INTENTION: Register a handler function for a specific service action.
-    /// This enables services to dynamically register handlers at runtime.
-    pub async fn register_action_handler(
+    /// INTENTION: Register a handler for a specific action path that will be executed locally.
+    pub async fn register_local_action_handler(
         &self,
         topic_path: &TopicPath,
         handler: ActionHandler,
         metadata: Option<ActionMetadata>
     ) -> Result<()> {
-        // Use action_path directly instead of manually constructing it
-        let action_path = topic_path.action_path();
-        let network_id = topic_path.network_id();
-
-        // Debug output using proper logger
-        self.logger.debug(format!("DEBUG_REGISTER_ACTION: action_path={}, topic_path={}", 
-                  action_path, topic_path.as_str()));
+        self.logger.debug(format!("Registering local action handler for: {}", topic_path.as_str()));
         
-        // Print detailed debug information
-        self.logger.info(format!("Registering action: action_path={}, topic_path={}", 
-                              action_path, topic_path.as_str()));
-        
-        // Store the handler in the appropriate network and path
+        // Store in the new local action handlers map
         {
-            let mut handlers = self.action_handlers.write().await;
-            
-            // Ensure we have a map for this network
-            if !handlers.contains_key(&network_id) {
-                handlers.insert(network_id.to_string(), HashMap::new());
-            }
-            
-            // Add the handler to the network's map
-            if let Some(network_handlers) = handlers.get_mut(&network_id) {
-                self.logger.debug(format!("Registering action handler for '{}' on network '{}'", action_path, network_id));
-                // Use the action_path directly as the key for consistency
-                network_handlers.insert(action_path.clone(), handler);
-                
-                // Debug output of registered handlers using proper logger
-                self.logger.debug(format!("Registered handlers for network {}: {:?}", 
-                         network_id, network_handlers.keys().collect::<Vec<_>>()));
-            }
+            let mut handlers = self.local_action_handlers.write().await;
+            handlers.insert(topic_path.clone(), handler.clone());
         }
         
-        // Log the registration
-        self.logger.info(format!("Registered action handler for '{}' on network '{}'", action_path, network_id));
+        // Also store in the legacy action handlers map (double storage during transition)
+        {
+            let mut handlers = self.action_handlers.write().await;
+            let network_handlers = handlers
+                .entry(topic_path.network_id().to_string())
+                .or_insert_with(HashMap::new);
+            
+            network_handlers.insert(topic_path.action_path().to_string(), handler);
+        }
         
         Ok(())
     }
-
+    
+    /// Register a remote action handler
+    ///
+    /// INTENTION: Register a handler for a specific action path that exists on a remote node.
+    pub async fn register_remote_action_handler(
+        &self,
+        topic_path: &TopicPath,
+        handler: ActionHandler,
+        remote_service: Arc<RemoteService>
+    ) -> Result<()> {
+        self.logger.debug(format!("Registering remote action handler for: {}", topic_path.as_str()));
+        
+        // Store the handler in remote_action_handlers
+        {
+            let mut handlers = self.remote_action_handlers.write().await;
+            let entry = handlers.entry(topic_path.clone()).or_insert_with(Vec::new);
+            entry.push(handler.clone());
+        }
+        
+        // Store the remote service reference if needed
+        {
+            let mut services = self.remote_services.write().await;
+            let entry = services.entry(topic_path.clone()).or_insert_with(Vec::new);
+            if !entry.iter().any(|s| s.peer_id() == remote_service.peer_id()) {
+                entry.push(remote_service);
+            }
+        }
+        
+        // Also store in the legacy action handlers map (double storage during transition)
+        {
+            let mut handlers = self.action_handlers.write().await;
+            let network_handlers = handlers
+                .entry(topic_path.network_id().to_string())
+                .or_insert_with(HashMap::new);
+            
+            network_handlers.insert(topic_path.action_path().to_string(), handler);
+        }
+        
+        Ok(())
+    }
+    
+    /// Get a local action handler only
+    ///
+    /// INTENTION: Retrieve a handler for a specific action path that will be executed locally.
+    pub async fn get_local_action_handler(&self, topic_path: &TopicPath) -> Option<ActionHandler> {
+        let handlers = self.local_action_handlers.read().await;
+        handlers.get(topic_path).cloned()
+    }
+    
+    /// Get all remote action handlers for a path (for load balancing)
+    ///
+    /// INTENTION: Retrieve all handlers for a specific action path that exist on remote nodes.
+    pub async fn get_remote_action_handlers(&self, topic_path: &TopicPath) -> Vec<ActionHandler> {
+        let handlers = self.remote_action_handlers.read().await;
+        handlers.get(topic_path).cloned().unwrap_or_default()
+    }
+    
     /// Get an action handler for a specific topic path
     ///
-    /// INTENTION: Find the action handler registered for a specific topic path.
-    /// This is used by the Node when routing requests to the appropriate handler.
-    /// A valid topic path MUST include an action, not just a service name.
-    pub async fn get_action_handler(
-        &self,
-        topic_path: &TopicPath
-    ) -> Option<ActionHandler> {
-        // Use action_path directly instead of manually constructing it
-        let action_path = topic_path.action_path();
-        
-        // Debug output with proper logger
-        self.logger.debug(format!("Looking for handler: topic_path={}, action_path={}, network_id={}",
-                 topic_path.as_str(), action_path, topic_path.network_id()));
-        
-        // Access the action handlers registry
-        let handlers = self.action_handlers.read().await;
-        
-        // Debug output of all available handlers using proper logger
-        if let Some(network_handlers) = handlers.get(&topic_path.network_id()) {
-            self.logger.debug(format!("Available handlers for network {}: {:?}", 
-                     topic_path.network_id(), network_handlers.keys().collect::<Vec<_>>()));
+    /// INTENTION: Look up the appropriate action handler for a given topic path
+    /// supporting both local and remote handlers.
+    pub async fn get_action_handler(&self, topic_path: &TopicPath) -> Option<ActionHandler> {
+        // First try local handlers
+        if let Some(handler) = self.local_action_handlers.read().await.get(topic_path) {
+            return Some(handler.clone());
         }
         
-        // Try to find the handler in the network's handlers map
-        if let Some(network_handlers) = handlers.get(&topic_path.network_id()) {
-            // First check for direct match
-            if let Some(handler) = network_handlers.get(&action_path) {
-                self.logger.debug(format!("Found direct handler match for '{}'", action_path));
-                return Some(handler.clone());
-            }
-            
-            // If no direct match, check for template patterns with path parameters
-            for (registered_path, handler) in network_handlers.iter() {
-                // For paths with parameter placeholders like {service_path}
-                if registered_path.contains('{') {
-                    // Get the segments of both paths
-                    let registered_segments: Vec<&str> = registered_path.split('/').collect();
-                    let requested_segments: Vec<&str> = action_path.split('/').collect();
-                    
-                    // Strict segment count matching - must have exactly the same number of segments
-                    if registered_segments.len() != requested_segments.len() {
-                        self.logger.debug(format!("Template '{}' has {} segments, but request '{}' has {} segments - not a match", 
-                            registered_path, registered_segments.len(), action_path, requested_segments.len()));
-                        continue;
-                    }
-                    
-                    // If segment count matches, we might have a template match
-                    let mut matches = true;
-                    
-                    for (i, reg_segment) in registered_segments.iter().enumerate() {
-                        // If this segment is a parameter (wrapped in {}), it matches anything
-                        if reg_segment.starts_with('{') && reg_segment.ends_with('}') {
-                            // Parameter matches any value in this position
-                            continue;
-                        } else if reg_segment != &requested_segments[i] {
-                            // Literal segment must match exactly
-                            matches = false;
-                            self.logger.debug(format!("Template '{}' segment '{}' doesn't match request '{}' segment '{}'", 
-                                registered_path, reg_segment, action_path, requested_segments[i]));
-                            break;
-                        }
-                    }
-                    
-                    if matches {
-                        // Extract parameters from the registered path template and the actual request path
-                        let mut params = HashMap::new();
-                        
-                        for (i, reg_segment) in registered_segments.iter().enumerate() {
-                            if reg_segment.starts_with('{') && reg_segment.ends_with('}') {
-                                // Extract parameter name (remove the {} brackets)
-                                let param_name = &reg_segment[1..reg_segment.len()-1];
-                                
-                                // Store the parameter value from the requested path
-                                params.insert(param_name.to_string(), requested_segments[i].to_string());
-                            }
-                        }
-                        
-                        // Use proper logger
-                        self.logger.debug(format!("Found template handler for '{}' matching template '{}' with params: {:?}", 
-                                 action_path, registered_path, params));
-                                 
-                        // Create a wrapper handler that populates the path_params
-                        let original_handler = handler.clone();
-                        let handler_with_params: ActionHandler = Arc::new(move |params_data, mut context| {
-                            let handler_clone = original_handler.clone();
-                            let path_params = params.clone();
-                            
-                            Box::pin(async move {
-                                // Update the context with path parameters
-                                context.path_params = path_params;
-                                
-                                // Call the original handler with updated context
-                                handler_clone(params_data, context).await
-                            })
-                        });
-                        
-                        return Some(handler_with_params);
-                    }
-                }
+        // Then check remote handlers
+        let remote_handlers = self.remote_action_handlers.read().await;
+        if let Some(handlers) = remote_handlers.get(topic_path) {
+            if !handlers.is_empty() {
+                // For backward compatibility, just return the first one
+                // The Node will apply proper load balancing when using get_remote_action_handlers directly
+                return Some(handlers[0].clone());
             }
         }
-        
-        // Use proper logger for not found case
-        self.logger.debug(format!("No handler found for '{}', available keys: {:?}", action_path, 
-                 handlers.get(&topic_path.network_id())
-                 .map(|m| m.keys().collect::<Vec<_>>())
-                 .unwrap_or_default()));
         
         None
     }
     
-    /// List all registered action handler paths
+    /// Stable API - DO NOT CHANGE UNLES ASKED EXPLICITLY!
+    /// Register local event subscription
     ///
-    /// INTENTION: Get a list of all registered action handler paths.
-    /// This is useful for debugging and introspection.
-    pub async fn list_action_handlers(&self) -> Vec<String> {
-        let handlers = self.action_handlers.read().await;
-        let mut result = Vec::new();
+    /// INTENTION: Register a callback to be invoked when events are published locally.
+    pub async fn register_local_event_subscription(
+        &self, 
+        topic_path: &TopicPath,
+        callback: EventCallback,
+        options: SubscriptionOptions
+    ) -> Result<String> {
+        let subscription_id = Uuid::new_v4().to_string();
+        //TODO handle optoion
+        // Store in local event subscriptions
+        {
+            let mut subscriptions = self.local_event_subscriptions.write().await;
+            subscriptions.add(topic_path.clone(), (subscription_id.clone(), callback.clone()));
+        }
+         
+        Ok(subscription_id)
+    }
+    
+    /// Register remote event subscription
+    ///
+    /// INTENTION: Register a callback to be invoked when events are published from remote nodes.
+    pub async fn register_remote_event_subscription(
+        &self, 
+        topic_path: &TopicPath,
+        callback: EventCallback
+    ) -> Result<String> {
+        let subscription_id = Uuid::new_v4().to_string();
         
-        for (network_id, network_handlers) in handlers.iter() {
-            for handler_key in network_handlers.keys() {
-                result.push(format!("{}:{}", network_id, handler_key));
+        // Store in remote event subscriptions
+        {
+            let mut subscriptions = self.remote_event_subscriptions.write().await;
+            subscriptions.add(topic_path.clone(), (subscription_id.clone(), callback.clone()));
+        }
+         
+        Ok(subscription_id)
+    }
+    
+    /// Get local event subscribers
+    ///
+    /// INTENTION: Find all local subscribers for a specific event topic.
+    pub async fn get_local_event_subscribers(&self, topic_path: &TopicPath) -> Vec<(String, EventCallback)> {
+        let subscriptions = self.local_event_subscriptions.read().await;
+        subscriptions.find_matches(topic_path)
+    }
+    
+    /// Get remote event subscribers
+    ///
+    /// INTENTION: Find all remote subscribers for a specific event topic.
+    pub async fn get_remote_event_subscribers(&self, topic_path: &TopicPath) -> Vec<(String, EventCallback)> {
+        let subscriptions = self.remote_event_subscriptions.read().await;
+        subscriptions.find_matches(topic_path)
+    }
+     
+     //FIX: this mnethods should reveive a topiPAth instead of a string for service_path
+    /// Update service state
+    ///
+    /// INTENTION: Track the lifecycle state of a service.
+    pub async fn update_service_state(&self, service_path: &str, state: ServiceState) -> Result<()> {
+        self.logger.debug(format!("Updating service state for {}: {:?}", service_path, state));
+        let mut states = self.service_states.write().await;
+        states.insert(service_path.to_string(), state);
+        Ok(())
+    }
+    
+    //FIX rename to get_all_service_states
+    /// Get all service states
+    ///
+    /// INTENTION: Retrieve the current state of all services.
+    pub async fn get_all_service_states(&self) -> HashMap<String, ServiceState> {
+        self.service_states.read().await.clone()
+    }
+    
+    //REMOVED DONT PUT BACK - any code tha breaks need to be changed
+    // pub async fn get_all_action_handlers(&self, topic_path: &TopicPath) -> Vec<ActionHandler> {
+    
+    /// Get all local services
+    ///
+    /// INTENTION: Provide access to all registered local services, allowing the
+    /// Node to directly interact with them for lifecycle operations like initialization,
+    /// starting, and stopping. This preserves the Node's responsibility for service
+    /// lifecycle management while keeping the Registry focused on registration.
+    pub async fn get_local_services(&self) -> HashMap<String, Arc<dyn AbstractService>> {
+        self.local_services.read().await.clone()
+    }
+    
+    /// Unsubscribe from a local event subscription
+    ///
+    /// INTENTION: Remove a specific subscription by ID from the local event subscriptions.
+    pub async fn unsubscribe_local(&self, topic: &str, subscription_id: &str) -> Result<()> {
+        self.logger.debug(format!("Unsubscribing from local topic: {} with ID: {}", topic, subscription_id));
+        
+        // Convert string to TopicPath with default network for compatibility
+        if let Ok(topic_path) = TopicPath::new(topic, "default") {
+            let mut local_subscriptions = self.local_event_subscriptions.write().await;
+            
+            // Remove the specific subscription using the predicate function
+            let removed = local_subscriptions.remove_handler(&topic_path, |handler| {
+                let (id, _) = handler;
+                id == subscription_id
+            });
+             
+            if removed {
+                self.logger.debug(format!("Successfully unsubscribed from topic: {} with ID: {}", topic, subscription_id));
+                Ok(())
+            } else {
+                let msg = format!("No subscription found for topic: {} with ID: {}", topic, subscription_id);
+                self.logger.warn(msg.clone());
+                Err(anyhow!(msg))
             }
+        } else {
+            let msg = format!("Invalid topic path: {}", topic);
+            self.logger.warn(msg.clone());
+            Err(anyhow!(msg))
+        }
+    }
+    
+    /// Unsubscribe from a remote event subscription
+    ///
+    /// INTENTION: Remove a specific subscription by ID from the remote event subscriptions.
+    pub async fn unsubscribe_remote(&self, topic: &str, subscription_id: &str) -> Result<()> {
+        self.logger.debug(format!("Unsubscribing from remote topic: {} with ID: {}", topic, subscription_id));
+        
+        // Convert string to TopicPath with default network for compatibility
+        if let Ok(topic_path) = TopicPath::new(topic, "default") {
+            let mut remote_subscriptions = self.remote_event_subscriptions.write().await;
+            
+            // Remove the specific subscription using the predicate function
+            let removed = remote_subscriptions.remove_handler(&topic_path, |handler| {
+                let (id, _) = handler;
+                id == subscription_id
+            });
+             
+            if removed {
+                self.logger.debug(format!("Successfully unsubscribed from remote topic: {} with ID: {}", topic, subscription_id));
+                Ok(())
+            } else {
+                let msg = format!("No remote subscription found for topic: {} with ID: {}", topic, subscription_id);
+                self.logger.warn(msg.clone());
+                Err(anyhow!(msg))
+            }
+        } else {
+            let msg = format!("Invalid topic path: {}", topic);
+            self.logger.warn(msg.clone());
+            Err(anyhow!(msg))
+        }
+    }
+    
+}
+
+#[async_trait::async_trait]
+impl crate::services::RegistryDelegate for ServiceRegistry {
+    /// Get all service states
+    async fn get_all_service_states(&self) -> HashMap<String, ServiceState> {
+        self.service_states.read().await.clone()
+    }
+    
+    /// Get metadata for a specific service
+    async fn get_service_metadata(&self, service_path: &str) -> Option<CompleteServiceMetadata> {
+        // First try looking up a local service
+        let services = self.local_services.read().await;
+        if let Some(service) = services.get(service_path) {
+            let states = self.service_states.read().await;
+            let state = states.get(service_path).cloned().unwrap_or(ServiceState::Unknown);
+            
+            // Create timestamp for registration
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            
+            // Create metadata using individual getter methods
+            return Some(CompleteServiceMetadata {
+                name: service.name().to_string(),
+                path: service_path.to_string(),
+                version: service.version().to_string(),
+                description: service.description().to_string(),
+                registered_actions: HashMap::new(), // Would need more complex logic to populate
+                registered_events: HashMap::new(),  // Would need more complex logic to populate
+                current_state: state,
+                registration_time: now,
+                last_start_time: None,
+            });
+        }
+        
+        // If not found, it might be a remote service - this would need to be implemented
+        // based on how remote service metadata is stored
+        None
+    }
+    
+    /// Get metadata for all registered services
+    async fn get_all_service_metadata(&self) -> HashMap<String, CompleteServiceMetadata> {
+        // For now, just return local services
+        let mut result = HashMap::new();
+        let services = self.local_services.read().await;
+        let states = self.service_states.read().await;
+        
+        // Create timestamp for registration
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        
+        for (path, service) in services.iter() {
+            let state = states.get(path).cloned().unwrap_or(ServiceState::Unknown);
+            
+            // Create metadata using individual getter methods
+            result.insert(path.clone(), CompleteServiceMetadata {
+                name: service.name().to_string(),
+                path: path.clone(),
+                version: service.version().to_string(),
+                description: service.description().to_string(),
+                registered_actions: HashMap::new(), // Would need more complex logic to populate
+                registered_events: HashMap::new(),  // Would need more complex logic to populate
+                current_state: state,
+                registration_time: now,
+                last_start_time: None,
+            });
         }
         
         result
     }
-
-    /// Get callback for a specific subscription
-    ///
-    /// INTENTION: Get the callback for a specific subscription ID.
-    /// This is used by the Node when executing callbacks, to avoid having
-    /// to hold locks across await points.
-    ///
-    /// Returns true if the callback was found and executed, false otherwise.
-    pub async fn has_subscriber(&self, topic: &TopicPath, subscription_id: &str) -> bool {
-        let subscriptions = self.event_subscriptions.read().await;
+    
+    /// List all services
+    fn list_services(&self) -> Vec<String> {
+        // For now, just return local services
+        // This would need to add remote services in a real implementation
+        let services = match self.local_services.try_read() {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
         
-        // Find all subscriptions that match this topic
-        let matching_subs = subscriptions.find_matches(topic);
-        
-        // Check if any of them have the specified subscription ID
-        matching_subs.iter().any(|(id, _)| id == subscription_id)
+        services.keys().cloned().collect()
     }
-
-    /// Get event handlers for a topic
-    ///
-    /// INTENTION: Get all the event handlers registered for a specific topic.
-    /// This is used by the Node when publishing events, so it can execute the handlers directly.
-    ///
-    /// ARCHITECTURAL PRINCIPLE:
-    /// The Registry only provides the handler information, but does NOT execute handlers.
-    /// Handler execution is the responsibility of the Node.
-    ///
-    /// Returns subscription IDs and their handlers for the topic.
-    pub async fn get_event_handlers(&self, topic: &TopicPath) -> Vec<(String, EventHandler)> {
-        let subscriptions = self.event_subscriptions.read().await;
-        
-        // Find all subscriptions that match this topic, including wildcard patterns
-        subscriptions.find_matches(topic)
+    
+    /// Register a remote action handler
+    async fn register_remote_action_handler(
+        &self,
+        topic_path: &TopicPath,
+        handler: ActionHandler,
+        remote_service: Arc<RemoteService>
+    ) -> Result<()> {
+        // This is just a proxy to the instance method
+        self.register_remote_action_handler(topic_path, handler, remote_service).await
     }
 } 

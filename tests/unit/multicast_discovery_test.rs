@@ -10,7 +10,7 @@ use tokio::sync::RwLock;
 
 use runar_node::network::discovery::{NodeDiscovery, NodeInfo, DiscoveryOptions, DiscoveryListener};
 use runar_node::network::discovery::multicast_discovery::MulticastDiscovery;
-use runar_node::network::transport::NodeIdentifier;
+use runar_node::network::transport::PeerId;
 use runar_common::Logger;
 
 // Create a MockDiscovery implementation
@@ -112,7 +112,7 @@ mod tests {
         
         // Create test node info
         let node_info = NodeInfo {
-            identifier: NodeIdentifier::new("test-network".to_string(), "node1".to_string()),
+            peer_id: PeerId::new("test-network".to_string(), "node1".to_string()),
             address: "127.0.0.1:8080".to_string(),
             capabilities: vec!["request".to_string(), "event".to_string()],
             last_seen: SystemTime::now(),
@@ -128,7 +128,7 @@ mod tests {
             Ok(_) => {
                 // Check the received node info
                 if let Ok(received_node_info) = rx.try_recv() {
-                    assert_eq!(received_node_info.identifier.node_id, "node1");
+                    assert_eq!(received_node_info.peer_id.node_id, "node1");
                     assert_eq!(received_node_info.address, "127.0.0.1:8080");
                 } else {
                     panic!("Discovery notification signaled but no node info in channel");

@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, RwLock, oneshot, broadcast};
 use tokio::time::sleep;
 use std::str::FromStr;
 
-use runar_node::network::transport::{NetworkTransport, NetworkMessage, NodeIdentifier, TransportFactory};
+use runar_node::network::transport::{NetworkTransport, NetworkMessage, PeerId, TransportFactory};
 use runar_node::network::transport::quic_transport::{QuicTransport, QuicTransportOptions, QuicTransportFactory};
 use runar_node::network::discovery::{NodeDiscovery, NodeInfo, DiscoveryOptions, DEFAULT_MULTICAST_ADDR};
 use runar_node::network::discovery::multicast_discovery::MulticastDiscovery;
@@ -23,7 +23,7 @@ use runar_common::{Component, Logger};
 struct TestNode {
     transport: Arc<dyn NetworkTransport>,
     discovery: Arc<dyn NodeDiscovery>,
-    node_id: NodeIdentifier,
+    node_id: PeerId,
     message_rx: broadcast::Receiver<NetworkMessage>,
     message_tx: broadcast::Sender<NetworkMessage>,
     discovery_rx: mpsc::Receiver<NodeInfo>,
@@ -34,7 +34,7 @@ impl TestNode {
     /// Create a new test node
     async fn new(network_id: &str, node_id: &str, bind_address: &str) -> Result<Self> {
         let logger = Logger::new_root(Component::Network, node_id);
-        let node_identifier = NodeIdentifier::new(network_id.to_string(), node_id.to_string());
+        let node_identifier = PeerId::new(network_id.to_string(), node_id.to_string());
         
         // Set up transport
         let mut options = QuicTransportOptions::default();
@@ -108,7 +108,7 @@ impl TestNode {
             .ok_or_else(|| anyhow!("No local address available"))?;
             
         let node_info = NodeInfo {
-            identifier: self.node_id.clone(),
+            peer_id: self.node_id.clone(),
             address: addr.to_string(),
             capabilities: vec!["request".to_string(), "event".to_string()],
             last_seen: SystemTime::now(),
@@ -144,7 +144,7 @@ impl TestNode {
             .ok_or_else(|| anyhow!("No local address available for other node"))?;
             
         let node_info = NodeInfo {
-            identifier: other_node.node_id.clone(),
+            peer_id: other_node.node_id.clone(),
             address: other_addr.to_string(),
             capabilities: vec!["request".to_string(), "event".to_string()],
             last_seen: SystemTime::now(),
@@ -155,7 +155,7 @@ impl TestNode {
     }
     
     /// Send a message to another node
-    async fn send_message(&self, destination: &NodeIdentifier, payload: ValueType, msg_type: &str) -> Result<()> {
+    async fn send_message(&self, destination: &PeerId, payload: ValueType, msg_type: &str) -> Result<()> {
         let message = NetworkMessage {
             source: self.node_id.clone(),
             destination: Some(destination.clone()),
@@ -354,7 +354,7 @@ async fn test_discovery_announces_nodes() -> Result<()> {
     // For testing stability, directly register nodes with each other
     let node1_addr = node1.transport.local_address().await.unwrap();
     let node1_info = NodeInfo {
-        identifier: node1.node_id.clone(),
+        peer_id: node1.node_id.clone(),
         address: node1_addr.to_string(),
         capabilities: vec!["request".to_string(), "event".to_string()],
         last_seen: SystemTime::now(),
@@ -362,7 +362,7 @@ async fn test_discovery_announces_nodes() -> Result<()> {
     
     let node2_addr = node2.transport.local_address().await.unwrap();
     let node2_info = NodeInfo {
-        identifier: node2.node_id.clone(),
+        peer_id: node2.node_id.clone(),
         address: node2_addr.to_string(),
         capabilities: vec!["request".to_string(), "event".to_string()],
         last_seen: SystemTime::now(),
@@ -387,8 +387,8 @@ async fn test_discovery_announces_nodes() -> Result<()> {
     println!("Node2 discovered: {:?}", nodes_from_2);
     
     // Verify that each node discovered the other
-    let found_node2 = nodes_from_1.iter().any(|n| n.identifier.node_id == "node2");
-    let found_node1 = nodes_from_2.iter().any(|n| n.identifier.node_id == "node1");
+    let found_node2 = nodes_from_1.iter().any(|n| n.peer_id.node_id == "node2");
+    let found_node1 = nodes_from_2.iter().any(|n| n.peer_id.node_id == "node1");
     
     assert!(found_node2, "Node1 should discover node2");
     assert!(found_node1, "Node2 should discover node1");
@@ -420,7 +420,7 @@ async fn test_combined_discovery_and_transport() -> Result<()> {
     // For testing stability, directly register nodes with each other
     let node1_addr = node1.transport.local_address().await.unwrap();
     let node1_info = NodeInfo {
-        identifier: node1.node_id.clone(),
+        peer_id: node1.node_id.clone(),
         address: node1_addr.to_string(),
         capabilities: vec!["request".to_string(), "event".to_string()],
         last_seen: SystemTime::now(),
@@ -428,7 +428,7 @@ async fn test_combined_discovery_and_transport() -> Result<()> {
     
     let node2_addr = node2.transport.local_address().await.unwrap();
     let node2_info = NodeInfo {
-        identifier: node2.node_id.clone(),
+        peer_id: node2.node_id.clone(),
         address: node2_addr.to_string(),
         capabilities: vec!["request".to_string(), "event".to_string()],
         last_seen: SystemTime::now(),
@@ -456,7 +456,7 @@ async fn test_combined_discovery_and_transport() -> Result<()> {
     // Node1 should use discovery information to connect to node2
     println!("Finding node2 in discovery results...");
     let node2_info = nodes_from_1.iter()
-        .find(|n| n.identifier.node_id == "node2")
+        .find(|n| n.peer_id.node_id == "node2")
         .ok_or_else(|| anyhow!("Node2 not found in discovery results"))?;
     
     // Connect using the discovered info
@@ -467,7 +467,7 @@ async fn test_combined_discovery_and_transport() -> Result<()> {
     // Establish bidirectional connection
     println!("Establishing bidirectional connection...");
     let node1_info = nodes_from_2.iter()
-        .find(|n| n.identifier.node_id == "node1")
+        .find(|n| n.peer_id.node_id == "node1")
         .ok_or_else(|| anyhow!("Node1 not found in discovery results"))?;
     node2.transport.connect(node1_info).await?;
     sleep(Duration::from_secs(1)).await;
@@ -546,18 +546,18 @@ async fn test_three_node_network() -> Result<()> {
     // Use discovery info for connections - connect node1 to any discovered nodes
     println!("Connecting node1 to discovered nodes...");
     for node_info in &nodes_from_1 {
-        println!("Connecting to node: {}", node_info.identifier.node_id);
+        println!("Connecting to node: {}", node_info.peer_id.node_id);
         node1.transport.connect(node_info).await?;
         sleep(Duration::from_millis(500)).await;
     }
     
     // Make sure node3 is in the discovered nodes or add it manually
-    let node3_in_discovery = nodes_from_1.iter().any(|n| n.identifier.node_id == "node3");
+    let node3_in_discovery = nodes_from_1.iter().any(|n| n.peer_id.node_id == "node3");
     if !node3_in_discovery {
         println!("Node3 not found in discovery, connecting manually...");
         let addr = node3.transport.local_address().await.unwrap();
         let node3_info = NodeInfo {
-            identifier: node3.node_id.clone(),
+            peer_id: node3.node_id.clone(),
             address: addr.to_string(),
             capabilities: vec!["request".to_string(), "event".to_string()],
             last_seen: SystemTime::now(),
@@ -568,7 +568,7 @@ async fn test_three_node_network() -> Result<()> {
     
     // Send message from node1 to node3
     println!("Sending message from node1 to node3...");
-    let node3_id = NodeIdentifier::new("test-network".to_string(), "node3".to_string());
+    let node3_id = PeerId::new("test-network".to_string(), "node3".to_string());
     let test_payload = ValueType::String("Message from 1 to 3".to_string());
     node1.send_message(&node3_id, test_payload, "Node1to3Message").await?;
     
@@ -714,7 +714,7 @@ async fn test_multicast_discovery() -> Result<()> {
     let (discovery_tx1, discovery_rx1) = mpsc::channel::<NodeInfo>(100);
     discovery1.set_discovery_listener(Box::new(move |node_info| {
         let tx = discovery_tx1.clone();
-        println!("Node1 discovery listener triggered for node: {}", node_info.identifier);
+        println!("Node1 discovery listener triggered for node: {}", node_info.peer_id);
         tokio::spawn(async move {
             if let Err(e) = tx.send(node_info).await {
                 eprintln!("Discovery channel send error: {}", e);
@@ -725,7 +725,7 @@ async fn test_multicast_discovery() -> Result<()> {
     let (discovery_tx2, discovery_rx2) = mpsc::channel::<NodeInfo>(100);
     discovery2.set_discovery_listener(Box::new(move |node_info| {
         let tx = discovery_tx2.clone();
-        println!("Node2 discovery listener triggered for node: {}", node_info.identifier);
+        println!("Node2 discovery listener triggered for node: {}", node_info.peer_id);
         tokio::spawn(async move {
             if let Err(e) = tx.send(node_info).await {
                 eprintln!("Discovery channel send error: {}", e);
@@ -770,14 +770,14 @@ async fn test_multicast_discovery() -> Result<()> {
     
     // Create node info objects
     let node1_info = NodeInfo {
-        identifier: node1.node_id.clone(),
+        peer_id: node1.node_id.clone(),
         address: addr1.to_string(),
         capabilities: vec!["request".to_string(), "event".to_string()],
         last_seen: SystemTime::now(),
     };
     
     let node2_info = NodeInfo {
-        identifier: node2.node_id.clone(),
+        peer_id: node2.node_id.clone(),
         address: addr2.to_string(),
         capabilities: vec!["request".to_string(), "event".to_string()],
         last_seen: SystemTime::now(),
@@ -812,7 +812,7 @@ async fn test_multicast_discovery() -> Result<()> {
         
         // Find node1 in discovered nodes
         received = discovered.into_iter()
-            .find(|info| info.identifier.node_id == "node1")
+            .find(|info| info.peer_id.node_id == "node1")
             .map(|info| info.clone());
     }
     
@@ -833,7 +833,7 @@ async fn test_multicast_discovery() -> Result<()> {
     
     if let Some(node_info) = received {
         println!("Node2 discovered node1: {:?}", node_info);
-        assert_eq!(node_info.identifier.node_id, "node1");
+        assert_eq!(node_info.peer_id.node_id, "node1");
     }
     
     println!("Starting node2 announcements");
@@ -865,7 +865,7 @@ async fn test_multicast_discovery() -> Result<()> {
         
         // Find node2 in discovered nodes
         received = discovered.into_iter()
-            .find(|info| info.identifier.node_id == "node2")
+            .find(|info| info.peer_id.node_id == "node2")
             .map(|info| info.clone());
     }
     
@@ -886,7 +886,7 @@ async fn test_multicast_discovery() -> Result<()> {
     
     if let Some(node_info) = received {
         println!("Node1 discovered node2: {:?}", node_info);
-        assert_eq!(node_info.identifier.node_id, "node2");
+        assert_eq!(node_info.peer_id.node_id, "node2");
     }
     
     // Shutdown

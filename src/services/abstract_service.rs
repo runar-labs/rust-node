@@ -42,6 +42,8 @@ pub enum ServiceState {
     Paused,
     /// Service has encountered an error
     Error,
+    /// Service state is unknown
+    Unknown,
 }
 
 impl fmt::Display for ServiceState {
@@ -53,6 +55,7 @@ impl fmt::Display for ServiceState {
             ServiceState::Stopped => write!(f, "Stopped"),
             ServiceState::Paused => write!(f, "Paused"),
             ServiceState::Error => write!(f, "Error"),
+            ServiceState::Unknown => write!(f, "Unknown"),
         }
     }
 }

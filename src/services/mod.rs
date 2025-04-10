@@ -906,4 +906,104 @@ pub trait RegistryDelegate: Send + Sync {
     
     /// List all services
     fn list_services(&self) -> Vec<String>;
+    
+    /// Register a remote action handler
+    ///
+    /// INTENTION: Allow RemoteLifecycleContext to register remote action handlers
+    /// through this delegate to avoid circular references.
+    async fn register_remote_action_handler(
+        &self,
+        topic_path: &TopicPath,
+        handler: ActionHandler,
+        remote_service: Arc<RemoteService>
+    ) -> Result<()>;
+}
+
+/// Remote service lifecycle context
+///
+/// INTENTION: Provide remote services with the context needed for lifecycle operations
+/// such as initialization, action registration, and shutdown. Similar to LifecycleContext
+/// but with remote-specific methods.
+pub struct RemoteLifecycleContext {
+    /// Network ID for the context
+    pub network_id: String,
+    /// Service path - identifies the service within the network
+    pub service_path: String,
+    /// Optional configuration data
+    pub config: Option<ValueType>,
+    /// Logger instance with service context
+    pub logger: Logger,
+    /// Registry delegate for registry operations
+    registry_delegate: Option<Arc<dyn RegistryDelegate + Send + Sync>>,
+}
+
+impl RemoteLifecycleContext {
+    /// Create a new RemoteLifecycleContext with the given topic path and logger
+    ///
+    /// This is the primary constructor that takes the minimum required parameters.
+    pub fn new(topic_path: &TopicPath, logger: Logger) -> Self {
+        Self {
+            network_id: topic_path.network_id().to_string(),
+            service_path: topic_path.service_path(),
+            config: None,
+            logger,
+            registry_delegate: None,
+        }
+    }
+    
+    /// Add configuration to a RemoteLifecycleContext
+    ///
+    /// Use builder-style methods instead of specialized constructors.
+    pub fn with_config(mut self, config: ValueType) -> Self {
+        self.config = Some(config);
+        self
+    }
+    
+    /// Add a RegistryDelegate to a RemoteLifecycleContext
+    ///
+    /// INTENTION: Provide access to registry operations during service lifecycle events,
+    /// including action registration.
+    pub fn with_registry_delegate(mut self, delegate: Arc<dyn RegistryDelegate + Send + Sync>) -> Self {
+        self.registry_delegate = Some(delegate);
+        self
+    }
+
+    /// Helper method to log debug level message
+    pub fn debug(&self, message: impl Into<String>) {
+        self.logger.debug(message);
+    }
+
+    /// Helper method to log info level message
+    pub fn info(&self, message: impl Into<String>) {
+        self.logger.info(message);
+    }
+
+    /// Helper method to log warning level message
+    pub fn warn(&self, message: impl Into<String>) {
+        self.logger.warn(message);
+    }
+
+    /// Helper method to log error level message
+    pub fn error(&self, message: impl Into<String>) {
+        self.logger.error(message);
+    }
+
+    /// Register a remote action handler
+    ///
+    /// INTENTION: Allow a remote service to register a handler function for a specific action.
+    pub async fn register_remote_action_handler(
+        &self, 
+        topic_path: &TopicPath, 
+        handler: ActionHandler,
+        remote_service: Arc<RemoteService>
+    ) -> Result<()> {
+        // Get the registry delegate
+        let delegate = match &self.registry_delegate {
+            Some(d) => d,
+            None => return Err(anyhow!("No registry delegate available")),
+        };
+        
+        // Call the delegate to register the remote action handler
+        delegate.register_remote_action_handler(topic_path, handler, remote_service).await
+    }
 } 

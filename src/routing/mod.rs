@@ -353,6 +353,7 @@ impl TopicPath {
             return "".to_string();
         }
         
+        //FIX: this methdosnis called a lot.. so we need to calculat this once and store in a field and just return it here
         // Otherwise, reconstruct the path from segments
         self.segments.iter()
             .map(|segment| match segment {

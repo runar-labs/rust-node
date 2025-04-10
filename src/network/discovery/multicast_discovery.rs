@@ -20,7 +20,7 @@ use tokio::time;
 use bincode;
 
 use super::{NodeDiscovery, NodeInfo, DiscoveryOptions, DiscoveryListener};
-use crate::network::transport::NodeIdentifier;
+use crate::network::transport::PeerId;
 
 // Default multicast address and port
 const DEFAULT_MULTICAST_ADDR: &str = "239.255.42.98";
@@ -34,14 +34,14 @@ enum MulticastMessage {
     // Node requests others to announce themselves
     DiscoveryRequest(String), // network_id
     // Node is leaving the network
-    Goodbye(NodeIdentifier),
+    Goodbye(PeerId),
 }
 
 impl MulticastMessage {
     // Helper to get the sender ID if the message contains it
-    fn sender_id(&self) -> Option<&NodeIdentifier> {
+    fn sender_id(&self) -> Option<&PeerId> {
         match self {
-            MulticastMessage::Announce(info) => Some(&info.identifier),
+            MulticastMessage::Announce(info) => Some(&info.peer_id),
             MulticastMessage::Goodbye(id) => Some(id),
             MulticastMessage::DiscoveryRequest(_) => None, // Requests don't inherently have a sender ID in this structure
         }
@@ -49,9 +49,9 @@ impl MulticastMessage {
     
     // Helper to set sender ID (useful for sender task)
     // Consumes self and returns a new message, might need adjustment based on usage
-    fn with_sender_id(mut self, sender: NodeIdentifier) -> Self {
+    fn with_sender_id(mut self, sender: PeerId) -> Self {
          match &mut self {
-            MulticastMessage::Announce(ref mut info) => info.identifier = sender,
+            MulticastMessage::Announce(ref mut info) => info.peer_id = sender,
             MulticastMessage::Goodbye(ref mut id) => *id = sender,
             MulticastMessage::DiscoveryRequest(_) => {}, // No ID field
         }
@@ -206,7 +206,7 @@ impl MulticastDiscovery {
                                 let mut skip = false;
                                 if let Some(local_info) = local_node_guard.as_ref() {
                                     if let Some(sender) = message.sender_id() {
-                                        if sender == &local_info.identifier {
+                                        if sender == &local_info.peer_id {
                                             skip = true; // Skip message from self
                                             println!("Skipping message from self");
                                         }
@@ -242,7 +242,7 @@ impl MulticastDiscovery {
                 // Update last_seen timestamp
                 current_info.last_seen = SystemTime::now();
                 // Send announcement
-                println!("Sending announcement for node {}", current_info.identifier);
+                println!("Sending announcement for node {}", current_info.peer_id);
                 if tx.send(MulticastMessage::Announce(current_info.clone())).await.is_err() {
                     println!("Failed to send periodic announcement, channel closed.");
                     break; // Stop task if channel is closed
@@ -276,9 +276,9 @@ impl MulticastDiscovery {
                 let local_node_guard = local_node.read().await; 
                 if let Some(info) = local_node_guard.as_ref() {
                     match &mut message { 
-                        MulticastMessage::Announce(ref mut node_info) => node_info.identifier = info.identifier.clone(),
+                        MulticastMessage::Announce(ref mut node_info) => node_info.peer_id = info.peer_id.clone(),
                         MulticastMessage::DiscoveryRequest(_) => { /* No sender ID needed */ }, 
-                        MulticastMessage::Goodbye(ref mut id) => *id = info.identifier.clone(),
+                        MulticastMessage::Goodbye(ref mut id) => *id = info.peer_id.clone(),
                     }
                 }
                 drop(local_node_guard); 
@@ -310,10 +310,10 @@ impl MulticastDiscovery {
         match message {
             // Announce: Store info and notify listeners
             MulticastMessage::Announce(info) => {
-                println!("Processing announce message from {}", info.identifier);
+                println!("Processing announce message from {}", info.peer_id);
                 
                 // Store the node info
-                let key = info.identifier.to_string();
+                let key = info.peer_id.to_string();
                 {
                     let mut nodes_write = nodes.write().await; 
                     nodes_write.insert(key, info.clone());
@@ -323,7 +323,7 @@ impl MulticastDiscovery {
                 {
                     let listeners_read = listeners.read().await; 
                     for listener in listeners_read.iter() {
-                        println!("Notifying listener about node {}", info.identifier);
+                        println!("Notifying listener about node {}", info.peer_id);
                         listener(info.clone());
                     }
                 }
@@ -332,8 +332,8 @@ impl MulticastDiscovery {
                 let local_node_guard = local_node.read().await;
                 if let Some(local_info) = local_node_guard.as_ref() {
                     // Only respond if this is a different node
-                    if local_info.identifier != info.identifier {
-                        println!("Auto-responding to announcement with our own info: {}", local_info.identifier);
+                    if local_info.peer_id != info.peer_id {
+                        println!("Auto-responding to announcement with our own info: {}", local_info.peer_id);
                         let response_msg = MulticastMessage::Announce(local_info.clone());
                         if let Ok(data) = bincode::serialize(&response_msg) {
                             // Small delay to avoid collision
@@ -351,9 +351,9 @@ impl MulticastDiscovery {
                 println!("Processing discovery request for network {}", network_id);
                 let local_node_guard = local_node.read().await;
                 if let Some(local_info) = local_node_guard.as_ref() {
-                    // Respond only if the request matches our network ID
-                    if local_info.identifier.network_id == network_id {
-                        println!("Responding to discovery request with our info: {}", local_info.identifier);
+                    // Respond only if the request matches one of our network IDs
+                    if local_info.network_ids.contains(&network_id) {
+                        println!("Responding to discovery request with our info: {}", local_info.peer_id);
                         let response_msg = MulticastMessage::Announce(local_info.clone());
                         if let Ok(data) = bincode::serialize(&response_msg) {
                             // Small delay to avoid collision
@@ -436,7 +436,7 @@ impl NodeDiscovery for MulticastDiscovery {
     }
     
     async fn start_announcing(&self, info: NodeInfo) -> Result<()> {
-        println!("Starting to announce node: {}", info.identifier);
+        println!("Starting to announce node: {}", info.peer_id);
         *self.local_node.write().await = Some(info.clone());
         
         let tx_opt = self.tx.lock().await;
@@ -465,8 +465,8 @@ impl NodeDiscovery for MulticastDiscovery {
         // Send goodbye message
         let info_opt = self.local_node.read().await; 
         if let Some(info) = info_opt.as_ref() {
-            println!("Sending goodbye message for node: {}", info.identifier);
-            let message = MulticastMessage::Goodbye(info.identifier.clone());
+            println!("Sending goodbye message for node: {}", info.peer_id);
+            let message = MulticastMessage::Goodbye(info.peer_id.clone());
             let tx_opt = self.tx.lock().await; 
              if let Some(ref tx) = *tx_opt {
                  // Ignore error if channel is already closed during shutdown
@@ -488,7 +488,10 @@ impl NodeDiscovery for MulticastDiscovery {
         let target_network = {
             let info_guard = self.local_node.read().await;
             network_id.map(|s| s.to_string())
-                .or_else(|| info_guard.as_ref().map(|info| info.identifier.network_id.clone()))
+                .or_else(|| {
+                    // Use the first network ID from local info as default, or "default"
+                    info_guard.as_ref().and_then(|info| info.network_ids.first().cloned())
+                })
                 .unwrap_or_else(|| "default".to_string())
         };
         
@@ -508,10 +511,10 @@ impl NodeDiscovery for MulticastDiscovery {
         println!("Waiting {} ms for discovery responses", timeout_duration.as_millis());
         tokio::time::sleep(timeout_duration).await;
 
-        // Return current state of discovered nodes
+        // Return current state of discovered nodes, filtering by network_id
         let nodes_read = self.nodes.read().await;
         let nodes_vec: Vec<NodeInfo> = nodes_read.values()
-            .filter(|info| info.identifier.network_id == target_network)
+            .filter(|info| info.network_ids.contains(&target_network))
             .cloned()
             .collect();
         
@@ -530,7 +533,7 @@ impl NodeDiscovery for MulticastDiscovery {
         // Send goodbye message
         let info_opt = self.local_node.read().await; 
         if let Some(info) = info_opt.as_ref() {
-            let message = MulticastMessage::Goodbye(info.identifier.clone());
+            let message = MulticastMessage::Goodbye(info.peer_id.clone());
             let tx_opt = self.tx.lock().await; 
              if let Some(ref tx) = *tx_opt {
                  // Ignore error if channel is already closed during shutdown
@@ -558,8 +561,8 @@ impl NodeDiscovery for MulticastDiscovery {
     }
 
     async fn register_node(&self, node_info: NodeInfo) -> Result<()> {
-        println!("Manually registering node: {}", node_info.identifier);
-        let key = node_info.identifier.to_string();
+        println!("Manually registering node: {}", node_info.peer_id);
+        let key = node_info.peer_id.to_string();
         let mut nodes = self.nodes.write().await;
         nodes.insert(key, node_info.clone());
         
@@ -574,14 +577,15 @@ impl NodeDiscovery for MulticastDiscovery {
     }
 
     async fn update_node(&self, node_info: NodeInfo) -> Result<()> {
-        println!("Updating node: {}", node_info.identifier);
+        println!("Updating node: {}", node_info.peer_id);
         // Same implementation as register_node for this implementation
         self.register_node(node_info).await
     }
 
     async fn find_node(&self, network_id: &str, node_id: &str) -> Result<Option<NodeInfo>> {
         let nodes_read = self.nodes.read().await;
-        let key = NodeIdentifier::new(network_id.to_string(), node_id.to_string()).to_string();
+        // Create PeerId using only node_id
+        let key = PeerId::new(node_id.to_string()).to_string();
         let node = nodes_read.get(&key).cloned();
         
         if let Some(ref info) = node {

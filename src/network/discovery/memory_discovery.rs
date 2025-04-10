@@ -13,7 +13,7 @@ use tokio::task::JoinHandle;
 use tokio::time;
 
 use super::{NodeDiscovery, NodeInfo, DiscoveryOptions, DiscoveryListener};
-use crate::network::transport::NodeIdentifier;
+use crate::network::transport::PeerId;
 
 /// In-memory node discovery for development and testing
 #[derive(Default)]
@@ -78,7 +78,7 @@ impl MemoryDiscovery {
                 updated_info.last_seen = SystemTime::now();
                 
                 // "Announce" by updating our entry in the registry
-                let node_key = updated_info.identifier.to_string();
+                let node_key = updated_info.peer_id.to_string();
                 {
                     let mut nodes_map = nodes.write().unwrap();
                     nodes_map.insert(node_key.clone(), updated_info.clone());
@@ -118,7 +118,7 @@ impl MemoryDiscovery {
 
     /// Adds a node to the discovery registry.
     async fn add_node_internal(&self, node_info: NodeInfo) {
-        let node_key = node_info.identifier.to_string(); 
+        let node_key = node_info.peer_id.to_string(); 
         {
             let mut nodes = self.nodes.write().unwrap();
             nodes.insert(node_key, node_info.clone());
@@ -172,7 +172,7 @@ impl NodeDiscovery for MemoryDiscovery {
         // Remove our node from the registry
         if let Some(info) = &*self.local_node.read().unwrap() {
             let mut nodes_map = self.nodes.write().unwrap();
-            nodes_map.remove(&info.identifier.to_string());
+            nodes_map.remove(&info.peer_id.to_string());
         }
         
         Ok(())
@@ -193,7 +193,8 @@ impl NodeDiscovery for MemoryDiscovery {
         let nodes_map = self.nodes.read().unwrap();
         let result = nodes_map
             .values()
-            .filter(|info| network_id.map_or(true, |net_id| info.identifier.network_id == net_id))
+            // Filter based on whether the node's network_ids list contains the requested network_id
+            .filter(|info| network_id.map_or(true, |net_id| info.network_ids.contains(&net_id.to_string())))
             .cloned()
             .collect();
         Ok(result)
@@ -201,7 +202,7 @@ impl NodeDiscovery for MemoryDiscovery {
 
     async fn find_node(&self, network_id: &str, node_id: &str) -> Result<Option<NodeInfo>> {
         let nodes = self.nodes.read().unwrap();
-        let key = NodeIdentifier::new(network_id.to_string(), node_id.to_string()).to_string();
+        let key = PeerId::new(node_id.to_string()).to_string();
         Ok(nodes.get(&key).cloned())
     }
 
@@ -232,9 +233,9 @@ impl NodeDiscovery for MemoryDiscovery {
 mod tests {
     // Add necessary imports for testing
     use super::*; 
-    use crate::network::transport::NodeIdentifier;
-    use std::time::{Duration, SystemTime};
-    use anyhow::Result;
+    use crate::network::transport::PeerId;
+    use std::time::SystemTime;
+    
 
     // ... other test helper functions ...
 
@@ -243,9 +244,10 @@ mod tests {
         // Setup discovery instance
         let discovery = MemoryDiscovery::new();
         
-        // Create NodeInfo (corrected type)
+        // Create NodeInfo (corrected type, add network_ids)
         let node_info_1 = NodeInfo {
-            identifier: NodeIdentifier::new("net1".to_string(), "node1".to_string()),
+            peer_id: PeerId::new("node1".to_string()),
+            network_ids: vec!["net1".to_string()], // Added network_ids
             address: "addr1".to_string(),
             capabilities: vec![],
             last_seen: SystemTime::now(),
@@ -255,7 +257,7 @@ mod tests {
         // Find the node
         let found_node = discovery.find_node("net1", "node1").await.unwrap();
         assert!(found_node.is_some());
-        assert_eq!(found_node.unwrap().identifier.node_id, "node1");
+        assert_eq!(found_node.unwrap().peer_id.node_id, "node1");
 
         // Find non-existent node
         let not_found_node = discovery.find_node("net1", "node2").await.unwrap();

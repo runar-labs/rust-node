@@ -14,6 +14,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::HashMap;
 
 use crate::services::abstract_service::{AbstractService, ServiceState};
 use crate::services::{LifecycleContext, RequestContext, ServiceResponse, RegistryDelegate};
@@ -146,8 +147,21 @@ impl RegistryService {
     }
     
     /// Handler for listing all services
-    async fn handle_list_services(&self, _params: ValueType, ctx: RequestContext) -> Result<ServiceResponse> {
+    async fn handle_list_services(&self, params: ValueType, ctx: RequestContext) -> Result<ServiceResponse> {
         let mut services = Vec::new();
+        
+        // Parse parameters to check if we should include detailed action metadata
+        let include_actions = if let ValueType::Map(param_map) = &params {
+            match param_map.get("include_actions") {
+                Some(ValueType::Bool(value)) => *value,
+                Some(ValueType::String(value)) => value.to_lowercase() == "true",
+                _ => false,
+            }
+        } else {
+            false
+        };
+        
+        ctx.logger.debug(format!("List services request with include_actions={}", include_actions));
         
         // Get all service states and metadata in one call
         let service_states = self.registry_delegate.get_all_service_states().await;
@@ -155,8 +169,8 @@ impl RegistryService {
         
         // Combine the information
         for (path, state) in service_states {
-            // Use vmap! macro instead of manually building HashMap
-            let service_info = if let Some(meta) = service_metadata.get(&path) {
+            // Create base service info
+            let mut service_info = if let Some(meta) = service_metadata.get(&path) {
                 vmap! {
                     "path" => path.clone(),
                     "state" => format!("{:?}", state),
@@ -171,6 +185,53 @@ impl RegistryService {
                 }
             };
             
+            // Include action metadata if requested
+            if include_actions {
+                if let Some(meta) = service_metadata.get(&path) {
+                    if !meta.registered_actions.is_empty() {
+                        // Extract network ID from the path (format: "network_id:path")
+                        let network_id = if path.contains(':') {
+                            path.split(':').next().unwrap_or("").to_string()
+                        } else {
+                            // Default to test-network if not specified
+                            "test-network".to_string()
+                        };
+                        
+                        let actions: Vec<ValueType> = meta.registered_actions.values()
+                            .map(|action| {
+                                let desc = action.description.clone();
+                                
+                                // First create the base metadata
+                                let mut action_metadata_map = HashMap::new();
+                                action_metadata_map.insert("name".to_string(), ValueType::String(action.name.clone()));
+                                action_metadata_map.insert("description".to_string(), 
+                                    ValueType::String(if desc.is_empty() { "No description".to_string() } else { desc }));
+                                action_metadata_map.insert("full_path".to_string(), 
+                                    ValueType::String(format!("{}:{}/{}", network_id, path, action.name)));
+                                
+                                // Add parameter schema if available
+                                if let Some(params_schema) = &action.parameters_schema {
+                                    action_metadata_map.insert("parameters_schema".to_string(), params_schema.clone());
+                                }
+                                
+                                // Add return schema if available
+                                if let Some(result_schema) = &action.return_schema {
+                                    action_metadata_map.insert("return_schema".to_string(), result_schema.clone());
+                                }
+                                
+                                ValueType::Map(action_metadata_map)
+                            })
+                            .collect();
+                        
+                        if let ValueType::Map(ref mut service_map) = service_info {
+                            service_map.insert("actions".to_string(), ValueType::Array(actions));
+                            // Include network ID at service level too
+                            service_map.insert("network_id".to_string(), ValueType::String(network_id));
+                        }
+                    }
+                }
+            }
+            
             services.push(service_info);
         }
         
@@ -178,7 +239,7 @@ impl RegistryService {
     }
     
     /// Handler for getting detailed information about a specific service
-    async fn handle_service_info(&self, _service_path: &str, _params: ValueType, ctx: RequestContext) -> Result<ServiceResponse> {
+    async fn handle_service_info(&self, _service_path: &str, params: ValueType, ctx: RequestContext) -> Result<ServiceResponse> {
         // Extract the service path from path parameters
         let actual_service_path = match self.extract_service_path(&ctx) {
             Ok(path) => path,
@@ -200,11 +261,20 @@ impl RegistryService {
             
             // Add metadata if available
             if let Some(meta) = self.registry_delegate.get_service_metadata(&actual_service_path).await {
+                // Extract network ID from the path (format: "network_id:path")
+                let network_id = if actual_service_path.contains(':') {
+                    actual_service_path.split(':').next().unwrap_or("").to_string()
+                } else {
+                    // Default to test-network if not specified
+                    "test-network".to_string()
+                };
+                
                 // Create a new map with metadata
                 let metadata_info = vmap! {
                     "name" => meta.name.clone(),
                     "version" => meta.version.clone(),
-                    "description" => meta.description.clone()
+                    "description" => meta.description.clone(),
+                    "network_id" => network_id.clone()
                 };
                 
                 // Merge the maps
@@ -214,18 +284,57 @@ impl RegistryService {
                     }
                 }
                 
-                // Add registered actions
+                // Add registered actions with detailed metadata
                 let actions: Vec<ValueType> = meta.registered_actions.values()
-                    .map(|action| ValueType::String(action.name.clone()))
+                    .map(|action| {
+                        let desc = action.description.clone();
+                        
+                        // First create the base metadata
+                        let mut action_metadata_map = HashMap::new();
+                        action_metadata_map.insert("name".to_string(), ValueType::String(action.name.clone()));
+                        action_metadata_map.insert("description".to_string(), 
+                            ValueType::String(if desc.is_empty() { "No description".to_string() } else { desc }));
+                        action_metadata_map.insert("full_path".to_string(), 
+                            ValueType::String(format!("{}:{}/{}", network_id, actual_service_path, action.name)));
+                        
+                        // Add parameter schema if available
+                        if let Some(params_schema) = &action.parameters_schema {
+                            action_metadata_map.insert("parameters_schema".to_string(), params_schema.clone());
+                        }
+                        
+                        // Add return schema if available
+                        if let Some(result_schema) = &action.return_schema {
+                            action_metadata_map.insert("return_schema".to_string(), result_schema.clone());
+                        }
+                        
+                        ValueType::Map(action_metadata_map)
+                    })
                     .collect();
                 
                 if let ValueType::Map(ref mut service_map) = service_info {
                     service_map.insert("actions".to_string(), ValueType::Array(actions));
                 }
                 
-                // Add registered events
+                // Add registered events with more detailed metadata
                 let events: Vec<ValueType> = meta.registered_events.values()
-                    .map(|event| ValueType::String(event.name.clone()))
+                    .map(|event| {
+                        let desc = event.description.clone();
+                        
+                        // First create the base metadata
+                        let mut event_metadata_map = HashMap::new();
+                        event_metadata_map.insert("name".to_string(), ValueType::String(event.name.clone()));
+                        event_metadata_map.insert("description".to_string(), 
+                            ValueType::String(if desc.is_empty() { "No description".to_string() } else { desc }));
+                        event_metadata_map.insert("full_path".to_string(), 
+                            ValueType::String(format!("{}:{}/{}", network_id, actual_service_path, event.name)));
+                        
+                        // Add schema if available
+                        if let Some(schema) = &event.data_schema {
+                            event_metadata_map.insert("schema".to_string(), schema.clone());
+                        }
+                        
+                        ValueType::Map(event_metadata_map)
+                    })
                     .collect();
                 
                 if let ValueType::Map(ref mut service_map) = service_info {
