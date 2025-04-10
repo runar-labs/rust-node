@@ -172,7 +172,8 @@ impl TestNode {
     
     /// Discover nodes in the network
     async fn discover_nodes(&self) -> Result<Vec<NodeInfo>> {
-        self.discovery.discover_nodes(Some(&self.node_id.network_id)).await
+        self.discovery.discover_nodes(None).await
+            .map_err(|e| anyhow!("Discovery failed: {}", e))
     }
     
     /// Shutdown the node

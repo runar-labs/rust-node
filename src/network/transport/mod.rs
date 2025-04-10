@@ -105,7 +105,7 @@ pub struct NetworkMessage {
     
     /// Message type (Request, Response, Event, etc.)
     pub message_type: String,
-
+    
     //REMOVED DONT ADD BACK.. ANY CODE THAT BREAKSM NEED TO CHANGE OT USE payloads .. 
     //actiosn and events will both use this for consistentyc
     // pub topic: String,

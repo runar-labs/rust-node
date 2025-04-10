@@ -110,9 +110,9 @@ pub struct QuicTransport {
     /// Handler for incoming messages
     handlers: Arc<StdRwLock<Vec<MessageHandler>>>,
     /// Background server task
-    server_task: Arc<TokioMutex<Option<JoinHandle<()>>>>>,
+    server_task: Arc<TokioMutex<Option<JoinHandle<()>>>>,
     /// Background connection cleanup task
-    cleanup_task: Arc<TokioMutex<Option<JoinHandle<()>>>>>,
+    cleanup_task: Arc<TokioMutex<Option<JoinHandle<()>>>>,
     /// Channel to send outgoing messages
     message_tx: Arc<TokioMutex<Option<mpsc::Sender<(NetworkMessage, PeerId)>>>>,
     /// Pending network requests waiting for responses
@@ -290,9 +290,9 @@ impl QuicTransport {
     /// Start the server task to accept incoming connections
     async fn start_server_task(&self, endpoint: Endpoint) -> Result<JoinHandle<()>> {
         let logger = self.logger.clone();
-        let handlers_arc = Arc::clone(&self.handlers);
-        let connections_arc = Arc::clone(&self.connections);
-        let callback_arc = Arc::clone(&self.connection_callback);
+        let handlers_arc: Arc<StdRwLock<Vec<MessageHandler>>> = Arc::clone(&self.handlers);
+        let connections_arc: Arc<TokioRwLock<HashMap<PeerId, Arc<TokioMutex<PeerState>>>>> = Arc::clone(&self.connections);
+        let callback_arc: Arc<TokioRwLock<Option<ConnectionCallback>>> = Arc::clone(&self.connection_callback);
         let max_idle_streams = self.options.max_idle_streams_per_peer;
 
         let task = tokio::spawn(async move {
@@ -502,7 +502,7 @@ impl QuicTransport {
     /// Start the message sending task
     async fn start_message_sender(&self) -> Result<mpsc::Sender<(NetworkMessage, PeerId)>> {
         let (tx, mut rx) = mpsc::channel::<(NetworkMessage, PeerId)>(100);
-        let connections_arc = Arc::clone(&self.connections);
+        let connections_arc: Arc<TokioRwLock<HashMap<PeerId, Arc<TokioMutex<PeerState>>>>> = Arc::clone(&self.connections);
         let logger = self.logger.clone();
         let max_idle_streams = self.options.max_idle_streams_per_peer;
 
@@ -671,8 +671,8 @@ impl QuicTransport {
 
     /// Start the background task to clean up idle connections ONLY
     async fn start_cleanup_task(&self) -> Result<JoinHandle<()>> {
-        let connections_arc = Arc::clone(&self.connections);
-        let callback_arc = Arc::clone(&self.connection_callback);
+        let connections_arc: Arc<TokioRwLock<HashMap<PeerId, Arc<TokioMutex<PeerState>>>>> = Arc::clone(&self.connections);
+        let callback_arc: Arc<TokioRwLock<Option<ConnectionCallback>>> = Arc::clone(&self.connection_callback);
         let logger = self.logger.clone();
         let connection_idle_timeout = Duration::from_millis(self.options.connection_idle_timeout_ms);
         // Revert: No stream timeout needed here anymore

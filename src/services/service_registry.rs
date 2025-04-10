@@ -85,8 +85,14 @@ pub struct ServiceRegistry {
     /// Local event subscriptions using wildcard registry
     local_event_subscriptions: RwLock<WildcardSubscriptionRegistry<(String, EventCallback)>>,
     
+    /// Map local subscription IDs back to TopicPath for efficient unsubscription
+    local_subscription_id_map: RwLock<HashMap<String, TopicPath>>,
+    
     /// Remote event subscriptions using wildcard registry
     remote_event_subscriptions: RwLock<WildcardSubscriptionRegistry<(String, EventCallback)>>,
+    
+    /// Map remote subscription IDs back to TopicPath for efficient unsubscription
+    remote_subscription_id_map: RwLock<HashMap<String, TopicPath>>,
     
     /// REMOVED - dont remote.. just remore change codfe that is using it
     //event_subscriptions: RwLock<WildcardSubscriptionRegistry<(String, EventCallback)>>,
@@ -123,7 +129,9 @@ impl Clone for ServiceRegistry {
             remote_action_handlers: RwLock::new(HashMap::new()),
             action_handlers: RwLock::new(HashMap::new()),
             local_event_subscriptions: RwLock::new(WildcardSubscriptionRegistry::new()),
-            remote_event_subscriptions: RwLock::new(WildcardSubscriptionRegistry::new()), 
+            local_subscription_id_map: RwLock::new(HashMap::new()),
+            remote_event_subscriptions: RwLock::new(WildcardSubscriptionRegistry::new()),
+            remote_subscription_id_map: RwLock::new(HashMap::new()),
             local_services: RwLock::new(HashMap::new()),
             remote_services: RwLock::new(HashMap::new()),
             legacy_remote_services: RwLock::new(HashMap::new()),
@@ -151,7 +159,9 @@ impl ServiceRegistry {
             remote_action_handlers: RwLock::new(HashMap::new()),
             action_handlers: RwLock::new(HashMap::new()),
             local_event_subscriptions: RwLock::new(WildcardSubscriptionRegistry::new()),
+            local_subscription_id_map: RwLock::new(HashMap::new()),
             remote_event_subscriptions: RwLock::new(WildcardSubscriptionRegistry::new()),
+            remote_subscription_id_map: RwLock::new(HashMap::new()),
              
             local_services: RwLock::new(HashMap::new()),
             remote_services: RwLock::new(HashMap::new()),
@@ -336,7 +346,7 @@ impl ServiceRegistry {
     ///
     /// INTENTION: Register a callback to be invoked when events are published locally.
     pub async fn register_local_event_subscription(
-        &self, 
+        &self,
         topic_path: &TopicPath,
         callback: EventCallback,
         options: SubscriptionOptions
@@ -348,6 +358,11 @@ impl ServiceRegistry {
             let mut subscriptions = self.local_event_subscriptions.write().await;
             subscriptions.add(topic_path.clone(), (subscription_id.clone(), callback.clone()));
         }
+        // Store the mapping from ID to TopicPath
+        {
+            let mut id_map = self.local_subscription_id_map.write().await;
+            id_map.insert(subscription_id.clone(), topic_path.clone());
+        }
          
         Ok(subscription_id)
     }
@@ -356,7 +371,7 @@ impl ServiceRegistry {
     ///
     /// INTENTION: Register a callback to be invoked when events are published from remote nodes.
     pub async fn register_remote_event_subscription(
-        &self, 
+        &self,
         topic_path: &TopicPath,
         callback: EventCallback
     ) -> Result<String> {
@@ -366,6 +381,11 @@ impl ServiceRegistry {
         {
             let mut subscriptions = self.remote_event_subscriptions.write().await;
             subscriptions.add(topic_path.clone(), (subscription_id.clone(), callback.clone()));
+        }
+        // Store the mapping from ID to TopicPath
+        {
+            let mut id_map = self.remote_subscription_id_map.write().await;
+            id_map.insert(subscription_id.clone(), topic_path.clone());
         }
          
         Ok(subscription_id)
@@ -419,63 +439,91 @@ impl ServiceRegistry {
         self.local_services.read().await.clone()
     }
     
-    /// Unsubscribe from a local event subscription
+    /// Unsubscribe from a local event subscription using only the subscription ID.
     ///
-    /// INTENTION: Remove a specific subscription by ID from the local event subscriptions.
-    pub async fn unsubscribe_local(&self, topic: &str, subscription_id: &str) -> Result<()> {
-        self.logger.debug(format!("Unsubscribing from local topic: {} with ID: {}", topic, subscription_id));
+    /// INTENTION: Remove a specific subscription by ID from the local event subscriptions,
+    /// providing a simpler API that doesn't require the original topic.
+    pub async fn unsubscribe_local(&self, subscription_id: &str) -> Result<()> {
+        self.logger.debug(format!("Attempting to unsubscribe local subscription ID: {}", subscription_id));
         
-        // Convert string to TopicPath with default network for compatibility
-        if let Ok(topic_path) = TopicPath::new(topic, "default") {
+        let topic_path_option: Option<TopicPath>;
+        // First, find the TopicPath associated with the subscription ID
+        {
+            let id_map = self.local_subscription_id_map.read().await;
+            topic_path_option = id_map.get(subscription_id).cloned();
+        }
+        
+        if let Some(topic_path) = topic_path_option {
+            self.logger.debug(format!("Found topic path '{}' for subscription ID: {}", topic_path.as_str(), subscription_id));
             let mut local_subscriptions = self.local_event_subscriptions.write().await;
             
-            // Remove the specific subscription using the predicate function
+            // Remove the specific subscription using the predicate function and the found TopicPath
             let removed = local_subscriptions.remove_handler(&topic_path, |handler| {
                 let (id, _) = handler;
                 id == subscription_id
             });
              
             if removed {
-                self.logger.debug(format!("Successfully unsubscribed from topic: {} with ID: {}", topic, subscription_id));
+                // Also remove from the ID map
+                {
+                    let mut id_map = self.local_subscription_id_map.write().await;
+                    id_map.remove(subscription_id);
+                }
+                self.logger.debug(format!("Successfully unsubscribed from topic: {} with ID: {}", topic_path.as_str(), subscription_id));
                 Ok(())
             } else {
-                let msg = format!("No subscription found for topic: {} with ID: {}", topic, subscription_id);
+                // This case might happen if the subscription was already removed concurrently
+                let msg = format!("Subscription handler not found for topic path {} and ID {}, although ID was mapped. Potential race condition?", topic_path.as_str(), subscription_id);
                 self.logger.warn(msg.clone());
                 Err(anyhow!(msg))
             }
         } else {
-            let msg = format!("Invalid topic path: {}", topic);
+            let msg = format!("No topic path found mapping to local subscription ID: {}. Cannot unsubscribe.", subscription_id);
             self.logger.warn(msg.clone());
             Err(anyhow!(msg))
         }
     }
     
-    /// Unsubscribe from a remote event subscription
+    /// Unsubscribe from a remote event subscription using only the subscription ID.
     ///
-    /// INTENTION: Remove a specific subscription by ID from the remote event subscriptions.
-    pub async fn unsubscribe_remote(&self, topic: &str, subscription_id: &str) -> Result<()> {
-        self.logger.debug(format!("Unsubscribing from remote topic: {} with ID: {}", topic, subscription_id));
+    /// INTENTION: Remove a specific subscription by ID from the remote event subscriptions,
+    /// providing a simpler API that doesn't require the original topic.
+    pub async fn unsubscribe_remote(&self, subscription_id: &str) -> Result<()> {
+        self.logger.debug(format!("Attempting to unsubscribe remote subscription ID: {}", subscription_id));
         
-        // Convert string to TopicPath with default network for compatibility
-        if let Ok(topic_path) = TopicPath::new(topic, "default") {
+        let topic_path_option: Option<TopicPath>;
+        // First, find the TopicPath associated with the subscription ID
+        {
+            let id_map = self.remote_subscription_id_map.read().await;
+            topic_path_option = id_map.get(subscription_id).cloned();
+        }
+        
+        if let Some(topic_path) = topic_path_option {
+            self.logger.debug(format!("Found topic path '{}' for subscription ID: {}", topic_path.as_str(), subscription_id));
             let mut remote_subscriptions = self.remote_event_subscriptions.write().await;
             
-            // Remove the specific subscription using the predicate function
+            // Remove the specific subscription using the predicate function and the found TopicPath
             let removed = remote_subscriptions.remove_handler(&topic_path, |handler| {
                 let (id, _) = handler;
                 id == subscription_id
             });
              
             if removed {
-                self.logger.debug(format!("Successfully unsubscribed from remote topic: {} with ID: {}", topic, subscription_id));
+                // Also remove from the ID map
+                {
+                    let mut id_map = self.remote_subscription_id_map.write().await;
+                    id_map.remove(subscription_id);
+                }
+                self.logger.debug(format!("Successfully unsubscribed from remote topic: {} with ID: {}", topic_path.as_str(), subscription_id));
                 Ok(())
             } else {
-                let msg = format!("No remote subscription found for topic: {} with ID: {}", topic, subscription_id);
+                 // This case might happen if the subscription was already removed concurrently
+                let msg = format!("Subscription handler not found for remote topic path {} and ID {}, although ID was mapped. Potential race condition?", topic_path.as_str(), subscription_id);
                 self.logger.warn(msg.clone());
                 Err(anyhow!(msg))
             }
         } else {
-            let msg = format!("Invalid topic path: {}", topic);
+            let msg = format!("No topic path found mapping to remote subscription ID: {}. Cannot unsubscribe.", subscription_id);
             self.logger.warn(msg.clone());
             Err(anyhow!(msg))
         }
@@ -555,7 +603,7 @@ impl crate::services::RegistryDelegate for ServiceRegistry {
         
         result
     }
-    
+
     /// List all services
     fn list_services(&self) -> Vec<String> {
         // For now, just return local services

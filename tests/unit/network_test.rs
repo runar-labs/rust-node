@@ -11,11 +11,11 @@ use std::net::SocketAddr;
 use async_trait::async_trait;
 
 use runar_node::network::transport::{NetworkTransport, NetworkMessage, PeerId, MessageHandler};
+use runar_node::network::transport::{NetworkError, ConnectionCallback};
 use runar_node::network::discovery::{NodeDiscovery, NodeInfo, DiscoveryOptions, DiscoveryListener};
 use runar_common::types::ValueType;
 use runar_common::Logger;
 use runar_node::network::transport::peer_registry::PeerRegistry;
-use runar_node::network::transport::NetworkError;
 
 // Mock implementation of NetworkTransport for testing
 struct MockTransport {
@@ -76,7 +76,7 @@ impl NetworkTransport for MockTransport {
     }
 
     // Correct signature: takes PeerId, not &NodeInfo
-    async fn connect(&self, _node_id: PeerId) -> Result<(), NetworkError> {
+    async fn connect(&self, _node_id: PeerId, _address: SocketAddr) -> Result<(), NetworkError> {
         self.logger.debug("MockTransport: connect called");
         Ok(())
     }

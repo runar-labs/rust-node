@@ -16,6 +16,7 @@ use runar_node::services::service_registry::ServiceRegistry;
 use runar_node::services::{ ServiceResponse, ActionHandler, EventContext};
 use runar_node::routing::TopicPath;
 use runar_common::logging::{Logger, Component};
+use runar_node::services::SubscriptionOptions;
 
 /// Test that verifies subscription functionality in the service registry
 /// 
@@ -46,19 +47,19 @@ async fn test_subscribe_and_unsubscribe() {
             })
         });
         
-        // Subscribe to the topic
-        let subscription_id = registry.subscribe(&topic, callback).await.unwrap();
+        // Subscribe to the topic using the correct method
+        let subscription_id = registry.register_local_event_subscription(&topic, callback, SubscriptionOptions::default()).await.unwrap();
         
-        // Test the get_event_handlers method
-        let handlers = registry.get_event_handlers(&topic).await;
+        // Test the get_local_event_subscribers method
+        let handlers = registry.get_local_event_subscribers(&topic).await;
         assert_eq!(handlers.len(), 1, "Expected one handler to be registered");
         assert_eq!(handlers[0].0, subscription_id, "Subscriber ID should match");
         
-        // Unsubscribe
-        registry.unsubscribe(&topic, Some(&subscription_id)).await.unwrap();
+        // Unsubscribe using the correct method
+        registry.unsubscribe_local(&subscription_id).await.unwrap();
         
         // Verify the handler is removed
-        let handlers_after = registry.get_event_handlers(&topic).await;
+        let handlers_after = registry.get_local_event_subscribers(&topic).await;
         assert_eq!(handlers_after.len(), 0, "Expected handler to be removed after unsubscribe");
     }).await {
         Ok(_) => (), // Test completed within the timeout
@@ -89,26 +90,26 @@ async fn test_wildcard_subscriptions() {
         let wildcard1 = TopicPath::new("test/#", "net1").expect("Valid topic path");
         let wildcard2 = TopicPath::new("test/events/#", "net1").expect("Valid topic path");
         
-        // Subscribe to wildcard topics
-        let _id1 = registry.subscribe(&wildcard1, callback.clone()).await.unwrap();
-        let id2 = registry.subscribe(&wildcard2, callback.clone()).await.unwrap();
+        // Subscribe to wildcard topics using the correct method
+        let id1 = registry.register_local_event_subscription(&wildcard1, callback.clone(), SubscriptionOptions::default()).await.unwrap();
+        let id2 = registry.register_local_event_subscription(&wildcard2, callback.clone(), SubscriptionOptions::default()).await.unwrap();
         
-        // Verify handlers are registered correctly
-        let handlers1 = registry.get_event_handlers(&wildcard1).await;
-        let handlers2 = registry.get_event_handlers(&wildcard2).await;
+        // Verify handlers are registered correctly using the correct method
+        let handlers1 = registry.get_local_event_subscribers(&wildcard1).await;
+        let handlers2 = registry.get_local_event_subscribers(&wildcard2).await;
         
         assert_eq!(handlers1.len(), 1, "Expected one handler for wildcard1");
         assert_eq!(handlers2.len(), 1, "Expected one handler for wildcard2");
         
-        // Unsubscribe from one wildcard
-        registry.unsubscribe(&wildcard2, Some(&id2)).await.unwrap();
+        // Unsubscribe from one wildcard using the correct method
+        registry.unsubscribe_local(&id2).await.unwrap();
         
-        // Verify the handler is removed
-        let handlers2_after = registry.get_event_handlers(&wildcard2).await;
+        // Verify the handler is removed using the correct method
+        let handlers2_after = registry.get_local_event_subscribers(&wildcard2).await;
         assert_eq!(handlers2_after.len(), 0, "Expected handler to be removed from wildcard2");
         
-        // But wildcard1 should still have its handler
-        let handlers1_after = registry.get_event_handlers(&wildcard1).await;
+        // But wildcard1 should still have its handler using the correct method
+        let handlers1_after = registry.get_local_event_subscribers(&wildcard1).await;
         assert_eq!(handlers1_after.len(), 1, "Expected wildcard1 handler to remain");
     }).await {
         Ok(_) => (), // Test completed within the timeout
@@ -145,7 +146,7 @@ async fn test_register_and_get_action_handler() {
         });
         
         // Register the handler
-        registry.register_action_handler(
+        registry.register_local_action_handler(
             &topic_path,
             handler.clone(),
             None
@@ -203,19 +204,19 @@ async fn test_multiple_action_handlers() {
         });
         
         // Register all handlers
-        registry.register_action_handler(
+        registry.register_local_action_handler(
             &add_action_path,
             add_handler,
             None
         ).await.unwrap();
         
-        registry.register_action_handler(
+        registry.register_local_action_handler(
             &subtract_action_path,
             subtract_handler,
             None
         ).await.unwrap();
         
-        registry.register_action_handler(
+        registry.register_local_action_handler(
             &concat_action_path,
             concat_handler,
             None
@@ -271,13 +272,13 @@ async fn test_action_handler_network_isolation() {
         });
         
         // Register handlers in different networks
-        registry1.register_action_handler(
+        registry1.register_local_action_handler(
             &network1_action_path,
             handler1,
             None
         ).await.unwrap();
         
-        registry2.register_action_handler(
+        registry2.register_local_action_handler(
             &network2_action_path,
             handler2,
             None
@@ -336,22 +337,22 @@ async fn test_multiple_event_handlers() {
             })
         });
         
-        // Subscribe handlers to topics
-        let id1 = registry.subscribe(&topic1, handler1).await.unwrap();
-        let id2 = registry.subscribe(&topic2, handler2).await.unwrap();
+        // Subscribe handlers to topics using the correct method
+        let id1 = registry.register_local_event_subscription(&topic1, handler1, SubscriptionOptions::default()).await.unwrap();
+        let id2 = registry.register_local_event_subscription(&topic2, handler2, SubscriptionOptions::default()).await.unwrap();
         
-        // Retrieve and verify handlers
-        let handlers1 = registry.get_event_handlers(&topic1).await;
-        let handlers2 = registry.get_event_handlers(&topic2).await;
+        // Retrieve and verify handlers using the correct method
+        let handlers1 = registry.get_local_event_subscribers(&topic1).await;
+        let handlers2 = registry.get_local_event_subscribers(&topic2).await;
         
         assert_eq!(handlers1.len(), 1, "Expected one handler for topic1");
         assert_eq!(handlers2.len(), 1, "Expected one handler for topic2");
         assert_eq!(handlers1[0].0, id1, "Subscriber ID should match for topic1");
         assert_eq!(handlers2[0].0, id2, "Subscriber ID should match for topic2");
         
-        // Verify getting handlers for a non-existent topic
+        // Verify getting handlers for a non-existent topic using the correct method
         let nonexistent_topic = TopicPath::new("test/events/deleted", "net1").expect("Valid topic path");
-        let handlers_none = registry.get_event_handlers(&nonexistent_topic).await;
+        let handlers_none = registry.get_local_event_subscribers(&nonexistent_topic).await;
         assert_eq!(handlers_none.len(), 0, "Expected no handlers for non-existent topic");
     }).await {
         Ok(_) => (), // Test completed within the timeout
@@ -434,10 +435,10 @@ async fn test_path_template_parameters() {
             })
         });
         
-        // Register all handlers
-        registry.register_action_handler(&service_info_path, service_info_handler, None).await.unwrap();
-        registry.register_action_handler(&service_state_path, service_state_handler, None).await.unwrap();
-        registry.register_action_handler(&action_path, action_handler, None).await.unwrap();
+        // Register all handlers using the correct local method
+        registry.register_local_action_handler(&service_info_path, service_info_handler, None).await.unwrap();
+        registry.register_local_action_handler(&service_state_path, service_state_handler, None).await.unwrap();
+        registry.register_local_action_handler(&action_path, action_handler, None).await.unwrap();
         
         // Create specific path instances for testing handler retrieval
         let math_service_path = TopicPath::new("$registry/services/math", "test_network").unwrap();

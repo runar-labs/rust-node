@@ -212,10 +212,10 @@ impl NetworkConfig {
 
 impl NodeConfig {
     /// Create a new configuration with the specified node ID and network ID
-    pub fn new(node_id: String, default_network_id: String) -> Self {
+    pub fn new(node_id: impl Into<String>, default_network_id: impl Into<String>) -> Self {
         Self {
-            node_id,
-            default_network_id,
+            node_id: node_id.into()     ,
+            default_network_id: default_network_id.into(),
             network_ids: Vec::new(),
             network_config: None,
             request_timeout_ms: 30000, // 30 seconds
@@ -223,7 +223,7 @@ impl NodeConfig {
     }
     
     /// Generate a node ID if not provided
-    pub fn new_with_generated_id(default_network_id: String) -> Self {
+    pub fn new_with_generated_id(default_network_id: impl Into<String>) -> Self {
         let node_id = Uuid::new_v4().to_string();
         Self::new(node_id, default_network_id)
     }
@@ -284,8 +284,8 @@ pub struct Node {
     /// Default load balancer to use if none is provided
     pub(crate) default_load_balancer: RoundRobinLoadBalancer,
 
-    /// Event payloads for batch event messages
-    pub(crate) event_payloads: Arc<RwLock<HashMap<String, Vec<(String, ValueType, Option<String>)>>>>,
+    /// Pending requests waiting for responses, keyed by correlation ID
+    pub(crate) event_payloads: Arc<RwLock<HashMap<String, oneshot::Sender<Result<ServiceResponse>>>>>,
 }
 
 // Implementation for Node
@@ -511,7 +511,8 @@ impl Node {
         self.logger.info("Starting networking components...");
         
         if !self.supports_networking {
-            return Err(anyhow!("Networking not supported by this node"));
+            self.logger.info("Networking is disabled, skipping network initialization");
+            return Ok(());
         }
         
         // Get the configuration
@@ -597,6 +598,12 @@ impl Node {
 
     /// Handle discovery of a new node
     pub async fn handle_discovered_node(&self, node_info: NodeInfo) -> Result<()> {
+        // Skip if networking is not enabled
+        if !self.supports_networking {
+            self.logger.warn("Received node discovery event but networking is disabled");
+            return Ok(());
+        }
+        
         self.logger.info(format!("Discovery listener found node: {}", node_info.peer_id));
         
         // For now, just log discovery events
@@ -610,6 +617,12 @@ impl Node {
 
     /// Handle a network message
     async fn handle_network_message(&self, message: NetworkMessage) -> Result<()> {
+        // Skip if networking is not enabled
+        if !self.supports_networking {
+            self.logger.warn("Received network message but networking is disabled");
+            return Ok(());
+        }
+        
         self.logger.debug(format!("Received network message: {:?}", message));
         
         // Match on message type
@@ -620,13 +633,19 @@ impl Node {
             "Discovery" => self.handle_network_discovery(message).await,
             _ => {
                 self.logger.warn(format!("Unknown message type: {}", message.message_type));
-        Ok(())
+                Ok(())
             }
         }
     }
 
     /// Handle a network request
     async fn handle_network_request(&self, message: NetworkMessage) -> Result<()> {
+        // Skip if networking is not enabled
+        if !self.supports_networking {
+            self.logger.warn("Received network request but networking is disabled");
+            return Ok(());
+        }
+        
         self.logger.info(format!("Handling network request from {}", message.source));
         
         // Assume requests have one payload for now. If batching is allowed, this needs iteration.
@@ -657,17 +676,24 @@ impl Node {
                     payloads: vec![(topic, response.data.unwrap_or(ValueType::Null), correlation_id)],
                 };
                 
+                // Check if networking is still enabled before trying to send response
+                if !self.supports_networking {
+                    self.logger.warn("Can't send response - networking is disabled");
+                    return Ok(());
+                }
+                
                 // Send the response via transport
-                if let Some(transport) = &*self.network_transport.read().await {
-                     if let Err(e) = transport.send_message(response_message).await {
-                         self.logger.error(format!("Failed to send response message: {}", e));
-                         // Consider returning error or just logging?
-                     } else {
-                         self.logger.debug("Sent response message to remote node");
-                     }
-                 } else {
-                     self.logger.warn("No network transport available to send response");
-                 }
+                let transport_guard = self.network_transport.read().await;
+                if let Some(transport) = transport_guard.as_ref() {
+                    if let Err(e) = transport.send_message(response_message).await {
+                        self.logger.error(format!("Failed to send response message: {}", e));
+                        // Consider returning error or just logging?
+                    } else {
+                        self.logger.debug("Sent response message to remote node");
+                    }
+                } else {
+                    self.logger.warn("No network transport available to send response");
+                }
             },
             Err(e) => {
                 // Create error response message - destination is the original source
@@ -683,16 +709,23 @@ impl Node {
                     payloads: vec![(topic, error_payload, correlation_id)], 
                 };
                 
+                // Check if networking is still enabled before trying to send error response
+                if !self.supports_networking {
+                    self.logger.warn("Can't send error response - networking is disabled");
+                    return Ok(());
+                }
+                
                 // Send the error response via transport
-                 if let Some(transport) = &*self.network_transport.read().await {
-                     if let Err(e) = transport.send_message(response_message).await {
-                         self.logger.error(format!("Failed to send error response message: {}", e));
-                     } else {
-                         self.logger.debug(format!("Sent error response to remote node: {}", e));
-                     }
-                 } else {
-                     self.logger.warn("No network transport available to send error response");
-                 }
+                let transport_guard = self.network_transport.read().await;
+                if let Some(transport) = transport_guard.as_ref() {
+                    if let Err(e) = transport.send_message(response_message).await {
+                        self.logger.error(format!("Failed to send error response message: {}", e));
+                    } else {
+                        self.logger.debug(format!("Sent error response to remote node: {}", e));
+                    }
+                } else {
+                    self.logger.warn("No network transport available to send error response");
+                }
             }
         }
         
@@ -701,56 +734,91 @@ impl Node {
 
     /// Handle a network response
     async fn handle_network_response(&self, message: NetworkMessage) -> Result<()> {
-        // Responses can have multiple payloads
-        for (_topic, payload_data, correlation_id) in &message.payloads {
-            self.logger.debug(format!("Handling response for correlation ID: {}", correlation_id));
-            
-            // Handle via transport's complete_pending_request (assuming transport handles the sender map)
-            let transport_read_guard = self.network_transport.read().await;
-             if let Some(transport) = transport_read_guard.as_ref() {
-                // Need to create a single-payload message for complete_pending_request
-                let single_payload_response = NetworkMessage {
-                    source: message.source.clone(),
-                    destination: message.destination.clone(), // Should be self
-                    message_type: message.message_type.clone(),
-                    payloads: vec![(_topic.clone(), payload_data.clone(), correlation_id.clone())]
-                };
-                
-                 // Complete request using the cloned String correlation_id
-                 self.logger.debug(format!(
-                    "Received response for correlation ID: {}. Transport responsible for completion.",
-                    correlation_id
-                 ));
-
-             } else {
-                 self.logger.warn(format!("No network transport available to handle response for core ID: {}", correlation_id));
-                 // Consider returning error?
-             }
+        // Skip if networking is not enabled
+        if !self.supports_networking {
+            self.logger.warn("Received network response but networking is disabled");
+            return Ok(());
         }
+        
+        self.logger.debug(format!("Handling network response: {:?}", message));
+        
+        // Extract payloads and handle them
+        for (topic, payload_data, correlation_id) in message.payloads {
+            // Only process if we have an actual correlation ID
+            self.logger.debug(format!("Processing response for topic {}, correlation ID: {}", topic, correlation_id));
+            
+            // Find any pending response handlers
+            if let Some(response_sender) = self.event_payloads.write().await.remove(&correlation_id) {
+                self.logger.debug(format!("Found response handler for correlation ID: {}", correlation_id));
+                
+                // Create a success response
+                let response = ServiceResponse::ok(payload_data);
+                
+                // Send the response through the oneshot channel
+                match response_sender.send(Ok(response)) {
+                    Ok(_) => self.logger.debug(format!("Successfully sent response for correlation ID: {}", correlation_id)),
+                    Err(e) => self.logger.error(format!("Failed to send response data: {:?}", e)),
+                }
+            } else {
+                self.logger.warn(format!("No response handler found for correlation ID: {}", correlation_id));
+            }
+        }
+        
         Ok(())
     }
 
     /// Handle a network event
     async fn handle_network_event(&self, message: NetworkMessage) -> Result<()> {
-        self.logger.info(format!("Handling network event from {}", message.source));
+        // Skip if networking is not enabled
+        if !self.supports_networking {
+            self.logger.warn("Received network event but networking is disabled");
+            return Ok(());
+        }
         
-        // Process each event payload
-        for (topic, data, _correlation_id) in message.payloads {
-            self.logger.debug(format!("Publishing network event to local subscribers: {}", topic));
+        self.logger.debug(format!("Handling network event: {:?}", message));
+        
+        // Process each payload separately
+        for (topic, payload, _) in message.payloads {
+            // Skip processing if topic is empty
+            if topic.is_empty() {
+                self.logger.warn("Received event with empty topic, skipping");
+                continue;
+            }
             
-            // Create publish options that prevent re-broadcasting
-            let options = PublishOptions {
-                broadcast: false, // Don't re-broadcast network events locally
-                guaranteed_delivery: false,
-                retention_seconds: None,
-                target: None,
+            // Create topic path
+            let topic_path = match TopicPath::new(&topic, &self.network_id) {
+                Ok(tp) => tp,
+                Err(e) => {
+                    self.logger.error(format!("Invalid topic path for event: {}", e));
+                    continue;
+                }
             };
             
-            // Publish to local subscribers only
-            if let Err(e) = self.publish_with_options(topic.clone(), data.clone(), options).await {
-                 self.logger.error(format!("Error publishing local event for topic '{}': {}", topic, e));
-                 // Continue processing other event payloads
-             }
+            // Create proper event context
+            let event_context = Arc::new(EventContext::new(
+                &topic_path,
+                self.logger.clone().with_component(Component::Service)
+            ));
+            
+            // Get subscribers for this topic
+            let subscribers = self.service_registry.get_local_event_subscribers(&topic_path).await;
+            
+            if subscribers.is_empty() {
+                self.logger.debug(format!("No subscribers found for topic: {}", topic));
+                continue;
+            }
+            
+            // Notify all subscribers
+            for (_subscription_id, callback) in subscribers {
+                let ctx = event_context.clone();
+                let payload_clone = payload.clone();
+                
+                // Invoke callback. errors are logged but not propagated to avoid affecting other subscribers
+                let result = callback(ctx, payload_clone).await;
+                if let Err(e) = result {
+                    self.logger.error(format!("Error in subscriber callback: {}", e));
+                }
+            }
         }
         
         Ok(())
@@ -758,9 +826,13 @@ impl Node {
 
     /// Handle a network discovery message
     async fn handle_network_discovery(&self, _message: NetworkMessage) -> Result<()> {
-        self.logger.debug("Received discovery message");
+        // Skip if networking is not enabled
+        if !self.supports_networking {
+            self.logger.warn("Received network discovery message but networking is disabled");
+            return Ok(());
+        }
         
-        // This should be handled by the discovery system
+        // Implementation will be provided when network discovery is implemented
         Ok(())
     }
 
@@ -1300,6 +1372,12 @@ impl Node {
 
     /// Initialize network transport if available
     async fn init_network_transport(&mut self) -> Result<()> {
+        // Early return if networking is disabled
+        if !self.supports_networking {
+            self.logger.debug("Network transport initialization skipped - networking is disabled");
+            return Ok(());
+        }
+
         // Get a mutable reference to the transport
         let transport = self.network_transport.clone();
         let mut transport_guard = transport.write().await;
@@ -1324,6 +1402,12 @@ impl Node {
 
     /// Shutdown the network components
     async fn shutdown_network(&self) -> Result<()> {
+        // Early return if networking is disabled
+        if !self.supports_networking {
+            self.logger.debug("Network shutdown skipped - networking is disabled");
+            return Ok(());
+        }
+        
         self.logger.info("Shutting down network components");
         
         // For simplicity during the refactoring, just log the intention
@@ -1331,7 +1415,8 @@ impl Node {
         self.logger.info("Stopping discovery and transport services");
         
         // Discovery would need to be shut down properly
-        if let Some(discovery_service) = &*self.network_transport.read().await {
+        let transport_guard = self.network_transport.read().await;
+        if let Some(discovery_service) = transport_guard.as_ref() {
             // The NetworkTransport trait doesn't have a shutdown method
             // so we're commenting this out to avoid errors
             // discovery.shutdown().await?;
@@ -1351,12 +1436,18 @@ impl Node {
             let node = node_arc.clone();
             
             Box::pin(async move {
+                // Quick check if networking is disabled
+                if !node.supports_networking {
+                    node.logger.warn("Received network message but networking is disabled");
+                    return Ok(());
+                }
+                
                 if let Err(e) = node.handle_network_message(message).await {
                     // Errors are handled and logged in handle_network_message
                     // Here we just log that message handling failed
                     node.logger.error(format!("Failed to handle network message: {}", e));
                 }
-        Ok(())
+                Ok(())
             })
         })
     }
@@ -1392,7 +1483,19 @@ impl Node {
             self.logger.debug(format!("Unsubscribing from topic: {} with ID: {}", topic, id));
             // Directly forward to service registry's method
             let registry = self.service_registry.clone();
-            registry.unsubscribe_local(&topic, id).await
+            match registry.unsubscribe_local(id).await {
+                Ok(_) => {
+                    self.logger.debug(format!(
+                        "Successfully unsubscribed locally from topic {} with id {}",
+                        topic, id
+                    ));
+        Ok(())
+                }
+                Err(e) => {
+                    self.logger.error(format!("Failed to unsubscribe locally from topic {} with id {}: {}", topic, id, e));
+                    Err(anyhow!("Failed to unsubscribe locally: {}", e))
+                }
+            }
         } else {
             Err(anyhow!("Subscription ID is required"))
         }
@@ -1449,7 +1552,19 @@ impl NodeDelegate for Node {
             self.logger.debug(format!("Unsubscribing from topic: {} with ID: {}", topic, id));
             // Directly forward to service registry's method
             let registry = self.service_registry.clone();
-            registry.unsubscribe_local(&topic, id).await
+            match registry.unsubscribe_local(id).await {
+                Ok(_) => {
+                    self.logger.debug(format!(
+                        "Successfully unsubscribed locally from topic {} with id {}",
+                        topic, id
+                    ));
+                    Ok(())
+                }
+                Err(e) => {
+                    self.logger.error(format!("Failed to unsubscribe locally from topic {} with id {}: {}", topic, id, e));
+                    Err(anyhow!("Failed to unsubscribe locally: {}", e))
+                }
+            }
         } else {
             Err(anyhow!("Subscription ID is required"))
         }
@@ -1548,7 +1663,7 @@ impl Clone for Node {
             // Logger
             logger: self.logger.clone(),
             
-            // Event payloads
+            // Pending requests map
             event_payloads: self.event_payloads.clone(),
         }
     }

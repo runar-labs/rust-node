@@ -1,9 +1,10 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use runar_common::Logger;
-use runar_node::network::transport::{NetworkTransport, NetworkMessage, PeerId, TransportFactory, MessageHandler, PeerRegistry};
+use runar_node::network::transport::{NetworkTransport, NetworkMessage, PeerId, TransportFactory, MessageHandler, PeerRegistry, NetworkError, ConnectionCallback};
 use runar_node::network::discovery::{NodeDiscovery, NodeInfo, DiscoveryOptions, DiscoveryListener};
 use std::sync::Arc;
+use std::net::SocketAddr;
 
 /// A minimal mock transport that does nothing
 pub struct MockTransport {
@@ -23,36 +24,88 @@ impl MockTransport {
 
 #[async_trait]
 impl NetworkTransport for MockTransport {
-    async fn init(&self) -> Result<()> {
+    async fn initialize(&self) -> Result<(), NetworkError> {
         Ok(())
     }
     
-    async fn shutdown(&self) -> Result<()> {
+    async fn start(&self) -> Result<(), NetworkError> {
         Ok(())
     }
     
-    async fn send(&self, _message: NetworkMessage) -> Result<()> {
+    async fn stop(&self) -> Result<(), NetworkError> {
         Ok(())
     }
     
-    async fn connect(&self, _node_info: &NodeInfo) -> Result<()> {
+    fn is_running(&self) -> bool {
+        false
+    }
+    
+    fn get_local_address(&self) -> String {
+        "127.0.0.1:0".to_string()
+    }
+    
+    fn get_local_node_id(&self) -> PeerId {
+        self.node_id.clone()
+    }
+    
+    async fn connect(&self, _node_id: PeerId, _address: SocketAddr) -> Result<(), NetworkError> {
         Ok(())
     }
     
-    fn register_handler(&self, _handler: MessageHandler) -> Result<()> {
+    async fn disconnect(&self, _node_id: PeerId) -> Result<(), NetworkError> {
         Ok(())
     }
     
-    async fn local_address(&self) -> Option<std::net::SocketAddr> {
-        None
+    fn is_connected(&self, _node_id: PeerId) -> bool {
+        false
     }
-
-    fn peer_registry(&self) -> &PeerRegistry {
-        &self.peer_registry
+    
+    async fn send_message(&self, _message: NetworkMessage) -> Result<(), NetworkError> {
+        Ok(())
     }
-
-    fn local_node_id(&self) -> &PeerId {
-        &self.node_id
+    
+    fn register_message_handler(&self, _handler: MessageHandler) -> Result<()> {
+        Ok(())
+    }
+    
+    fn set_connection_callback(&self, _callback: ConnectionCallback) -> Result<()> {
+        Ok(())
+    }
+    
+    fn get_connected_nodes(&self) -> Vec<PeerId> {
+        Vec::new()
+    }
+    
+    async fn send_request(&self, _message: NetworkMessage) -> Result<NetworkMessage, NetworkError> {
+        Err(NetworkError::TransportError("Not implemented".to_string()))
+    }
+    
+    async fn handle_message(&self, _message: NetworkMessage) -> Result<(), NetworkError> {
+        Ok(())
+    }
+    
+    async fn start_discovery(&self) -> Result<(), NetworkError> {
+        Ok(())
+    }
+    
+    async fn stop_discovery(&self) -> Result<(), NetworkError> {
+        Ok(())
+    }
+    
+    async fn register_discovered_node(&self, _node_id: PeerId) -> Result<(), NetworkError> {
+        Ok(())
+    }
+    
+    fn get_discovered_nodes(&self) -> Vec<PeerId> {
+        Vec::new()
+    }
+    
+    fn set_node_discovery(&self, _discovery: Box<dyn NodeDiscovery>) -> Result<()> {
+        Ok(())
+    }
+    
+    fn complete_pending_request(&self, _correlation_id: String, _response: NetworkMessage) -> Result<(), NetworkError> {
+        Ok(())
     }
 }
 

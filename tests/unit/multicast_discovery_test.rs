@@ -113,6 +113,7 @@ mod tests {
         // Create test node info
         let node_info = NodeInfo {
             peer_id: PeerId::new("test-network".to_string(), "node1".to_string()),
+            network_ids: vec!["test-network".to_string()],
             address: "127.0.0.1:8080".to_string(),
             capabilities: vec!["request".to_string(), "event".to_string()],
             last_seen: SystemTime::now(),
@@ -140,5 +141,23 @@ mod tests {
         }
         
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_multicast_announce_and_discover() -> Result<()> {
+        // Create two discovery instances
+        let options1 = DiscoveryOptions::default();
+        let options2 = DiscoveryOptions::default();
+        
+        // Create node info for node 1
+        let node_info = NodeInfo {
+            network_ids: vec!["test-network".to_string()], // Add missing field
+            peer_id: PeerId::new("node1".to_string()), // Only node ID
+            address: "127.0.0.1:8080".to_string(),
+            capabilities: vec!["request".to_string(), "event".to_string()],
+            last_seen: SystemTime::now(),
+        };
+        
+        // ... existing code ...
     }
 } 

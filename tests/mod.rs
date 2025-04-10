@@ -9,4 +9,6 @@ pub mod unit;
 pub mod fixtures;
 
 // Integration tests
-pub mod integration; 
+pub mod integration;
+
+// Re-enable specific unit tests later if needed 

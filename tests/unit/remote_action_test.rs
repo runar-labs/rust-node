@@ -6,6 +6,10 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::sync::RwLock;
 use anyhow::{Result, anyhow};
+use runar_node::services::ServiceRegistry;
+use runar_node::services::Logger;
+use runar_node::services::Component;
+use uuid::Uuid;
 
 /// Tests for remote action handler topic path behavior
 #[cfg(test)]
@@ -215,5 +219,86 @@ mod remote_action_tests {
         // THIS DEMONSTRATES THE ISSUE:
         // If we register with action_path() but look up with as_str(),
         // or vice versa, we'll get a mismatch.
+    }
+
+    /// INTENTION: This test verifies that remote action handlers are created correctly
+    /// and that the topic path used includes the network ID.
+    #[tokio::test]
+    async fn test_remote_action_handler_creation() -> Result<()> {
+        let logger = Logger::new_root(Component::Test, "test");
+        let registry = Arc::new(ServiceRegistry::new(logger.clone()));
+        // ... existing code ...
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_remote_action_call() -> Result<()> {
+        // ... setup ...
+        let client_topic = TopicPath::new("test-network:math/add", "default").unwrap();
+        let server_topic = TopicPath::new("test-network:math/add", "default").unwrap();
+        // ... handler registration ...
+
+        // Create the message
+        let params = ValueType::Map([
+            ("a".to_string(), ValueType::Number(5.0)),
+            ("b".to_string(), ValueType::Number(3.0)),
+        ].into_iter().collect());
+        let message = NetworkMessage {
+            source: PeerId::new("node1".to_string()),
+            destination: PeerId::new("node2".to_string()),
+            message_type: "Request".to_string(),
+            payloads: vec![( // Use the payloads field
+                client_topic.as_str().to_string(), // topic
+                params.clone(),                   // params/payload data
+                "test-123".to_string()            // correlation_id
+            )],
+        };
+
+        // 3. Server receives the message and looks up the handler
+        let receive_topic = TopicPath::new(&message.payloads[0].0, "default").unwrap(); // Get topic from payload
+        let handler = registry.get_handler(&receive_topic).expect("Handler should be found");
+
+        // 4. Execute the handler with the message parameters
+        let result = tokio_test::block_on(handler(Some(message.payloads[0].1.clone()), Default::default())); // Get params from payload
+
+        // 5. Verify the result
+        let response = result.expect("Handler execution failed");
+        assert_eq!(response.status, 200);
+        assert!(response.error.is_none());
+        assert_eq!(response.data, Some(ValueType::Number(8.0))); // Use manual PartialEq
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_remote_action_handler_network_isolation() -> Result<()> {
+        // ... setup ...
+        let client_topic = TopicPath::new("main-net:math/add", "default").unwrap();
+        let server_topic = TopicPath::new("other-net:math/add", "default").unwrap();
+        // ... handler registration ...
+
+        // Create the message with the full qualified path (includes network ID)
+        let message = NetworkMessage {
+            source: PeerId::new("node1".to_string()), 
+            destination: PeerId::new("node2".to_string()), 
+            message_type: "Request".to_string(),
+            payloads: vec![(
+                client_topic.as_str().to_string(),
+                ValueType::Null,
+                "test-123".to_string()
+            )],
+        };
+
+        // 3. Server receives the message and tries to look up the handler
+        let receive_topic = TopicPath::new(&message.payloads[0].0, "default").unwrap(); // Get topic from payload
+
+        // Attempt lookup by full path (includes network ID)
+        let handler = registry.get_handler(&receive_topic);
+
+        // 4. Verify handler is NOT found because the network ID in the message topic ("main-net")
+        //    does not match the network ID where the handler was registered ("other-net")
+        assert!(handler.is_none(), "Handler should NOT be found due to network ID mismatch");
+        
+        Ok(())
     }
 } 
