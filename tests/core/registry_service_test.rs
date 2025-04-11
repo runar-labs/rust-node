@@ -6,7 +6,8 @@
 use std::time::Duration;
 use tokio::time::timeout;
 use runar_common::types::ValueType;
-use runar_node::node::{Node, NodeConfig};
+use runar_node::node::{LogLevel, LoggingConfig, Node, NodeConfig};
+use runar_common::logging::{Logger, Component};
 
 // Import the test fixtures
 use crate::fixtures::math_service::MathService;
@@ -22,7 +23,7 @@ async fn test_registry_service_list_services() {
     // Wrap the test in a timeout to prevent it from hanging
     match timeout(Duration::from_secs(10), async {
         // Create a node with a test network ID
-        let config = NodeConfig::new("node-reg-list".to_string(), "test_network".to_string());
+        let config = NodeConfig::new("node-reg-list" , "test_network" );
         let mut node = Node::new(config).await.unwrap();
         
         // Create a test service
@@ -32,7 +33,7 @@ async fn test_registry_service_list_services() {
         node.add_service(math_service).await.unwrap();
         
         // Use the request method to query the registry service
-        let response = node.request("$registry/services/list".to_string(), ValueType::Null).await.unwrap();
+        let response = node.request("$registry/services/list" , ValueType::Null).await.unwrap();
         
         // Verify response is successful
         assert_eq!(response.status, 200, "Registry service request failed: {:?}", response);
@@ -74,8 +75,13 @@ async fn test_registry_service_list_services() {
 async fn test_registry_service_get_service_info() {
     // Wrap the test in a timeout to prevent it from hanging
     match timeout(Duration::from_secs(10), async {
+        let test_logger = Logger::new_root(Component::Node, "test_name");
+        
+        let logging_config = LoggingConfig::new()
+        .with_default_level(LogLevel::Debug);
+
         // Create a node with a test network ID
-        let config = NodeConfig::new("node-reg-info".to_string(), "test_network".to_string());
+        let config = NodeConfig::new("node-reg-info", "test_network").with_logging_config(logging_config);
         let mut node = Node::new(config).await.unwrap();
         
         // Create a test service
@@ -87,13 +93,13 @@ async fn test_registry_service_get_service_info() {
         // Start the services to check that we get the correct state
         node.start().await.unwrap();
         
-        // Debug print available handlers
-        let response = node.request("$registry/services/list".to_string(), ValueType::Null).await.unwrap();
-        println!("Available services: {:?}", response);
+        // Debug log available handlers using logger
+        let response = node.request("$registry/services/list", ValueType::Null).await.unwrap();
+        test_logger.debug(format!("Available services: {:?}", response));
         
         // Use the request method to query the registry service for the math service
         // Note: We should use the correct parameter path format
-        let response = node.request("$registry/services/math".to_string(), ValueType::Null).await.unwrap();
+        let response = node.request("$registry/services/math", ValueType::Null).await.unwrap();
         
         // Verify response is successful
         assert_eq!(response.status, 200, "Registry service request failed: {:?}", response);

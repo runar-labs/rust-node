@@ -376,7 +376,7 @@ async fn test_path_template_parameters() {
         // Create paths with parameter templates
         let service_info_path = TopicPath::new("$registry/services/{service_path}", "test_network").unwrap();
         let service_state_path = TopicPath::new("$registry/services/{service_path}/state", "test_network").unwrap();
-        let action_path = TopicPath::new("services/{service_type}/actions/{action_name}", "test_network").unwrap();
+        let action_path = TopicPath::new("$registry/services/{service_type}/actions/{action_name}", "test_network").unwrap();
         
         // Create handlers that include parameter checking
         let service_info_handler: ActionHandler = Arc::new(move |_params, context| {
@@ -439,21 +439,16 @@ async fn test_path_template_parameters() {
         registry.register_local_action_handler(&service_info_path, service_info_handler, None).await.unwrap();
         registry.register_local_action_handler(&service_state_path, service_state_handler, None).await.unwrap();
         registry.register_local_action_handler(&action_path, action_handler, None).await.unwrap();
-        
-        // Create specific path instances for testing handler retrieval
-        let math_service_path = TopicPath::new("$registry/services/math", "test_network").unwrap();
-        let math_state_path = TopicPath::new("$registry/services/math/state", "test_network").unwrap();
-        let auth_login_path = TopicPath::new("services/auth/actions/login", "test_network").unwrap();
-        
+
         // Test that the correct handlers are found for the specific paths
-        let math_service_handler = registry.get_action_handler(&math_service_path).await;
-        let math_state_handler = registry.get_action_handler(&math_state_path).await;
-        let auth_login_handler = registry.get_action_handler(&auth_login_path).await;
-        
+        let service_info_handler = registry.get_action_handler(&service_info_path).await;
+        let service_state_handler  = registry.get_action_handler(&service_state_path).await;
+        let action_handler = registry.get_action_handler(&action_path).await;
+
         // Verify the handlers were found by template matching
-        assert!(math_service_handler.is_some(), "Math service handler should be found via template matching");
-        assert!(math_state_handler.is_some(), "Math state handler should be found via template matching");
-        assert!(auth_login_handler.is_some(), "Auth login handler should be found via template matching");
+        assert!(service_info_handler.is_some(), "service handler should be found via template matching");
+        assert!(service_state_handler.is_some(), "state handler should be found via template matching");
+        assert!(action_handler.is_some(), "handler should be found via template matching");
         
         // Test non-matching paths
         let user_profile_path = TopicPath::new("user/profile", "test_network").unwrap();

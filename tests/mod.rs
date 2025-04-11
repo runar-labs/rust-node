@@ -5,7 +5,7 @@
 // Core tests (services, routing, node)
 pub mod core;
 
-// Network tests (transport, discovery) - temporarily disabled until updated
+// Network tests (transport, discovery) - temporarily disabled
 // pub mod network;
 
 // Test fixtures

@@ -158,15 +158,13 @@ impl LifecycleContext {
         let action_path = format!("{}/{}", self.service_path, action_name_string);
         
         // Debug logs for action registration
-        self.logger.debug(format!("REGISTER_ACTION: Building TopicPath for action_name={}, service_path={}, action_path={}",
-                                  action_name_string, self.service_path, action_path));
+        self.logger.debug(format!("register_action name={}, service_path={}, action_path={}", action_name_string, self.service_path, action_path));
         
         let topic_path: TopicPath = TopicPath::new(&action_path, &self.network_id)
             .map_err(|e| anyhow!("Invalid action path: {}", e))?;
         
         // More detailed debug after TopicPath creation
-        self.logger.debug(format!("REGISTER_ACTION: Created TopicPath with topic_path={}, service_path={}, action_path={}, segments={:?}",
-                                  topic_path.as_str(), topic_path.service_path(), topic_path.action_path(), topic_path.get_segments()));
+        self.logger.debug(format!("register_action: created TopicPath {}", topic_path));
         
         // Call the delegate with no metadata
         delegate.register_action_handler(&topic_path, handler, None).await

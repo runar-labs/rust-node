@@ -436,8 +436,7 @@ impl AbstractService for RegistryService {
     }
     
     fn network_id(&self) -> Option<String> {
-        // Registry service is always in the default network
-        Some("default".to_string())
+        None
     }
 
     /// Initialize the Registry Service by registering all handlers

@@ -286,12 +286,26 @@ mod topic_path_tests {
     }
     
     #[test]
-    fn test_nested_service_path() {
+    fn test_nested_action_path() {
         // Create a nested service path
+        let service_path = TopicPath::new("main:serviceX", "default").expect("Valid path");
+        
+        let action_result = service_path.new_action_topic("verify_token");
+        //shuold not be an error. sould be a valid action path
+        assert!(action_result.is_ok());
+
+        let action_path = action_result.unwrap();
+        assert_eq!(action_path.network_id(), "main");
+        assert_eq!(action_path.service_path(), "serviceX");
+        assert_eq!(action_path.action_path(), "serviceX/verify_token");
+    }
+
+    #[test]
+    fn test_nested_invalid_action_path() {
+        // Create a nested service with action  already
         let service_path = TopicPath::new("main:services/auth", "default").expect("Valid path");
         
-        // Creating an action path from a nested service path is not supported
-        // The current implementation returns an error since we can't create action topics on nested paths
+        // Creating an action path from a topic path with action already is not allowed
         let action_result = service_path.new_action_topic("verify_token");
         
         // Verify the error - this is the expected behavior because we don't support nested service paths
