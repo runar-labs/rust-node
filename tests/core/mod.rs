@@ -12,4 +12,6 @@ pub mod topic_path_wildcard_test;
 // pub mod quic_transport_test;
 // pub mod multicast_discovery_test;
 // pub mod capability_exchange_test;
-// pub mod remote_action_test; 
+// pub mod remote_action_test;
+pub mod enhanced_registry_test;
+pub mod enhanced_registry_benchmark; 

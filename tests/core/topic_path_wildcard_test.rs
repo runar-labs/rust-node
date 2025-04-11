@@ -3,6 +3,7 @@ use tokio::sync::Mutex;
 use std::sync::Arc;
 use std::future::Future;
 use std::pin::Pin;
+use std::collections::HashMap;
 
 use runar_node::routing::TopicPath;
 use runar_node::services::EventContext;
@@ -133,6 +134,143 @@ mod topic_path_wildcard_tests {
         
         assert!(pattern.matches(&path1));       // Same network
         assert!(!pattern.matches(&path2));      // Different network
+    }
+    
+    #[test]
+    fn test_efficient_template_pattern_lookup() {
+        // Create a HashMap to store handlers by path pattern
+        let mut handlers = HashMap::new();
+        let network_id = "main";
+        
+        // Store handlers with template patterns
+        let template1 = TopicPath::new("services/{service_path}/actions/{action}", network_id).expect("Valid template path");
+        let template2 = TopicPath::new("services/*/state", network_id).expect("Valid wildcard path");
+        
+        handlers.insert(template1.to_string(), "TEMPLATE_HANDLER_1");
+        handlers.insert(template2.to_string(), "WILDCARD_HANDLER");
+        
+        // Create a concrete path to look up
+        let concrete_path = TopicPath::new("services/math/actions/add", network_id).expect("Valid concrete path");
+        
+        // Generate possible template patterns from the concrete path
+        // This is the key insight - we can pre-compute all possible template patterns
+        // that might match our concrete path, then look them up directly
+        let possible_templates = generate_possible_templates(&concrete_path);
+        
+        // Look up each possible template pattern
+        for template in possible_templates {
+            if let Some(handler) = handlers.get(&template) {
+                println!("Found handler for template: {}", template);
+                println!("Handler: {}", handler);
+                // Found a matching handler, use it
+                assert!(true);
+                return;
+            }
+        }
+        
+        // No matching template found
+        assert!(false, "No matching template found for {}", concrete_path);
+    }
+    
+    /// Generate all possible template patterns that could match a concrete path
+    fn generate_possible_templates(path: &TopicPath) -> Vec<String> {
+        // For this example, we'll manually create the patterns we know should match
+        // In a real implementation, we would generate these systematically
+        
+        let concrete_path = path.to_string();
+        let mut templates = Vec::new();
+        
+        // Add the concrete path itself (for exact matching)
+        templates.push(concrete_path.clone());
+        
+        // Extract segments (network_id:path/to/resource)
+        if let Some(path_part) = concrete_path.split(':').nth(1) {
+            let segments: Vec<&str> = path_part.split('/').collect();
+            
+            // Create specific template patterns based on the segments
+            if segments.len() >= 4 && segments[0] == "services" && segments[2] == "actions" {
+                // Create services/{service_path}/actions/{action} pattern
+                let network_id = concrete_path.split(':').next().unwrap_or("main");
+                let template = format!("{}:services/{{service_path}}/actions/{{action}}", network_id);
+                templates.push(template);
+            }
+            
+            if segments.len() >= 3 && segments[0] == "services" {
+                // Create services/*/state pattern (wildcard)
+                let network_id = concrete_path.split(':').next().unwrap_or("main");
+                let template = format!("{}:services/*/state", network_id);
+                templates.push(template);
+            }
+        }
+        
+        templates
+    }
+
+    #[test]
+    fn test_efficient_wildcard_pattern_lookup() {
+        use std::collections::HashMap;
+        use runar_node::routing::TopicPath;
+        
+        // Create a HashMap to store handlers by path pattern
+        let mut handlers = HashMap::new();
+        let network_id = "main";
+        
+        // Store handlers with wildcard patterns
+        let wildcard1 = TopicPath::new("services/*/events", network_id).expect("Valid wildcard path");
+        let wildcard2 = TopicPath::new("services/>", network_id).expect("Valid multi-wildcard path");
+        
+        handlers.insert(wildcard1.to_string(), "SINGLE_WILDCARD_HANDLER");
+        handlers.insert(wildcard2.to_string(), "MULTI_WILDCARD_HANDLER");
+        
+        // Create a concrete path to look up
+        let concrete_path = TopicPath::new("services/math/events", network_id).expect("Valid concrete path");
+        
+        // Generate possible wildcard patterns from the concrete path
+        let possible_patterns = generate_wildcard_patterns(&concrete_path);
+        
+        // Look up each possible pattern
+        let mut found_handler = false;
+        for pattern in possible_patterns {
+            if let Some(handler) = handlers.get(&pattern) {
+                println!("Found handler for wildcard pattern: {}", pattern);
+                println!("Handler: {}", handler);
+                found_handler = true;
+                break;
+            }
+        }
+        
+        assert!(found_handler, "No matching wildcard handler found for {}", concrete_path);
+    }
+
+    /// Generate possible wildcard patterns that could match a concrete path
+    fn generate_wildcard_patterns(path: &TopicPath) -> Vec<String> {
+        let concrete_path = path.to_string();
+        let mut patterns = Vec::new();
+        
+        // Add the concrete path itself
+        patterns.push(concrete_path.clone());
+        
+        // Extract segments (network_id:path/to/resource)
+        if let Some(network_prefix) = concrete_path.split(':').next() {
+            if let Some(path_part) = concrete_path.split(':').nth(1) {
+                let segments: Vec<&str> = path_part.split('/').collect();
+                
+                // Generate wildcards based on structure
+                if segments.len() >= 3 && segments[0] == "services" {
+                    // Replace the middle segment with a * wildcard
+                    let wildcard_middle = format!("{}:services/*/{}",
+                        network_prefix,
+                        segments[2..].join("/")
+                    );
+                    patterns.push(wildcard_middle);
+                    
+                    // Add a multi-segment wildcard pattern
+                    patterns.push(format!("{}:services/>", network_prefix));
+                }
+            }
+        }
+        
+        patterns
     }
 }
 

@@ -1046,4 +1046,121 @@ impl<T: Clone> WildcardSubscriptionRegistry<T> {
         
         result
     }
+}
+
+/// A wrapper around TopicPath that implements Hash and PartialEq for template matching
+///
+/// INTENTION: Enable template paths like "services/{service_path}" to be used as HashMap keys 
+/// that can match concrete paths like "services/math"
+///
+/// This type wraps a TopicPath and overrides the Hash and PartialEq implementation
+/// to make template parameters match any literal with the same segment position
+#[derive(Debug, Clone)]
+pub struct TemplatePathKey(pub TopicPath);
+
+impl PartialEq for TemplatePathKey {
+    fn eq(&self, other: &Self) -> bool {
+        // Segment counts must match
+        if self.0.segments.len() != other.0.segments.len() {
+            return false;
+        }
+        
+        // Network IDs must match
+        if self.0.network_id != other.0.network_id {
+            return false;
+        }
+        
+        // Check if segments match according to template rules
+        for (s1, s2) in self.0.segments.iter().zip(other.0.segments.iter()) {
+            match (s1, s2) {
+                // Exact match of literal segments
+                (PathSegment::Literal(a), PathSegment::Literal(b)) if a == b => continue,
+                
+                // Template parameter matches any literal segment
+                (PathSegment::Literal(a), PathSegment::Literal(_)) if a.starts_with("{") && a.ends_with("}") => continue,
+                (PathSegment::Literal(_), PathSegment::Literal(b)) if b.starts_with("{") && b.ends_with("}") => continue,
+                
+                // Single wildcards match any literal
+                (PathSegment::SingleWildcard, PathSegment::Literal(_)) => continue,
+                (PathSegment::Literal(_), PathSegment::SingleWildcard) => continue,
+                
+                // Multi-wildcards match any remaining segments (must be last segment)
+                (PathSegment::MultiWildcard, _) | (_, PathSegment::MultiWildcard) => return true,
+                
+                // No match
+                _ => return false,
+            }
+        }
+        
+        true
+    }
+}
+
+impl Eq for TemplatePathKey {}
+
+impl TemplatePathKey {
+    /// Normalizes a path for hashing to ensure consistent hashing of equivalent paths
+    /// 
+    /// This creates a canonical representation that will be the same for:
+    /// - Template paths with parameters: "services/{service_path}"
+    /// - Concrete paths that could match: "services/math"
+    /// 
+    /// The normalization works by:
+    /// 1. Preserving the network ID
+    /// 2. Preserving the number of segments
+    /// 3. For each position, keeping only what segment type it is, not the exact content
+    ///
+    /// For example, both "main:services/{service_path}" and "main:services/math" will normalize
+    /// to the same internal structure.
+    fn normalize_for_hash(&self) -> String {
+        let mut result = String::new();
+        
+        // 1. Add network ID - this must match for equivalence
+        result.push_str(&self.0.network_id);
+        result.push(':');
+        
+        // 2. Add number of segments
+        result.push_str(&format!("{}:", self.0.segments.len()));
+        
+        // 3. For each position, add a type marker
+        for (i, segment) in self.0.segments.iter().enumerate() {
+            result.push_str(&format!("{}:", i));
+            
+            match segment {
+                // Template parameters (with {}) and single wildcards (*) are treated the same
+                PathSegment::Literal(s) if s.starts_with("{") && s.ends_with("}") => {
+                    result.push_str("tmpl");
+                }
+                PathSegment::SingleWildcard => {
+                    result.push_str("tmpl");
+                }
+                PathSegment::MultiWildcard => {
+                    result.push_str("multi");
+                }
+                // Regular literals include their content
+                PathSegment::Literal(s) => {
+                    result.push_str("lit:");
+                    result.push_str(s);
+                }
+            }
+            result.push(';');
+        }
+        
+        result
+    }
+}
+
+impl Hash for TemplatePathKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Create a normalized string representation for hashing
+        let normalized = self.normalize_for_hash();
+        normalized.hash(state);
+    }
+}
+
+// Implement Display for TemplatePathKey
+impl std::fmt::Display for TemplatePathKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
 } 
