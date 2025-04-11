@@ -12,7 +12,6 @@ use std::future::Future;
 use std::collections::HashMap;
 
 use runar_common::types::ValueType;
-use runar_common::{Component, Logger};
 use runar_node::node::{LogLevel, LoggingConfig, Node, NodeConfig}; 
 use runar_node::NodeDelegate;
 use runar_node::services::EventContext;
@@ -20,10 +19,6 @@ use runar_node::services::EventContext;
 // Import the test fixtures
 use crate::fixtures::math_service::MathService;
 use anyhow::Result;
-use async_trait::async_trait;
-use runar_node::network::transport::{NetworkTransport, PeerRegistry, MessageHandler, NetworkMessage};
-use runar_node::PeerId;
-use std::net::SocketAddr;
   
 /// Test that verifies basic node creation functionality
 /// 

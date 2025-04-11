@@ -17,19 +17,20 @@
 //!
 //! ```rust,no_run
 //! # use runar_node::node::{Node, NodeConfig};
+//! # use runar_node::NodeDelegate;
 //! # use runar_common::types::ValueType;
 //! # use anyhow::Result;
 //! #
 //! # async fn example() -> Result<()> {
-//! # let node = Node::new(NodeConfig::new("default")).await?;
+//! # let node = Node::new(NodeConfig::new("default", "default-network")).await?;
 //! # let data = ValueType::Null;
 //! # let id = "user123";
 //! // All of these are valid
-//! node.publish("status/updated", data.clone()).await?;
+//! node.publish("status/updated".to_string(), data.clone()).await?;
 //! node.publish(String::from("status/updated"), data.clone()).await?;
-//! node.publish(&format!("status/{}", id), data).await?;
+//! node.publish(format!("status/{}", id), data).await?;
 //!
-//! let topic = "notifications";
+//! let topic = "notifications".to_string();
 //! # let callback = Box::new(|ctx, data| Box::pin(async move { Ok(()) }) as _);
 //! node.subscribe(topic, callback).await?;
 //! # Ok(())
@@ -53,18 +54,19 @@
 //!
 //! ```rust,no_run
 //! use runar_node::node::{Node, NodeConfig};
+//! use runar_node::NodeDelegate;
 //! use runar_common::types::ValueType;
 //! use anyhow::Result;
 //!
 //! async fn example() -> Result<()> {
 //!     // Create a new node
-//!     let node = Node::new(NodeConfig::new("default")).await?;
+//!     let node = Node::new(NodeConfig::new("default", "default-network")).await?;
 //!     
 //!     // Make a request to a service
 //!     let response = node.request("auth/login", ValueType::Null).await?;
 //!     
 //!     // Publish an event
-//!     node.publish("user/profile/updated", ValueType::Null).await?;
+//!     node.publish("user/profile/updated".to_string(), ValueType::Null).await?;
 //!     
 //!     Ok(())
 //! }
