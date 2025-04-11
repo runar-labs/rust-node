@@ -19,6 +19,7 @@ use std::fmt::Debug;
 use runar_common::types::ValueType;
 use runar_common::logging::{Logger, Component};
 use env_logger;
+use chrono;
 
 use crate::network::{
     discovery::{MulticastDiscovery, NodeDiscovery, NodeInfo, DiscoveryOptions, DEFAULT_MULTICAST_ADDR},
@@ -229,8 +230,22 @@ impl LoggingConfig {
             LogLevel::Off => log::LevelFilter::Off,
         });
         
-        // Note: Component-specific filtering would need more configuration here
-        // Currently we just set the global level
+        // Add a custom formatter to match the desired log format
+        builder.format(|buf, record| {
+            use std::io::Write;
+            
+            // Simplified timestamp format without T and Z
+            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+            
+            // Format the log level with brackets
+            let level = format!("[{}]", record.level());
+            
+            // Extract the content (which includes our custom prefix format)
+            let content = format!("{}", record.args());
+            
+            // Write the final log message
+            writeln!(buf, "[{}] {} {}", timestamp, level, content)
+        });
         
         // Initialize the logger, ignoring any errors (in case it's already initialized)
         let _ = builder.try_init();

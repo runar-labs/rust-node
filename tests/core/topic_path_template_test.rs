@@ -7,7 +7,7 @@ fn test_extract_params_from_template() {
     let template = "services/{service_path}/state";
     
     // An actual path that matches the template
-    let path = TopicPath::new("main:services/math/state", "default").expect("Valid path");
+    let path: TopicPath = TopicPath::new("services/math/state", "main").expect("Valid path");
     
     // Extract parameters from the path
     let params = path.extract_params(template).expect("Template should match");
@@ -27,6 +27,28 @@ fn test_extract_params_from_template() {
     // A path that doesn't match the literal segments
     let non_matching2 = TopicPath::new("main:users/math/profile", "default").expect("Valid path");
     assert!(non_matching2.extract_params(template).is_err());
+}
+
+#[test]
+fn test_hash_keys_with_template() {
+    // A template pattern for our Registry Service paths
+    let template = "services/{service_path}";
+    let match_value = "services/math";
+    let not_match = "services/{service_path}/something_else";
+    let network_id = "main";
+   
+    let template_path: TopicPath = TopicPath::new(template, network_id).expect("Valid path");
+    let match_value_path: TopicPath = TopicPath::new(match_value, network_id).expect("Valid path");
+    let not_match_path: TopicPath = TopicPath::new(not_match, network_id).expect("Valid path");
+
+    let mut hash_map = HashMap::new();
+    hash_map.insert(template_path, "VALUE");
+   
+    let result = hash_map.get(&match_value_path);
+    assert_eq!(result, Some(&"VALUE"));
+
+    let result = hash_map.get(&not_match_path);
+    assert_eq!(result, None);
 }
 
 #[test]
