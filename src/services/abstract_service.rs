@@ -201,11 +201,16 @@ pub trait AbstractService: Send + Sync {
     /// Get service version
     fn version(&self) -> &str;
     
+    //NOTE: path is used during service registration. avoid using it directly internaly you shuold always use TOpicPath
     /// Get service path
     fn path(&self) -> &str;
     
     /// Get service description
     fn description(&self) -> &str;
+
+    //NOTE: network_id is used during service registration. avoid using it directly internaly you shuold always use TOpicPath
+    /// Get service description
+    fn network_id(&self) -> Option<String>;
      
     /// Initialize the service
     ///

@@ -63,6 +63,33 @@ pub type EventSubscriber = Arc<dyn Fn(Arc<EventContext>, Option<ValueType>) -> P
 /// Type for action registration function
 pub type ActionRegistrar = Arc<dyn Fn(&str, &str, ActionHandler, Option<ActionMetadata>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
 
+
+
+#[derive(Clone)]
+pub struct ServiceEntry {
+    /// The service instance
+    pub service: Arc<dyn AbstractService>,
+    /// service topic path
+    pub service_topic: TopicPath,
+    //service state
+    pub service_state: ServiceState,
+}
+
+
+impl std::fmt::Debug for ServiceEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServiceEntry")
+            .field("name", &self.service.name())
+            .field("path", &self.service.path())
+            .field("version", &self.service.version())
+            .field("description", &self.service.description())
+            .field("state", &self.service_state)
+            .field("topic", &self.service_topic)
+            .finish()
+    }
+}
+
+
 /// Service registry for managing services and their handlers
 ///
 /// INTENTION: Provide a centralized registry for action handlers and event subscriptions.
@@ -86,7 +113,7 @@ pub struct ServiceRegistry {
     local_event_subscriptions: RwLock<WildcardSubscriptionRegistry<(String, EventCallback)>>,
     
     /// Map local subscription IDs back to TopicPath for efficient unsubscription
-    local_subscription_id_map: RwLock<HashMap<String, TopicPath>>,
+    local_subscription_id_to_topic_path: RwLock<HashMap<String, TopicPath>>,
     
     /// Remote event subscriptions using wildcard registry
     remote_event_subscriptions: RwLock<WildcardSubscriptionRegistry<(String, EventCallback)>>,
@@ -94,23 +121,18 @@ pub struct ServiceRegistry {
     /// Map remote subscription IDs back to TopicPath for efficient unsubscription
     remote_subscription_id_map: RwLock<HashMap<String, TopicPath>>,
     
-    /// REMOVED - dont remote.. just remore change codfe that is using it
-    //event_subscriptions: RwLock<WildcardSubscriptionRegistry<(String, EventCallback)>>,
-    
+     
     /// Local services registry
-    local_services: RwLock<HashMap<String, Arc<dyn AbstractService>>>,
+    local_services: RwLock<HashMap<TopicPath, Arc<ServiceEntry>>>,
     
     /// Remote services registry indexed by service path
-    remote_services: RwLock<HashMap<TopicPath, Vec<Arc<RemoteService>>>>,
-    
-    /// Legacy remote services registry - will be deprecated
-    legacy_remote_services: RwLock<HashMap<String, Vec<Arc<RemoteService>>>>,
-    
+    remote_services_by_topic: RwLock<HashMap<TopicPath, Vec<Arc<RemoteService>>>>,
+     
     /// Remote services registry indexed by peer ID
-    peer_services: RwLock<HashMap<PeerId, HashSet<String>>>,
+    remote_services_by_peer: RwLock<HashMap<PeerId, HashSet<String>>>,
     
     /// Service lifecycle states - moved from Node
-    service_states: Arc<RwLock<HashMap<String, ServiceState>>>,
+    service_states_by_service_path: Arc<RwLock<HashMap<String, ServiceState>>>,
     
     /// Logger instance
     logger: Logger,
@@ -129,14 +151,13 @@ impl Clone for ServiceRegistry {
             remote_action_handlers: RwLock::new(HashMap::new()),
             action_handlers: RwLock::new(HashMap::new()),
             local_event_subscriptions: RwLock::new(WildcardSubscriptionRegistry::new()),
-            local_subscription_id_map: RwLock::new(HashMap::new()),
+            local_subscription_id_to_topic_path: RwLock::new(HashMap::new()),
             remote_event_subscriptions: RwLock::new(WildcardSubscriptionRegistry::new()),
             remote_subscription_id_map: RwLock::new(HashMap::new()),
             local_services: RwLock::new(HashMap::new()),
-            remote_services: RwLock::new(HashMap::new()),
-            legacy_remote_services: RwLock::new(HashMap::new()),
-            peer_services: RwLock::new(HashMap::new()),
-            service_states: Arc::new(RwLock::new(HashMap::new())),
+            remote_services_by_topic: RwLock::new(HashMap::new()), 
+            remote_services_by_peer: RwLock::new(HashMap::new()),
+            service_states_by_service_path: Arc::new(RwLock::new(HashMap::new())),
             logger: self.logger.clone(),
         }
     }
@@ -159,15 +180,14 @@ impl ServiceRegistry {
             remote_action_handlers: RwLock::new(HashMap::new()),
             action_handlers: RwLock::new(HashMap::new()),
             local_event_subscriptions: RwLock::new(WildcardSubscriptionRegistry::new()),
-            local_subscription_id_map: RwLock::new(HashMap::new()),
+            local_subscription_id_to_topic_path: RwLock::new(HashMap::new()),
             remote_event_subscriptions: RwLock::new(WildcardSubscriptionRegistry::new()),
             remote_subscription_id_map: RwLock::new(HashMap::new()),
              
             local_services: RwLock::new(HashMap::new()),
-            remote_services: RwLock::new(HashMap::new()),
-            legacy_remote_services: RwLock::new(HashMap::new()),
-            peer_services: RwLock::new(HashMap::new()),
-            service_states: Arc::new(RwLock::new(HashMap::new())),
+            remote_services_by_topic: RwLock::new(HashMap::new()), 
+            remote_services_by_peer: RwLock::new(HashMap::new()),
+            service_states_by_service_path: Arc::new(RwLock::new(HashMap::new())),
             logger,
         }
     }
@@ -183,13 +203,16 @@ impl ServiceRegistry {
     /// Register a local service
     ///
     /// INTENTION: Register a local service implementation for use by the node.
-    pub async fn register_local_service(&self, service: Arc<dyn AbstractService>) -> Result<()> {
-        let service_path = service.path().to_string();
-        self.logger.info(format!("Registering local service: {}", service_path));
+    pub async fn register_local_service(&self, service: Arc<ServiceEntry>) -> Result<()> {
+        let service_entry = service.clone();
+        let service_topic = service_entry.service_topic.clone();
+        self.logger.info(format!("Registering local service: {}", service_topic));
         
         // Store the service in the local services registry
-        self.local_services.write().await.insert(service_path, service);
-        
+        self.local_services.write().await.insert(service_topic, service);
+          
+        self.update_service_state(&service_entry.service.path(),service_entry.service_state).await?;
+
         Ok(())
     }
     
@@ -197,36 +220,24 @@ impl ServiceRegistry {
     ///
     /// INTENTION: Register a service that exists on a remote node, making it available for local requests.
     pub async fn register_remote_service(&self, service: Arc<RemoteService>) -> Result<()> {
-        let service_path = service.path().to_string();
+        let service_topic = service.service_topic.clone();
+        let service_path  = service.path().to_string();
         let peer_id = service.peer_id().clone();
         
         self.logger.info(format!("Registering remote service: {} from peer: {}", service_path, peer_id));
-        
-        // Add to legacy remote services registry indexed by service path
-        {
-            let mut remote_services = self.legacy_remote_services.write().await;
-            let services = remote_services.entry(service_path.clone()).or_insert_with(Vec::new);
-            services.push(service.clone());
-        }
-        
-        // Try to convert the service path to a TopicPath using the service's network ID
-        match TopicPath::new(&service_path, service.network_id()) {
-            Ok(topic_path) => {
-                // Add to new remote services registry indexed by TopicPath
-                let mut remote_services = self.remote_services.write().await;
-                let services = remote_services.entry(topic_path).or_insert_with(Vec::new);
-                services.push(service.clone());
-            },
-            Err(e) => {
-                self.logger.warn(format!("Failed to create TopicPath for remote service: {}, error: {}", service_path, e));
-            }
-        }
-        
+         
         // Add to peer services registry indexed by peer ID
         {
-            let mut peer_services = self.peer_services.write().await;
+            let mut peer_services = self.remote_services_by_peer.write().await;
             let services = peer_services.entry(peer_id).or_insert_with(HashSet::new);
             services.insert(service_path);
+        }
+
+        //add to remote_services 
+        {
+            let mut services = self.remote_services_by_topic.write().await;
+            let entry = services.entry(service_topic).or_insert_with(Vec::new);
+            entry.push(service);
         }
         
         Ok(())
@@ -282,7 +293,7 @@ impl ServiceRegistry {
         
         // Store the remote service reference if needed
         {
-            let mut services = self.remote_services.write().await;
+            let mut services = self.remote_services_by_topic.write().await;
             let entry = services.entry(topic_path.clone()).or_insert_with(Vec::new);
             if !entry.iter().any(|s| s.peer_id() == remote_service.peer_id()) {
                 entry.push(remote_service);
@@ -360,7 +371,7 @@ impl ServiceRegistry {
         }
         // Store the mapping from ID to TopicPath
         {
-            let mut id_map = self.local_subscription_id_map.write().await;
+            let mut id_map = self.local_subscription_id_to_topic_path.write().await;
             id_map.insert(subscription_id.clone(), topic_path.clone());
         }
          
@@ -413,7 +424,7 @@ impl ServiceRegistry {
     /// INTENTION: Track the lifecycle state of a service.
     pub async fn update_service_state(&self, service_path: &str, state: ServiceState) -> Result<()> {
         self.logger.debug(format!("Updating service state for {}: {:?}", service_path, state));
-        let mut states = self.service_states.write().await;
+        let mut states = self.service_states_by_service_path.write().await;
         states.insert(service_path.to_string(), state);
         Ok(())
     }
@@ -423,7 +434,7 @@ impl ServiceRegistry {
     ///
     /// INTENTION: Retrieve the current state of all services.
     pub async fn get_all_service_states(&self) -> HashMap<String, ServiceState> {
-        self.service_states.read().await.clone()
+        self.service_states_by_service_path.read().await.clone()
     }
     
     //REMOVED DONT PUT BACK - any code tha breaks need to be changed
@@ -435,7 +446,7 @@ impl ServiceRegistry {
     /// Node to directly interact with them for lifecycle operations like initialization,
     /// starting, and stopping. This preserves the Node's responsibility for service
     /// lifecycle management while keeping the Registry focused on registration.
-    pub async fn get_local_services(&self) -> HashMap<String, Arc<dyn AbstractService>> {
+    pub async fn get_local_services(&self) -> HashMap<TopicPath, Arc<ServiceEntry>> {
         self.local_services.read().await.clone()
     }
     
@@ -449,7 +460,7 @@ impl ServiceRegistry {
         let topic_path_option: Option<TopicPath>;
         // First, find the TopicPath associated with the subscription ID
         {
-            let id_map = self.local_subscription_id_map.read().await;
+            let id_map = self.local_subscription_id_to_topic_path.read().await;
             topic_path_option = id_map.get(subscription_id).cloned();
         }
         
@@ -466,8 +477,8 @@ impl ServiceRegistry {
             if removed {
                 // Also remove from the ID map
                 {
-                    let mut id_map = self.local_subscription_id_map.write().await;
-                    id_map.remove(subscription_id);
+                    let mut id_to_topic_path_map = self.local_subscription_id_to_topic_path.write().await;
+                    id_to_topic_path_map.remove(subscription_id);
                 }
                 self.logger.debug(format!("Successfully unsubscribed from topic: {} with ID: {}", topic_path.as_str(), subscription_id));
                 Ok(())
@@ -535,17 +546,19 @@ impl ServiceRegistry {
 impl crate::services::RegistryDelegate for ServiceRegistry {
     /// Get all service states
     async fn get_all_service_states(&self) -> HashMap<String, ServiceState> {
-        self.service_states.read().await.clone()
+        self.service_states_by_service_path.read().await.clone()
     }
     
     /// Get metadata for a specific service
-    async fn get_service_metadata(&self, service_path: &str) -> Option<CompleteServiceMetadata> {
+    async fn get_service_metadata(&self, service_path: &TopicPath) -> Option<CompleteServiceMetadata> {
         // First try looking up a local service
         let services = self.local_services.read().await;
-        if let Some(service) = services.get(service_path) {
-            let states = self.service_states.read().await;
-            let state = states.get(service_path).cloned().unwrap_or(ServiceState::Unknown);
-            
+        if let Some(service_entry) = services.get(&service_path) {
+            let service = service_entry.service.clone();
+            let states = self.service_states_by_service_path.read().await;
+            let service_path_str = service_path.service_path();
+            let state = states.get(&service_path_str).cloned().unwrap_or(ServiceState::Unknown);
+             
             // Create timestamp for registration
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -555,11 +568,13 @@ impl crate::services::RegistryDelegate for ServiceRegistry {
             // Create metadata using individual getter methods
             return Some(CompleteServiceMetadata {
                 name: service.name().to_string(),
-                path: service_path.to_string(),
+                path: service.path().to_string(),
                 version: service.version().to_string(),
                 description: service.description().to_string(),
-                registered_actions: HashMap::new(), // Would need more complex logic to populate
-                registered_events: HashMap::new(),  // Would need more complex logic to populate
+                //TODO
+                registered_actions: HashMap::new(),  
+                //TODO
+                registered_events: HashMap::new(),  
                 current_state: state,
                 registration_time: now,
                 last_start_time: None,
@@ -576,7 +591,7 @@ impl crate::services::RegistryDelegate for ServiceRegistry {
         // For now, just return local services
         let mut result = HashMap::new();
         let services = self.local_services.read().await;
-        let states = self.service_states.read().await;
+        let states = self.service_states_by_service_path.read().await;
         
         // Create timestamp for registration
         let now = std::time::SystemTime::now()
@@ -584,13 +599,15 @@ impl crate::services::RegistryDelegate for ServiceRegistry {
             .unwrap_or_default()
             .as_secs();
         
-        for (path, service) in services.iter() {
-            let state = states.get(path).cloned().unwrap_or(ServiceState::Unknown);
+        for (topic_path, service_entry) in services.iter() {
+            let service = &service_entry.service;
+            let path_str = service.path().to_string();
+            let state = states.get(&path_str).cloned().unwrap_or(ServiceState::Unknown);
             
-            // Create metadata using individual getter methods
-            result.insert(path.clone(), CompleteServiceMetadata {
+            // Create metadata using individual getter methods from the service
+            result.insert(path_str, CompleteServiceMetadata {
                 name: service.name().to_string(),
-                path: path.clone(),
+                path: service.path().to_string(),
                 version: service.version().to_string(),
                 description: service.description().to_string(),
                 registered_actions: HashMap::new(), // Would need more complex logic to populate
@@ -603,19 +620,7 @@ impl crate::services::RegistryDelegate for ServiceRegistry {
         
         result
     }
-
-    /// List all services
-    fn list_services(&self) -> Vec<String> {
-        // For now, just return local services
-        // This would need to add remote services in a real implementation
-        let services = match self.local_services.try_read() {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
-        };
-        
-        services.keys().cloned().collect()
-    }
-    
+ 
     /// Register a remote action handler
     async fn register_remote_action_handler(
         &self,

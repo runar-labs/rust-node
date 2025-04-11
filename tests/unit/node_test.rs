@@ -9,13 +9,13 @@ use std::time::Duration;
 use tokio::time::timeout;
 use std::pin::Pin;
 use std::future::Future;
+use std::collections::HashMap;
 
 use runar_common::types::ValueType;
 use runar_common::{Component, Logger};
-use runar_node::node::{Node, NodeConfig};
-use runar_node::services::{EventContext};
-use runar_node::services::{LifecycleContext};
+use runar_node::node::{Node, NodeConfig}; 
 use runar_node::NodeDelegate;
+use runar_node::services::EventContext;
 
 // Import the test fixtures
 use crate::fixtures::math_service::MathService;
@@ -106,7 +106,7 @@ async fn test_node_request() {
         let mut node = Node::new(config).await.unwrap();
         
         // Create a test service with consistent name and path
-        let service = MathService::new("Math", "Math");
+        let service = MathService::new("Math Service", "math");
         
         // Add the service to the node
         node.add_service(service).await.unwrap();
@@ -115,15 +115,13 @@ async fn test_node_request() {
         node.start().await.unwrap();
         
         // Create parameters for the add operation
-        let params = ValueType::Map([
-            ("a".to_string(), ValueType::Number(5.0)),
-            ("b".to_string(), ValueType::Number(3.0)),
-        ].into_iter().collect());
+        let mut params_map = HashMap::new();
+        params_map.insert("a".to_string(), ValueType::Number(5.0));
+        params_map.insert("b".to_string(), ValueType::Number(3.0));
+        let params = ValueType::Map(params_map);
         
         // Make a request to the math service's add action
-        let response = node.request("Math/add".to_string(), params).await.unwrap();
-        
-        // Verify the response contains the expected result (5 + 3 = 8)
+        let response = node.request("math/add", params).await.unwrap();
         if let ValueType::Number(result) = response.data.unwrap() {
             assert_eq!(result, 8.0);
         } else {

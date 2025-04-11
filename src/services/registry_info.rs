@@ -21,6 +21,7 @@ use crate::services::{LifecycleContext, RequestContext, ServiceResponse, Registr
 use runar_common::logging::Logger;
 use runar_common::types::ValueType;
 use runar_common::vmap;
+use crate::routing::TopicPath;
 
 /// Registry Info Service - provides information about registered services without holding state
 pub struct RegistryService {
@@ -259,8 +260,16 @@ impl RegistryService {
                 "state" => format!("{:?}", state)
             };
             
+            // Create a TopicPath from the service path
+            let service_topic = match TopicPath::new(&actual_service_path, "default") {
+                Ok(topic) => topic,
+                Err(_) => {
+                    return Ok(ServiceResponse::error(500, "Invalid service path format"));
+                }
+            };
+            
             // Add metadata if available
-            if let Some(meta) = self.registry_delegate.get_service_metadata(&actual_service_path).await {
+            if let Some(meta) = self.registry_delegate.get_service_metadata(&service_topic).await {
                 // Extract network ID from the path (format: "network_id:path")
                 let network_id = if actual_service_path.contains(':') {
                     actual_service_path.split(':').next().unwrap_or("").to_string()
@@ -423,7 +432,12 @@ impl AbstractService for RegistryService {
     }
     
     fn description(&self) -> &str {
-        "Service providing metadata about registered services"
+        "Registry service for service discovery and metadata"
+    }
+    
+    fn network_id(&self) -> Option<String> {
+        // Registry service is always in the default network
+        Some("default".to_string())
     }
 
     /// Initialize the Registry Service by registering all handlers

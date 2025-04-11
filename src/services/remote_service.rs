@@ -24,11 +24,12 @@ use crate::network::ServiceCapability;
 #[derive(Clone)]
 pub struct RemoteService {
     /// Service metadata
-    name: String,
-    service_path: TopicPath,
-    service_path_str: String, // Cache the string representation
-    version: String,
-    description: String,
+    pub name: String,
+    pub service_topic: TopicPath,
+    pub version: String,
+    pub description: String, 
+    /// Network ID for this service
+    pub network_id: String,
     
     /// Remote peer information
     peer_id: PeerId,
@@ -54,25 +55,22 @@ pub struct RemoteService {
 impl RemoteService {
     /// Create a new RemoteService instance
     pub fn new(
-        name: String,
-        service_path: TopicPath,
+        name: String, 
+        service_topic: TopicPath,
         version: String,
-        description: String,
+        description: String, 
         peer_id: PeerId,
         network_transport: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>,
         local_node_id: PeerId,
         logger: Logger,
         request_timeout_ms: u64,
     ) -> Self {
-        // Cache the service path string to avoid multiple calls
-        let service_path_str = service_path.service_path().to_string();
-        
-        Self {
-            name,
-            service_path,
-            service_path_str,
+      
+        Self {  
+            name, 
+            service_topic, 
             version,
-            description,
+            description,  
             peer_id,
             network_transport,
             actions: Arc::new(RwLock::new(HashMap::new())),
@@ -80,6 +78,7 @@ impl RemoteService {
             local_node_id,
             pending_requests: Arc::new(RwLock::new(HashMap::new())),
             request_timeout_ms,
+            network_id: String::new(),
         }
     }
     
@@ -119,9 +118,9 @@ impl RemoteService {
             };
             
             // Create the remote service
-            let service = Arc::new(Self::new(
+            let service = Arc::new(Self::new(   
                 capability.name,
-                service_path.clone(),
+                service_path,
                 capability.version,
                 capability.description,
                 peer_id.clone(),
@@ -157,7 +156,7 @@ impl RemoteService {
     
     /// Get the network identifier for this service path
     pub fn network_id(&self) -> String {
-        self.service_path.network_id()
+        self.service_topic.network_id()
     }
     
     /// Add an action to this remote service
@@ -176,7 +175,7 @@ impl RemoteService {
             let action = action_name.clone();
             
             // Create a new TopicPath for this action using the helper method
-            let action_topic_path = match service_clone.service_path.new_action_topic(&action) {
+            let action_topic_path = match service_clone.service_topic.new_action_topic(&action) {
                 Ok(path) => path,
                 Err(e) => {
                     return Box::pin(async move {
@@ -240,16 +239,16 @@ impl RemoteService {
     ///
     /// INTENTION: Set up this service to receive responses for its requests.
     /// This should be called once when the service is created.
-    pub async fn register_response_handler(&self, node: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>) -> Result<()> {
+    pub async fn register_response_handler(&self, network_transport: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>) -> Result<()> {
         // For now, just log the intent to register a response handler
         // The actual registration requires a mutable reference to the transport
         // which we don't have in this context
-        self.logger.info(format!("Would register response handler for remote service {}", self.service_path_str));
+        self.logger.info(format!("Would register response handler for remote service {}", self.service_topic));
         
         // Check if transport is available just to provide a meaningful error
-        if node.read().await.is_none() {
-            return Err(anyhow!("Network transport not available"));
-        }
+        // if network_transport.read().await.is_none() {
+        //     return Err(anyhow!("Network transport not available"));
+        // }
         
         Ok(())
     }
@@ -369,7 +368,7 @@ impl RemoteService {
         
         // Register each action handler
         for action_name in action_names {
-            if let Ok(action_topic_path) = self.service_path.new_action_topic(&action_name) {
+            if let Ok(action_topic_path) = self.service_topic.new_action_topic(&action_name) {
                 // Create handler for this action
                 let handler = self.create_action_handler(action_name.clone());
                 
@@ -383,7 +382,7 @@ impl RemoteService {
             } else {
                 self.logger.warn(format!(
                     "Failed to create topic path for action: {}/{}", 
-                    self.service_path_str, action_name
+                    self.service_topic, action_name
                 ));
             }
         }
@@ -399,7 +398,7 @@ impl AbstractService for RemoteService {
     }
     
     fn path(&self) -> &str {
-        &self.service_path_str
+        self.service_topic.as_str()
     }
     
     fn version(&self) -> &str {
@@ -409,22 +408,26 @@ impl AbstractService for RemoteService {
     fn description(&self) -> &str {
         &self.description
     }
+
+    fn network_id(&self) -> Option<String> {
+        Some(self.service_topic.network_id())
+    }
     
     async fn init(&self, _context: LifecycleContext) -> Result<()> {
         // Remote services don't need initialization since they're just proxies
-        self.logger.info(format!("Initialized remote service proxy for {}", self.service_path_str));
+        self.logger.info(format!("Initialized remote service proxy for {}", self.service_topic));
         Ok(())
     }
     
     async fn start(&self, _context: LifecycleContext) -> Result<()> {
         // Remote services don't need to be started
-        self.logger.info(format!("Started remote service proxy for {}", self.service_path_str));
+        self.logger.info(format!("Started remote service proxy for {}", self.service_topic));
         Ok(())
     }
     
     async fn stop(&self, _context: LifecycleContext) -> Result<()> {
         // Remote services don't need to be stopped
-        self.logger.info(format!("Stopped remote service proxy for {}", self.service_path_str));
+        self.logger.info(format!("Stopped remote service proxy for {}", self.service_topic));
         Ok(())
     }
 }

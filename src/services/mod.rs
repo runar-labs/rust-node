@@ -660,35 +660,7 @@ impl Default for EventRegistrationOptions {
 /// separates the responsibility of request handling from service management.
 #[async_trait::async_trait]
 pub trait NodeRequestHandler: Send + Sync {
-    /// Process a service request
-    ///
-    /// ```
-    /// // Example implementation
-    /// use runar_node::services::{NodeRequestHandler, ServiceResponse, EventContext, SubscriptionOptions};
-    /// use runar_common::types::ValueType;
-    /// use anyhow::Result;
-    /// use async_trait::async_trait;
-    /// use std::future::Future;
-    /// use std::pin::Pin;
-    /// use std::sync::Arc;
-    /// 
-    /// struct Node {}
-    /// 
-    /// #[async_trait]
-    /// impl NodeRequestHandler for Node {
-    ///     async fn request(&self, path: String, params: ValueType) -> Result<ServiceResponse> {
-    ///         // Process the request
-    ///         Ok(ServiceResponse::ok_empty())
-    ///     }
-    ///     
-    ///     // Other methods implemented...
-    /// #   async fn publish(&self, _topic: String, _data: ValueType) -> Result<()> { Ok(()) }
-    /// #   async fn subscribe(&self, _topic: String, _callback: Box<dyn Fn(Arc<EventContext>, ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>) -> Result<String> { Ok(String::new()) }
-    /// #   async fn subscribe_with_options(&self, _topic: String, _callback: Box<dyn Fn(Arc<EventContext>, ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>, _options: SubscriptionOptions) -> Result<String> { Ok(String::new()) }
-    /// #   async fn unsubscribe(&self, _topic: String, _subscription_id: Option<&str>) -> Result<()> { Ok(()) }
-    /// #   fn list_services(&self) -> Vec<String> { Vec::new() }
-    /// }
-    /// ```
+    /// Process a service request 
     async fn request(&self, path: String, params: ValueType) -> Result<ServiceResponse>;
 
     /// Publish an event to a topic
@@ -717,17 +689,6 @@ pub trait NodeRequestHandler: Send + Sync {
 
     /// Unsubscribe from a topic
     async fn unsubscribe(&self, topic: String, subscription_id: Option<&str>) -> Result<()>;
-
-    /// List all services
-    /// 
-    /// This method is provided in the trait to allow clients to discover
-    /// available services without needing to know the internal structure
-    /// of the service registry. It provides a simple way to enumerate
-    /// the services available for requests.
-    /// 
-    /// In more complex implementations, this could be expanded to include
-    /// filtering by service type, status, or other attributes.
-    fn list_services(&self) -> Vec<String>;
 }
 
 /// Helper trait to enable easy logging from an Arc<RequestContext>
@@ -875,11 +836,8 @@ pub trait NodeDelegate: Send + Sync {
     ) -> Result<String>;
 
     /// Unsubscribe from a topic
-    async fn unsubscribe(&self, topic: String, subscription_id: Option<&str>) -> Result<()>;
+    async fn unsubscribe(&self, subscription_id: Option<&str>) -> Result<()>;
 
-    /// List all services
-    fn list_services(&self) -> Vec<String>;
-    
     /// Register an action handler for a specific path
     ///
     /// INTENTION: Allow services to register handlers for actions through the NodeDelegate.
@@ -899,14 +857,11 @@ pub trait RegistryDelegate: Send + Sync {
     async fn get_all_service_states(&self) -> HashMap<String, ServiceState>;
     
     /// Get metadata for a specific service
-    async fn get_service_metadata(&self, service_path: &str) -> Option<CompleteServiceMetadata>;
+    async fn get_service_metadata(&self, service_path: &TopicPath) -> Option<CompleteServiceMetadata>;
     
     /// Get metadata for all registered services in a single call
     async fn get_all_service_metadata(&self) -> HashMap<String, CompleteServiceMetadata>;
-    
-    /// List all services
-    fn list_services(&self) -> Vec<String>;
-    
+
     /// Register a remote action handler
     ///
     /// INTENTION: Allow RemoteLifecycleContext to register remote action handlers
