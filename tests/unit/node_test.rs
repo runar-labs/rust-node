@@ -99,6 +99,7 @@ async fn test_node_add_service() {
 async fn test_node_request() {
     // Wrap the test in a timeout to prevent it from hanging
     match timeout(Duration::from_secs(10), async {
+
         // Create a node with a test network ID
         let mut config = NodeConfig::new("test-node", "test_network");
         // Disable networking

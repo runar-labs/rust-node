@@ -385,7 +385,7 @@ impl Node {
         let init_context = crate::services::LifecycleContext::new(
             &service_topic, 
             self.logger.clone().with_component(runar_common::Component::Service)
-        );
+        ).with_node_delegate(Arc::new(self.clone()));
         
         // Initialize the service using the context
         if let Err(e) = service.init(init_context).await {

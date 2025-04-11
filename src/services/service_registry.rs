@@ -104,11 +104,7 @@ pub struct ServiceRegistry {
     
     /// Remote action handlers organized by path, with multiple handlers per path
     remote_action_handlers: RwLock<HashMap<TopicPath, Vec<ActionHandler>>>,
-    
-    /// Legacy action handlers organized by network and then by path 
-    /// Will be deprecated once migration is complete
-    action_handlers: RwLock<HashMap<String, HashMap<String, ActionHandler>>>,
-    
+     
     /// Local event subscriptions using wildcard registry
     local_event_subscriptions: RwLock<WildcardSubscriptionRegistry<(String, EventCallback)>>,
     
@@ -148,8 +144,7 @@ impl Clone for ServiceRegistry {
         
         ServiceRegistry {
             local_action_handlers: RwLock::new(HashMap::new()),
-            remote_action_handlers: RwLock::new(HashMap::new()),
-            action_handlers: RwLock::new(HashMap::new()),
+            remote_action_handlers: RwLock::new(HashMap::new()), 
             local_event_subscriptions: RwLock::new(WildcardSubscriptionRegistry::new()),
             local_subscription_id_to_topic_path: RwLock::new(HashMap::new()),
             remote_event_subscriptions: RwLock::new(WildcardSubscriptionRegistry::new()),
@@ -177,8 +172,7 @@ impl ServiceRegistry {
     pub fn new(logger: Logger) -> Self {
         Self {
             local_action_handlers: RwLock::new(HashMap::new()),
-            remote_action_handlers: RwLock::new(HashMap::new()),
-            action_handlers: RwLock::new(HashMap::new()),
+            remote_action_handlers: RwLock::new(HashMap::new()), 
             local_event_subscriptions: RwLock::new(WildcardSubscriptionRegistry::new()),
             local_subscription_id_to_topic_path: RwLock::new(HashMap::new()),
             remote_event_subscriptions: RwLock::new(WildcardSubscriptionRegistry::new()),
@@ -252,24 +246,14 @@ impl ServiceRegistry {
         handler: ActionHandler,
         metadata: Option<ActionMetadata>
     ) -> Result<()> {
-        self.logger.debug(format!("Registering local action handler for: {}", topic_path.as_str()));
+        self.logger.debug(format!("Registering local action handler for: {}", topic_path ));
         
         // Store in the new local action handlers map
         {
             let mut handlers = self.local_action_handlers.write().await;
             handlers.insert(topic_path.clone(), handler.clone());
         }
-        
-        // Also store in the legacy action handlers map (double storage during transition)
-        {
-            let mut handlers = self.action_handlers.write().await;
-            let network_handlers = handlers
-                .entry(topic_path.network_id().to_string())
-                .or_insert_with(HashMap::new);
-            
-            network_handlers.insert(topic_path.action_path().to_string(), handler);
-        }
-        
+          
         Ok(())
     }
     
@@ -299,17 +283,7 @@ impl ServiceRegistry {
                 entry.push(remote_service);
             }
         }
-        
-        // Also store in the legacy action handlers map (double storage during transition)
-        {
-            let mut handlers = self.action_handlers.write().await;
-            let network_handlers = handlers
-                .entry(topic_path.network_id().to_string())
-                .or_insert_with(HashMap::new);
-            
-            network_handlers.insert(topic_path.action_path().to_string(), handler);
-        }
-        
+         
         Ok(())
     }
     
