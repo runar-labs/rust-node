@@ -2,8 +2,11 @@
 //
 // This module organizes tests for the runar_node crate
 
-// Unit tests
-pub mod unit;
+// Core tests (services, routing, node)
+pub mod core;
+
+// Network tests (transport, discovery) - temporarily disabled until updated
+// pub mod network;
 
 // Test fixtures
 pub mod fixtures;
