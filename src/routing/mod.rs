@@ -44,6 +44,10 @@ pub enum PathSegment {
     /// A literal string segment (e.g., "services", "auth", "login")
     Literal(String),
     
+    /// A template parameter segment (e.g., "{service_path}", "{user_id}")
+    /// Stores the parameter name without the braces for easier access
+    Template(String),
+    
     /// A single-segment wildcard (*) - matches any single segment
     /// Example: "services/*/state" matches "services/math/state" but not "services/auth/user/state"
     SingleWildcard,
@@ -58,11 +62,16 @@ impl PathSegment {
     /// Parse a string segment into a PathSegment
     ///
     /// INTENTION: Convert raw string segments into the appropriate PathSegment variant,
-    /// handling special wildcard characters.
+    /// handling special wildcard characters and template parameters.
     fn from_str(segment: &str) -> Self {
         match segment {
             "*" => Self::SingleWildcard,
             ">" => Self::MultiWildcard,
+            s if s.starts_with('{') && s.ends_with('}') => {
+                // This is a template parameter - extract the parameter name without braces
+                let param_name = &s[1..s.len()-1];
+                Self::Template(param_name.to_string())
+            },
             _ => Self::Literal(segment.to_string()),
         }
     }
@@ -79,6 +88,39 @@ impl PathSegment {
     /// INTENTION: Identify multi-segment wildcards which have special matching rules.
     pub fn is_multi_wildcard(&self) -> bool {
         matches!(self, Self::MultiWildcard)
+    }
+    
+    /// Check if this segment is a template parameter
+    ///
+    /// INTENTION: Quickly determine if a segment is a template parameter.
+    pub fn is_template(&self) -> bool {
+        matches!(self, Self::Template(_))
+    }
+    
+    /// Convert segment to string representation
+    ///
+    /// INTENTION: Get the string representation of this segment for path construction.
+    fn to_string(&self) -> String {
+        match self {
+            Self::Literal(s) => s.clone(),
+            Self::Template(name) => format!("{{{}}}", name),
+            Self::SingleWildcard => "*".to_string(),
+            Self::MultiWildcard => ">".to_string(),
+        }
+    }
+    
+    /// Get segment as string slice for display
+    ///
+    /// INTENTION: Get a string representation without allocating when possible.
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Literal(s) => s.as_str(),
+            // These require allocations - we return slices to the static strings
+            Self::SingleWildcard => "*",
+            Self::MultiWildcard => ">",
+            // Template requires its own allocation in to_string()
+            Self::Template(_) => "*", // This is a placeholder that should never be called
+        }
     }
 }
 
@@ -106,8 +148,34 @@ pub struct TopicPath {
     /// Whether this path contains wildcard patterns
     is_pattern: bool,
     
+    /// Whether this path contains template parameters
+    has_templates: bool,
+    
     /// The service name (first segment of the path) - cached for convenience
     service_path: String,
+    
+    /// Cached action path (all segments joined) - computed once at creation time
+    cached_action_path: String,
+    
+    /// Segment count - cached for quick filtering
+    segment_count: usize,
+    
+    /// Pre-computed hash components for faster hashing
+    hash_components: Vec<u64>,
+    
+    /// Bitmap representation of segment types for fast pattern matching
+    /// Each 2 bits represent a segment type:
+    /// - 00: Literal
+    /// - 01: Template
+    /// - 10: SingleWildcard
+    /// - 11: MultiWildcard
+    /// This allows us to quickly check segment types without iterating through segments
+    segment_type_bitmap: u64,
+    
+    /// LRU cache for match results - up to 8 recent matches (small fixed size)
+    /// Key is the hash of the matched path, value is the match result
+    #[cfg(feature = "match_cache")]
+    match_cache: std::cell::RefCell<Option<lru::LruCache<u64, bool>>>,
 }
 
 // Implement Hash trait for TopicPath to enable use in HashMaps
@@ -116,12 +184,25 @@ impl Hash for TopicPath {
         // Hash the network ID
         self.network_id.hash(state);
         
-        // Hash each segment with type discrimination
+        // Use pre-computed hash components if available
+        if !self.hash_components.is_empty() {
+            for component in &self.hash_components {
+                state.write_u64(*component);
+            }
+            return;
+        }
+        
+        // Fallback implementation (should rarely be used)
         for segment in &self.segments {
             match segment {
                 PathSegment::Literal(s) => {
                     // Hash type code + string for literal segments
                     0.hash(state);
+                    s.hash(state);
+                }
+                PathSegment::Template(s) => {
+                    // Hash type code + parameter name for template segments
+                    3.hash(state);
                     s.hash(state);
                 }
                 PathSegment::SingleWildcard => {
@@ -140,13 +221,18 @@ impl Hash for TopicPath {
 // Implement PartialEq for TopicPath to enable equality comparisons and HashMap lookups
 impl PartialEq for TopicPath {
     fn eq(&self, other: &Self) -> bool {
+        // Fast path: if paths are identical strings, they're equal
+        if self.path == other.path {
+            return true;
+        }
+        
         // Network IDs must match
         if self.network_id != other.network_id {
             return false;
         }
         
-        // Segment counts must match
-        if self.segments.len() != other.segments.len() {
+        // Segment counts must match (now a cached field)
+        if self.segment_count != other.segment_count {
             return false;
         }
         
@@ -240,7 +326,6 @@ impl TopicPath {
     /// assert!(pattern.is_pattern());
     /// ```
     pub fn new(path: &str, default_network: &str) -> Result<Self, String> {
-         
         // Parse the network ID and path parts
         let (network_id, path_without_network) = if path.contains(':') {
             // Split at the first colon to separate network_id and path
@@ -248,15 +333,9 @@ impl TopicPath {
             if parts.len() != 2 {
                 return Err(format!("Invalid path format - should be 'network_id:service_path' or 'service_path': {}", path));
             }
-            
-            let network = parts[0];
-            if network.is_empty() {
-                return Err("Network ID cannot be empty".to_string());
-            }
-            
-            (network, parts[1])
+            (parts[0], parts[1])
         } else {
-            // No network ID provided, use the default
+            // No network_id prefix, use the default
             (default_network, path)
         };
         
@@ -265,14 +344,18 @@ impl TopicPath {
             .filter(|s| !s.is_empty())
             .collect();
             
+        // Paths must have at least one segment (the service name)
         if path_segments.is_empty() {
-            return Err("Path must have at least a service path segment".to_string());
+            return Err(format!("Invalid path - must have at least one segment: {}", path));
         }
         
-        // Convert string segments to PathSegment enum variants
-        let mut segments = Vec::new();
+        // Process each segment
+        let mut segments = Vec::with_capacity(path_segments.len());
         let mut is_pattern = false;
+        let mut has_templates = false;
         let mut _multi_wildcard_found = false;
+        let mut hash_components = Vec::with_capacity(path_segments.len());
+        let mut segment_type_bitmap: u64 = 0;
         
         for (i, segment_str) in path_segments.iter().enumerate() {
             let segment = PathSegment::from_str(segment_str);
@@ -281,6 +364,7 @@ impl TopicPath {
             match &segment {
                 PathSegment::SingleWildcard => {
                     is_pattern = true;
+                    Self::set_segment_type(&mut segment_type_bitmap, i, Self::SEGMENT_TYPE_SINGLE_WILDCARD);
                 }
                 PathSegment::MultiWildcard => {
                     is_pattern = true;
@@ -290,9 +374,37 @@ impl TopicPath {
                     if i < path_segments.len() - 1 {
                         return Err("Multi-segment wildcard (>) must be the last segment in a path".to_string());
                     }
+                    
+                    Self::set_segment_type(&mut segment_type_bitmap, i, Self::SEGMENT_TYPE_MULTI_WILDCARD);
                 }
-                PathSegment::Literal(_) => {}
+                PathSegment::Template(_) => {
+                    has_templates = true;
+                    Self::set_segment_type(&mut segment_type_bitmap, i, Self::SEGMENT_TYPE_TEMPLATE);
+                }
+                PathSegment::Literal(_) => {
+                    Self::set_segment_type(&mut segment_type_bitmap, i, Self::SEGMENT_TYPE_LITERAL);
+                }
             }
+            
+            // Compute hash component for this segment
+            let mut segment_hasher = std::collections::hash_map::DefaultHasher::new();
+            match &segment {
+                PathSegment::Literal(s) => {
+                    0.hash(&mut segment_hasher);
+                    s.hash(&mut segment_hasher);
+                }
+                PathSegment::Template(s) => {
+                    3.hash(&mut segment_hasher);
+                    s.hash(&mut segment_hasher);
+                }
+                PathSegment::SingleWildcard => {
+                    1.hash(&mut segment_hasher);
+                }
+                PathSegment::MultiWildcard => {
+                    2.hash(&mut segment_hasher);
+                }
+            }
+            hash_components.push(segment_hasher.finish());
             
             segments.push(segment);
         }
@@ -300,6 +412,7 @@ impl TopicPath {
         // Save the service path (first segment) for easy access
         let service_path = match &segments[0] {
             PathSegment::Literal(s) => s.clone(),
+            PathSegment::Template(s) => format!("{{{}}}", s),
             PathSegment::SingleWildcard => "*".to_string(),
             PathSegment::MultiWildcard => ">".to_string(),
         };
@@ -307,13 +420,32 @@ impl TopicPath {
         // Create the full path string (for display/serialization)
         let full_path_str = format!("{}:{}", network_id, path_without_network);
         
-        Ok(Self {
+        // Pre-compute the action path for caching
+        let cached_action_path = if segments.len() <= 1 {
+            "".to_string()
+        } else {
+            segments.iter()
+                .map(|segment| segment.to_string())
+                .collect::<Vec<String>>()
+                .join("/")
+        };
+        
+        let result = Self {
             path: full_path_str,
-            network_id:network_id.to_string(),
+            network_id: network_id.to_string(),
+            segment_count: segments.len(),
             segments,
             is_pattern,
+            has_templates,
             service_path,
-        })
+            cached_action_path,
+            hash_components,
+            segment_type_bitmap,
+            #[cfg(feature = "match_cache")]
+            match_cache: std::cell::RefCell::new(Some(lru::LruCache::new(8))),
+        };
+        
+        Ok(result)
     }
     
     /// Check if this path contains wildcards
@@ -329,7 +461,14 @@ impl TopicPath {
     /// INTENTION: Identify paths with multi-segment wildcards which have 
     /// special matching rules and storage requirements.
     pub fn has_multi_wildcard(&self) -> bool {
-        self.segments.iter().any(|s| s.is_multi_wildcard())
+        // Check if any segment is a multi-wildcard
+        for i in 0..self.segment_count {
+            if self.has_segment_type(i, Self::SEGMENT_TYPE_MULTI_WILDCARD) {
+                return true;
+            }
+        }
+        
+        false
     }
 
     /// Get the path after the network ID
@@ -349,21 +488,7 @@ impl TopicPath {
     /// assert_eq!(service_only.action_path(), "");
     /// ```
     pub fn action_path(&self) -> String {
-        if self.segments.len() <= 1 {
-            // If there's only one segment (just the service), return empty string
-            return "".to_string();
-        }
-        
-        //FIX: this methdosnis called a lot.. so we need to calculat this once and store in a field and just return it here
-        // Otherwise, reconstruct the path from segments
-        self.segments.iter()
-            .map(|segment| match segment {
-                PathSegment::Literal(s) => s.as_str(),
-                PathSegment::SingleWildcard => "*",
-                PathSegment::MultiWildcard => ">",
-            })
-            .collect::<Vec<&str>>()
-            .join("/")
+        self.cached_action_path.clone()
     }
     
     /// Get the path as a string
@@ -408,12 +533,7 @@ impl TopicPath {
     /// assert_eq!(segments[0], "auth");
     /// ```
     pub fn service_path(&self) -> String {
-        // Extract the first segment of the path - the service name
-        let segments = self.get_segments();
-        if segments.is_empty() {
-            return String::new();
-        }
-        segments[0].clone()
+        self.service_path.clone()
     }
 
     /// Create a new service path from a network ID and service name
@@ -439,6 +559,13 @@ impl TopicPath {
             service_path: service_name_string.clone(),
             segments: vec![PathSegment::Literal(service_name_string)],
             is_pattern: false,
+            has_templates: false,
+            cached_action_path: "".to_string(),
+            segment_count: 1,
+            hash_components: Vec::new(),
+            segment_type_bitmap: 0,
+            #[cfg(feature = "match_cache")]
+            match_cache: std::cell::RefCell::new(Some(lru::LruCache::new(8))),
         }
     }
 
@@ -479,26 +606,16 @@ impl TopicPath {
     /// assert_eq!(child.as_str(), "main:auth/login");
     /// ```
     pub fn child(&self, segment: &str) -> Result<Self, String> {
-          // Ensure segment doesn't contain slashes
+        // Ensure segment doesn't contain slashes
         if segment.contains('/') {
             return Err(format!("Child segment cannot contain slashes: {}", segment));
         }
         
-        // Get the service_path if this is the first segment, or build a new path
-        let current_path_str = self.segments.iter()
-            .map(|s| match s {
-                PathSegment::Literal(s) => s.as_str(),
-                PathSegment::SingleWildcard => "*",
-                PathSegment::MultiWildcard => ">",
-            })
-            .collect::<Vec<&str>>()
-            .join("/");
-            
-        // Create the new path
-        let new_path_str = if current_path_str.is_empty() {
+        // Create the new path string
+        let new_path_str = if self.cached_action_path.is_empty() {
             segment.to_string()
         } else {
-            format!("{}/{}", current_path_str, segment)
+            format!("{}/{}", self.cached_action_path, segment)
         };
         
         // Create a full path with network ID
@@ -506,17 +623,46 @@ impl TopicPath {
         
         // Create a new set of segments based on the current segments plus the new one
         let mut new_segments = self.segments.clone();
-        new_segments.push(PathSegment::Literal(segment.to_string()));
+        let new_segment = PathSegment::from_str(segment);
         
         // Check if this path is a pattern (has wildcards)
-        let is_pattern = self.is_pattern || segment == "*" || segment == ">";
+        let is_pattern = self.is_pattern || matches!(new_segment, PathSegment::SingleWildcard | PathSegment::MultiWildcard);
+        
+        // Check if this path has templates
+        let has_templates = self.has_templates || matches!(new_segment, PathSegment::Template(_));
+        
+        // Add new segment to bitmap
+        let mut segment_type_bitmap = self.segment_type_bitmap;
+        match &new_segment {
+            PathSegment::Literal(_) => {
+                Self::set_segment_type(&mut segment_type_bitmap, self.segment_count, Self::SEGMENT_TYPE_LITERAL);
+            }
+            PathSegment::Template(_) => {
+                Self::set_segment_type(&mut segment_type_bitmap, self.segment_count, Self::SEGMENT_TYPE_TEMPLATE);
+            }
+            PathSegment::SingleWildcard => {
+                Self::set_segment_type(&mut segment_type_bitmap, self.segment_count, Self::SEGMENT_TYPE_SINGLE_WILDCARD);
+            }
+            PathSegment::MultiWildcard => {
+                Self::set_segment_type(&mut segment_type_bitmap, self.segment_count, Self::SEGMENT_TYPE_MULTI_WILDCARD);
+            }
+        }
+        
+        new_segments.push(new_segment);
         
         Ok(Self {
             path: full_path_str,
             network_id: self.network_id.clone(),
+            segment_count: self.segment_count + 1,
             segments: new_segments,
             is_pattern,
+            has_templates,
             service_path: self.service_path.clone(),
+            cached_action_path: new_path_str,
+            hash_components: Vec::new(),  // Recompute later if needed
+            segment_type_bitmap,
+            #[cfg(feature = "match_cache")]
+            match_cache: std::cell::RefCell::new(Some(lru::LruCache::new(8))),
         })
     }
 
@@ -535,11 +681,7 @@ impl TopicPath {
     /// ```
     pub fn get_segments(&self) -> Vec<String> {
         self.segments.iter()
-            .map(|segment| match segment {
-                PathSegment::Literal(s) => s.clone(),
-                PathSegment::SingleWildcard => "*".to_string(),
-                PathSegment::MultiWildcard => ">".to_string(),
-            })
+            .map(|segment| segment.to_string())
             .collect()
     }
 
@@ -567,27 +709,48 @@ impl TopicPath {
         
         // Reconstruct the path string from segments
         let path_str = parent_segments.iter()
-            .map(|segment| match segment {
-                PathSegment::Literal(s) => s.as_str(),
-                PathSegment::SingleWildcard => "*",
-                PathSegment::MultiWildcard => ">",
-            })
-            .collect::<Vec<&str>>()
+            .map(|segment| segment.to_string())
+            .collect::<Vec<String>>()
             .join("/");
             
         // Create the full path with network ID
         let full_path = format!("{}:{}", self.network_id, path_str);
         
+        // Check if parent is a pattern
+        let mut is_pattern = false;
+        let mut has_templates = false;
+        
+        // Create new bitmap by removing the last 2 bits
+        let mut segment_type_bitmap = self.segment_type_bitmap;
+        segment_type_bitmap &= !(0b11 << ((self.segment_count - 1) * 2));
+        
+        // Check each segment in the parent for patterns
+        for i in 0..parent_segments.len() {
+            let segment_type = Self::get_segment_type(segment_type_bitmap, i);
+            match segment_type {
+                Self::SEGMENT_TYPE_SINGLE_WILDCARD | Self::SEGMENT_TYPE_MULTI_WILDCARD => {
+                    is_pattern = true;
+                }
+                Self::SEGMENT_TYPE_TEMPLATE => {
+                    has_templates = true;
+                }
+                _ => {}
+            }
+        }
+        
         Ok(Self {
             path: full_path,
             network_id: self.network_id.clone(),
+            segment_count: self.segment_count - 1,
             segments: parent_segments,
-            is_pattern: self.segments[0..self.segments.len() - 1].iter().any(|s| s.is_wildcard()),
-            service_path: match &self.segments[0] {
-                PathSegment::Literal(s) => s.clone(),
-                PathSegment::SingleWildcard => "*".to_string(),
-                PathSegment::MultiWildcard => ">".to_string(),
-            },
+            is_pattern,
+            has_templates,
+            service_path: self.service_path.clone(),
+            cached_action_path: path_str,
+            hash_components: Vec::new(),  // Recompute later if needed
+            segment_type_bitmap,
+            #[cfg(feature = "match_cache")]
+            match_cache: std::cell::RefCell::new(Some(lru::LruCache::new(8))),
         })
     }
 
@@ -689,7 +852,264 @@ impl TopicPath {
     /// assert!(!non_matching.matches_template(template));
     /// ```
     pub fn matches_template(&self, template: &str) -> bool { 
-        self.extract_params(&template).is_ok()
+        // Fast path: if neither has templates, do simple comparison
+        if !self.has_templates && !template.contains('{') {
+            return self.path.contains(&template);
+        }
+        
+        // Use faster matching for common template patterns
+        let template_segments: Vec<&str> = template.split('/')
+            .filter(|s| !s.is_empty())
+            .collect();
+            
+        // Quickly check segment counts to avoid unnecessary processing
+        if template_segments.len() != self.segment_count {
+            return false;
+        }
+        
+        // Iterate segments to check template compatibility
+        let path_segments = self.get_segments();
+        
+        for (i, template_segment) in template_segments.iter().enumerate() {
+            if template_segment.starts_with('{') && template_segment.ends_with('}') {
+                // Template parameter segment - matches any literal in corresponding position
+                continue;
+            } else if template_segment != &path_segments[i] {
+                // Literal segment must match exactly
+                return false;
+            }
+        }
+        
+        true
+    }
+
+    /// Check if this path contains template parameters
+    ///
+    /// INTENTION: Quickly determine if a path has template parameters,
+    /// which affects template matching behavior.
+    pub fn has_templates(&self) -> bool {
+        self.has_templates
+    }
+    
+    /// Get the number of segments in this path
+    ///
+    /// INTENTION: Quickly get the segment count without iterating segments.
+    pub fn segment_count(&self) -> usize {
+        self.segment_count
+    }
+
+    // Helper methods for bitmap operations
+    fn set_segment_type(bitmap: &mut u64, index: usize, segment_type: u8) {
+        // Each segment uses 2 bits
+        let shift = index * 2;
+        // Clear the existing bits for this segment
+        *bitmap &= !(0b11 << shift);
+        // Set the new segment type
+        *bitmap |= (segment_type as u64) << shift;
+    }
+    
+    fn get_segment_type(bitmap: u64, index: usize) -> u8 {
+        // Extract 2 bits representing the segment type
+        ((bitmap >> (index * 2)) & 0b11) as u8
+    }
+    
+    // Constants for segment types
+    const SEGMENT_TYPE_LITERAL: u8 = 0b00;
+    const SEGMENT_TYPE_TEMPLATE: u8 = 0b01;
+    const SEGMENT_TYPE_SINGLE_WILDCARD: u8 = 0b10;
+    const SEGMENT_TYPE_MULTI_WILDCARD: u8 = 0b11;
+
+    // Use bitmap for faster segment type checking
+    pub fn has_segment_type(&self, index: usize, segment_type: u8) -> bool {
+        if index >= self.segment_count {
+            return false;
+        }
+        
+        Self::get_segment_type(self.segment_type_bitmap, index) == segment_type
+    }
+
+    /// Implement pattern matching against another path
+    ///
+    /// INTENTION: Allow checking if a topic matches a pattern with wildcards,
+    /// enabling powerful pattern-based subscriptions.
+    ///
+    /// Example:
+    /// ```
+    /// use runar_node::routing::TopicPath;
+    ///
+    /// let pattern = TopicPath::new("main:services/*/state", "default").expect("Valid pattern");
+    /// let topic1 = TopicPath::new("main:services/math/state", "default").expect("Valid topic");
+    /// let topic2 = TopicPath::new("main:services/math/config", "default").expect("Valid topic");
+    ///
+    /// assert!(pattern.matches(&topic1));
+    /// assert!(!pattern.matches(&topic2));
+    /// ```
+    pub fn matches(&self, topic: &TopicPath) -> bool {
+        // Network ID must match
+        if self.network_id != topic.network_id {
+            return false;
+        }
+        
+        // Fast path 1: if paths are identical strings, they're equal
+        if self.path == topic.path {
+            return true;
+        }
+        
+        #[cfg(feature = "match_cache")]
+        {
+            // Check if we have a cached result
+            let topic_hash = {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                topic.path.hash(&mut hasher);
+                hasher.finish()
+            };
+            
+            if let Some(cache) = self.match_cache.borrow_mut().as_mut() {
+                if let Some(&result) = cache.get(&topic_hash) {
+                    return result;
+                }
+            }
+        }
+        
+        // Fast path 2: if segment counts don't match and there's no multi-wildcard,
+        // the paths can't match
+        if self.segment_count != topic.segment_count && !self.has_multi_wildcard() {
+            #[cfg(feature = "match_cache")]
+            {
+                // Cache the negative result
+                if let Some(cache) = self.match_cache.borrow_mut().as_mut() {
+                    let topic_hash = {
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        topic.path.hash(&mut hasher);
+                        hasher.finish()
+                    };
+                    cache.put(topic_hash, false);
+                }
+            }
+            
+            return false;
+        }
+        
+        // Fast path 3: If neither path is a pattern, and they're not identical strings,
+        // they can't match
+        if !self.is_pattern && !topic.is_pattern {
+            #[cfg(feature = "match_cache")]
+            {
+                // Cache the negative result
+                if let Some(cache) = self.match_cache.borrow_mut().as_mut() {
+                    let topic_hash = {
+                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                        topic.path.hash(&mut hasher);
+                        hasher.finish()
+                    };
+                    cache.put(topic_hash, false);
+                }
+            }
+            
+            return false;
+        }
+        
+        // Otherwise, perform segment-by-segment matching
+        let result = self.segments_match(&self.segments, &topic.segments);
+        
+        #[cfg(feature = "match_cache")]
+        {
+            // Cache the result
+            if let Some(cache) = self.match_cache.borrow_mut().as_mut() {
+                let topic_hash = {
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    topic.path.hash(&mut hasher);
+                    hasher.finish()
+                };
+                cache.put(topic_hash, result);
+            }
+        }
+        
+        result
+    }
+    
+    // Optimized segment matching with improved template handling
+    fn segments_match(&self, pattern_segments: &[PathSegment], topic_segments: &[PathSegment]) -> bool {
+        // Special case: multi-wildcard at the end
+        if let Some(PathSegment::MultiWildcard) = pattern_segments.last() {
+            // If pattern ends with >, topic must have at least as many segments as pattern minus 1
+            if topic_segments.len() < pattern_segments.len() - 1 {
+                return false;
+            }
+            
+            // Check all segments before the multi-wildcard
+            for i in 0..pattern_segments.len()-1 {
+                match &pattern_segments[i] {
+                    PathSegment::Literal(p) => {
+                        // For literals, the segments must match exactly
+                        match &topic_segments[i] {
+                            PathSegment::Literal(t) if p == t => continue,
+                            _ => return false,
+                        }
+                    }
+                    PathSegment::Template(_) => {
+                        // Template parameters match any literal segment
+                        match &topic_segments[i] {
+                            PathSegment::Literal(_) => continue,
+                            _ => return false,
+                        }
+                    }
+                    PathSegment::SingleWildcard => {
+                        // For single wildcards, any segment matches
+                        continue;
+                    }
+                    PathSegment::MultiWildcard => {
+                        // Should not happen, as we're iterating up to len-1
+                        unreachable!("Multi-wildcard found before the end of pattern");
+                    }
+                }
+            }
+            
+            // If we get here, all segments matched
+            return true;
+        }
+        
+        // If pattern doesn't end with multi-wildcard, segment counts must match
+        if pattern_segments.len() != topic_segments.len() {
+            return false;
+        }
+        
+        // Check each segment - fast path for literal matches
+        for (i, p) in pattern_segments.iter().enumerate() {
+            let t = &topic_segments[i];
+            
+            // Fast path for identical segments
+            if p == t {
+                continue;
+            }
+            
+            match p {
+                PathSegment::Literal(_) => {
+                    // Literals must match exactly, but we already checked
+                    // p == t above, so if we get here they don't match
+                    return false;
+                }
+                PathSegment::Template(_) => {
+                    // Template parameters match any literal segment
+                    match t {
+                        PathSegment::Literal(_) => continue,
+                        _ => return false,
+                    }
+                }
+                PathSegment::SingleWildcard => {
+                    // Single wildcards match any segment
+                    continue;
+                }
+                PathSegment::MultiWildcard => {
+                    // Multi-wildcards should only appear at the end
+                    // This is a defensive check - should never happen due to parsing
+                    return false;
+                }
+            }
+        }
+        
+        // If we get here, all segments matched
+        true
     }
 
     /// Create a TopicPath from a template and parameter values
@@ -747,109 +1167,10 @@ impl TopicPath {
         }
         // Construct the final path
         let path_str = path_segments.iter()
-            .map(|segment| match segment {
-                PathSegment::Literal(s) => s.as_str(),
-                PathSegment::SingleWildcard => "*",
-                PathSegment::MultiWildcard => ">",
-            })
-            .collect::<Vec<&str>>()
+            .map(|segment| segment.to_string())
+            .collect::<Vec<String>>()
             .join("/");
         Self::new(path_str.as_str(), network_id_string)
-    }
-
-    /// Implement pattern matching against another path
-    ///
-    /// INTENTION: Allow checking if a topic matches a pattern with wildcards,
-    /// enabling powerful pattern-based subscriptions.
-    ///
-    /// Example:
-    /// ```
-    /// use runar_node::routing::TopicPath;
-    ///
-    /// let pattern = TopicPath::new("main:services/*/state", "default").expect("Valid pattern");
-    /// let topic1 = TopicPath::new("main:services/math/state", "default").expect("Valid topic");
-    /// let topic2 = TopicPath::new("main:services/math/config", "default").expect("Valid topic");
-    ///
-    /// assert!(pattern.matches(&topic1));
-    /// assert!(!pattern.matches(&topic2));
-    /// ```
-    pub fn matches(&self, topic: &TopicPath) -> bool {
-        // Network ID must match
-        if self.network_id != topic.network_id {
-            return false;
-        }
-        
-        // If this is not a pattern, use exact equality
-        if !self.is_pattern {
-            return self == topic;
-        }
-        
-        // Otherwise, perform segment-by-segment matching
-        self.segments_match(&self.segments, &topic.segments)
-    }
-    
-    // Internal helper for pattern matching
-    fn segments_match(&self, pattern_segments: &[PathSegment], topic_segments: &[PathSegment]) -> bool {
-        // Special case: multi-wildcard at the end
-        if let Some(PathSegment::MultiWildcard) = pattern_segments.last() {
-            // If pattern ends with >, topic must have at least as many segments as pattern minus 1
-            if topic_segments.len() < pattern_segments.len() - 1 {
-                return false;
-            }
-            
-            // Check all segments before the multi-wildcard
-            for i in 0..pattern_segments.len()-1 {
-                match &pattern_segments[i] {
-                    PathSegment::Literal(p) => {
-                        // For literals, the segments must match exactly
-                        match &topic_segments[i] {
-                            PathSegment::Literal(t) if p == t => continue,
-                            _ => return false,
-                        }
-                    }
-                    PathSegment::SingleWildcard => {
-                        // For single wildcards, any segment matches
-                        continue;
-                    }
-                    PathSegment::MultiWildcard => {
-                        // Should not happen, as we're iterating up to len-1
-                        unreachable!("Multi-wildcard found before the end of pattern");
-                    }
-                }
-            }
-            
-            // If we get here, all segments matched
-            return true;
-        }
-        
-        // If pattern doesn't end with multi-wildcard, segment counts must match
-        if pattern_segments.len() != topic_segments.len() {
-            return false;
-        }
-        
-        // Check each segment
-        for (p, t) in pattern_segments.iter().zip(topic_segments.iter()) {
-            match p {
-                PathSegment::Literal(p_str) => {
-                    // For literals, check exact match
-                    match t {
-                        PathSegment::Literal(t_str) if p_str == t_str => continue,
-                        _ => return false,
-                    }
-                }
-                PathSegment::SingleWildcard => {
-                    // Single wildcards match any segment
-                    continue;
-                }
-                PathSegment::MultiWildcard => {
-                    // Multi-wildcards should only appear at the end
-                    return false;
-                }
-            }
-        }
-        
-        // If we get here, all segments matched
-        true
     }
 }
 
@@ -999,28 +1320,31 @@ impl<T: Clone> WildcardSubscriptionRegistry<T> {
     /// INTENTION: Efficiently find all subscription handlers that match a given topic,
     /// including both exact matches and wildcard pattern matches.
     pub fn find_matches(&self, topic: &TopicPath) -> Vec<T> {
-        let mut matches = Vec::new();
+        let mut results = Vec::new();
         
-        // 1. Check exact matches first (O(1) lookup)
+        // 1. Check exact matches - O(1)
         if let Some(handlers) = self.exact_matches.get(topic) {
-            matches.extend(handlers.clone());
+            results.extend(handlers.clone());
         }
         
-        // 2. Check single-wildcard patterns (iterate through patterns)
+        // 2. Check wildcard patterns - segment type bitmap lets us avoid iterating patterns
+        // without matching segment counts
         for (pattern, handlers) in &self.single_wildcard_patterns {
-            if pattern.matches(topic) {
-                matches.extend(handlers.clone());
+            if pattern.segment_count() == topic.segment_count() || pattern.has_multi_wildcard() {
+                if pattern.matches(topic) {
+                    results.extend(handlers.clone());
+                }
             }
         }
         
-        // 3. Check multi-wildcard patterns (iterate through patterns)
+        // 3. Check multi-wildcards - can match varying segment counts
         for (pattern, handlers) in &self.multi_wildcard_patterns {
             if pattern.matches(topic) {
-                matches.extend(handlers.clone());
+                results.extend(handlers.clone());
             }
         }
         
-        matches
+        results
     }
     
     /// Get all subscriptions in the registry
@@ -1048,119 +1372,6 @@ impl<T: Clone> WildcardSubscriptionRegistry<T> {
     }
 }
 
-/// A wrapper around TopicPath that implements Hash and PartialEq for template matching
-///
-/// INTENTION: Enable template paths like "services/{service_path}" to be used as HashMap keys 
-/// that can match concrete paths like "services/math"
-///
-/// This type wraps a TopicPath and overrides the Hash and PartialEq implementation
-/// to make template parameters match any literal with the same segment position
-#[derive(Debug, Clone)]
-pub struct TemplatePathKey(pub TopicPath);
-
-impl PartialEq for TemplatePathKey {
-    fn eq(&self, other: &Self) -> bool {
-        // Segment counts must match
-        if self.0.segments.len() != other.0.segments.len() {
-            return false;
-        }
-        
-        // Network IDs must match
-        if self.0.network_id != other.0.network_id {
-            return false;
-        }
-        
-        // Check if segments match according to template rules
-        for (s1, s2) in self.0.segments.iter().zip(other.0.segments.iter()) {
-            match (s1, s2) {
-                // Exact match of literal segments
-                (PathSegment::Literal(a), PathSegment::Literal(b)) if a == b => continue,
-                
-                // Template parameter matches any literal segment
-                (PathSegment::Literal(a), PathSegment::Literal(_)) if a.starts_with("{") && a.ends_with("}") => continue,
-                (PathSegment::Literal(_), PathSegment::Literal(b)) if b.starts_with("{") && b.ends_with("}") => continue,
-                
-                // Single wildcards match any literal
-                (PathSegment::SingleWildcard, PathSegment::Literal(_)) => continue,
-                (PathSegment::Literal(_), PathSegment::SingleWildcard) => continue,
-                
-                // Multi-wildcards match any remaining segments (must be last segment)
-                (PathSegment::MultiWildcard, _) | (_, PathSegment::MultiWildcard) => return true,
-                
-                // No match
-                _ => return false,
-            }
-        }
-        
-        true
-    }
-}
-
-impl Eq for TemplatePathKey {}
-
-impl TemplatePathKey {
-    /// Normalizes a path for hashing to ensure consistent hashing of equivalent paths
-    /// 
-    /// This creates a canonical representation that will be the same for:
-    /// - Template paths with parameters: "services/{service_path}"
-    /// - Concrete paths that could match: "services/math"
-    /// 
-    /// The normalization works by:
-    /// 1. Preserving the network ID
-    /// 2. Preserving the number of segments
-    /// 3. For each position, keeping only what segment type it is, not the exact content
-    ///
-    /// For example, both "main:services/{service_path}" and "main:services/math" will normalize
-    /// to the same internal structure.
-    fn normalize_for_hash(&self) -> String {
-        let mut result = String::new();
-        
-        // 1. Add network ID - this must match for equivalence
-        result.push_str(&self.0.network_id);
-        result.push(':');
-        
-        // 2. Add number of segments
-        result.push_str(&format!("{}:", self.0.segments.len()));
-        
-        // 3. For each position, add a type marker
-        for (i, segment) in self.0.segments.iter().enumerate() {
-            result.push_str(&format!("{}:", i));
-            
-            match segment {
-                // Template parameters (with {}) and single wildcards (*) are treated the same
-                PathSegment::Literal(s) if s.starts_with("{") && s.ends_with("}") => {
-                    result.push_str("tmpl");
-                }
-                PathSegment::SingleWildcard => {
-                    result.push_str("tmpl");
-                }
-                PathSegment::MultiWildcard => {
-                    result.push_str("multi");
-                }
-                // Regular literals include their content
-                PathSegment::Literal(s) => {
-                    result.push_str("lit:");
-                    result.push_str(s);
-                }
-            }
-            result.push(';');
-        }
-        
-        result
-    }
-}
-
-impl Hash for TemplatePathKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        // Create a normalized string representation for hashing
-        let normalized = self.normalize_for_hash();
-        normalized.hash(state);
-    }
-}
-
-// Implement Display for TemplatePathKey
-impl std::fmt::Display for TemplatePathKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-} 
+// Export the PathTrie module
+mod path_registry;
+pub use path_registry::PathTrie; 

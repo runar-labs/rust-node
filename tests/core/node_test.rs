@@ -12,6 +12,7 @@ use std::future::Future;
 use std::collections::HashMap;
 
 use runar_common::types::ValueType;
+use runar_common::vmap;
 use runar_node::node::{LogLevel, LoggingConfig, Node, NodeConfig}; 
 use runar_node::NodeDelegate;
 use runar_node::services::EventContext;
@@ -114,11 +115,11 @@ async fn test_node_request() {
         // Start the node to initialize all services
         node.start().await.unwrap();
         
-        // Create parameters for the add operation
-        let mut params_map = HashMap::new();
-        params_map.insert("a".to_string(), ValueType::Number(5.0));
-        params_map.insert("b".to_string(), ValueType::Number(3.0));
-        let params = ValueType::Map(params_map);
+        // Create parameters for the add operation using vmap! macro
+        let params = vmap! {
+            "a" => 5.0,
+            "b" => 3.0
+        };
         
         // Make a request to the math service's add action
         let response = node.request("math/add", params).await.unwrap();
