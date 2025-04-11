@@ -42,7 +42,7 @@ pub struct MathService {
     /// Description of the service
     description: String,
     /// Network ID of the service
-    network_id: String, 
+    network_id: Option<String>, 
     /// Counter for operations performed
     /// Note: This is used only for testing. In production services,
     /// we should avoid maintaining state when possible and use metrics
@@ -72,7 +72,7 @@ impl MathService {
             version: "1.0.0".to_string(),
             path: path.to_string(),
             description: "Math service for testing".to_string(),
-            network_id: "default".to_string(),
+            network_id: None,//will be set by the node
             counter: Arc::new(Mutex::new(0))
         }
     }
@@ -321,7 +321,7 @@ impl AbstractService for MathService {
     }
 
     fn network_id(&self) -> Option<String> {
-        Some(self.network_id.clone())
+        self.network_id.clone()
     }
     
     async fn init(&self, context: LifecycleContext) -> Result<()> {

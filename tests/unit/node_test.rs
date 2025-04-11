@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use runar_common::types::ValueType;
 use runar_common::{Component, Logger};
-use runar_node::node::{Node, NodeConfig}; 
+use runar_node::node::{LogLevel, LoggingConfig, Node, NodeConfig}; 
 use runar_node::NodeDelegate;
 use runar_node::services::EventContext;
 
@@ -100,10 +100,14 @@ async fn test_node_request() {
     // Wrap the test in a timeout to prevent it from hanging
     match timeout(Duration::from_secs(10), async {
 
+        // Create a NodeConfig with logging configuration
+        let logging_config = LoggingConfig::new()
+        .with_default_level(LogLevel::Debug);
+
         // Create a node with a test network ID
-        let mut config = NodeConfig::new("test-node", "test_network");
+        let mut config = NodeConfig::new("test-node", "test_network").with_logging_config(logging_config);
         // Disable networking
-        config.network_config = None;
+        config.network_config = None; 
         let mut node = Node::new(config).await.unwrap();
         
         // Create a test service with consistent name and path

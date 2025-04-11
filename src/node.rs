@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use std::fmt::Debug;
 use runar_common::types::ValueType;
 use runar_common::logging::{Logger, Component};
+use env_logger;
 
 use crate::network::{
     discovery::{MulticastDiscovery, NodeDiscovery, NodeInfo, DiscoveryOptions, DEFAULT_MULTICAST_ADDR},
@@ -111,9 +112,129 @@ pub struct NodeConfig {
     /// Network configuration (None = no networking features)
     pub network_config: Option<NetworkConfig>,
     
+    /// Logging configuration options
+    pub logging_config: Option<LoggingConfig>,
+    
     //FIX: move this to the network config.. local sercvies shuold not have timeout checks.
     /// Request timeout in milliseconds
     pub request_timeout_ms: u64,
+}
+
+/// Logging configuration options
+#[derive(Clone, Debug)]
+pub struct LoggingConfig {
+    /// Default log level for all components
+    pub default_level: LogLevel,
+    
+    /// Component-specific log levels that override the default
+    pub component_levels: HashMap<ComponentKey, LogLevel>,
+}
+
+/// Component key for logging configuration
+/// This provides Hash and Eq implementations for identifying components
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ComponentKey {
+    Node,
+    Registry,
+    Service,
+    Database,
+    Network,
+    System,
+    Custom(String),
+}
+
+impl From<Component> for ComponentKey {
+    fn from(component: Component) -> Self {
+        match component {
+            Component::Node => ComponentKey::Node,
+            Component::Registry => ComponentKey::Registry,
+            Component::Service => ComponentKey::Service,
+            Component::Database => ComponentKey::Database,
+            Component::Network => ComponentKey::Network,
+            Component::System => ComponentKey::System,
+            Component::Custom(name) => ComponentKey::Custom(name.to_string()),
+        }
+    }
+}
+
+/// Log levels matching standard Rust log crate levels
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+    Trace,
+    Off,
+}
+
+impl LogLevel {
+    /// Convert to log::LevelFilter
+    pub fn to_level_filter(&self) -> log::LevelFilter {
+        match self {
+            LogLevel::Error => log::LevelFilter::Error,
+            LogLevel::Warn => log::LevelFilter::Warn,
+            LogLevel::Info => log::LevelFilter::Info,
+            LogLevel::Debug => log::LevelFilter::Debug,
+            LogLevel::Trace => log::LevelFilter::Trace,
+            LogLevel::Off => log::LevelFilter::Off,
+        }
+    }
+}
+
+impl LoggingConfig {
+    /// Create a new logging configuration with default settings
+    pub fn new() -> Self {
+        Self {
+            default_level: LogLevel::Info,
+            component_levels: HashMap::new(),
+        }
+    }
+    
+    /// Create a default logging configuration with Info level for all components
+    pub fn default_info() -> Self {
+        Self {
+            default_level: LogLevel::Info,
+            component_levels: HashMap::new(),
+        }
+    }
+    
+    /// Set the default log level
+    pub fn with_default_level(mut self, level: LogLevel) -> Self {
+        self.default_level = level;
+        self
+    }
+    
+    /// Set a log level for a specific component
+    pub fn with_component_level(mut self, component: Component, level: LogLevel) -> Self {
+        self.component_levels.insert(ComponentKey::from(component), level);
+        self
+    }
+    
+    /// Apply this logging configuration
+    /// 
+    /// INTENTION: Configure the global logger solely based on the settings in this
+    /// LoggingConfig object. Ignore all environment variables.
+    pub fn apply(&self) {
+        // Create a new env_logger builder
+        let mut builder = env_logger::Builder::new();
+        
+        // Configure the log level from this config
+        builder.filter_level(match self.default_level {
+            LogLevel::Error => log::LevelFilter::Error,
+            LogLevel::Warn => log::LevelFilter::Warn, 
+            LogLevel::Info => log::LevelFilter::Info,
+            LogLevel::Debug => log::LevelFilter::Debug,
+            LogLevel::Trace => log::LevelFilter::Trace,
+            LogLevel::Off => log::LevelFilter::Off,
+        });
+        
+        // Note: Component-specific filtering would need more configuration here
+        // Currently we just set the global level
+        
+        // Initialize the logger, ignoring any errors (in case it's already initialized)
+        let _ = builder.try_init();
+    }
 }
 
 /// Network configuration options
@@ -214,10 +335,11 @@ impl NodeConfig {
     /// Create a new configuration with the specified node ID and network ID
     pub fn new(node_id: impl Into<String>, default_network_id: impl Into<String>) -> Self {
         Self {
-            node_id: node_id.into()     ,
+            node_id: node_id.into(),
             default_network_id: default_network_id.into(),
             network_ids: Vec::new(),
             network_config: None,
+            logging_config: Some(LoggingConfig::default_info()), // Default to Info logging
             request_timeout_ms: 30000, // 30 seconds
         }
     }
@@ -231,6 +353,12 @@ impl NodeConfig {
     /// Add network configuration
     pub fn with_network_config(mut self, config: NetworkConfig) -> Self {
         self.network_config = Some(config);
+        self
+    }
+
+    /// Add logging configuration
+    pub fn with_logging_config(mut self, config: LoggingConfig) -> Self {
+        self.logging_config = Some(config);
         self
     }
 
@@ -304,6 +432,17 @@ impl Node {
     pub async fn new(config: NodeConfig) -> Result<Self> {
         let node_id = config.node_id.clone();
         let logger = Logger::new_root(Component::Node, &node_id);
+        
+        // Apply logging configuration (default to Info level if none provided)
+        if let Some(logging_config) = &config.logging_config {
+            logging_config.apply();
+            logger.debug("Applied custom logging configuration");
+        } else {
+            // Apply default Info logging when no configuration is provided
+            let default_config = LoggingConfig::default_info();
+            default_config.apply();
+            logger.debug("Applied default Info logging configuration");
+        }
         
         // Clone fields before moving config
         let default_network_id = config.default_network_id.clone();
@@ -1516,10 +1655,8 @@ impl NodeDelegate for Node {
         self.logger.debug(format!("Subscribing to topic: {}", topic));
         let options = SubscriptionOptions::default(); 
         // Convert topic String to TopicPath and callback Box to Arc
-        let topic_path = match TopicPath::new(&topic, &self.network_id) {
-            Ok(tp) => tp,
-            Err(e) => return Err(anyhow!("Invalid topic string for subscribe: {}", e)),
-        }; 
+        let topic_path = TopicPath::new(&topic, &self.network_id)
+            .map_err(|e| anyhow!("Invalid topic string for subscribe: {}", e))?; 
         self.service_registry.register_local_event_subscription(&topic_path, callback.into(), options).await
     }
 
@@ -1531,10 +1668,8 @@ impl NodeDelegate for Node {
     ) -> Result<String> {
         self.logger.debug(format!("Subscribing to topic with options: {}", topic));
         // Convert topic String to TopicPath
-        let topic_path = match TopicPath::new(&topic, &self.network_id) {
-            Ok(tp) => tp,
-            Err(e) => return Err(anyhow!("Invalid topic string for subscribe_with_options: {}", e)),
-        }; 
+        let topic_path = TopicPath::new(&topic, &self.network_id)
+            .map_err(|e| anyhow!("Invalid topic string for subscribe_with_options: {}", e))?; 
         self.service_registry.register_local_event_subscription(&topic_path, callback.into(), options).await
     }
 
