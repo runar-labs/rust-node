@@ -21,6 +21,7 @@ use runar_node::routing::TopicPath;
 
 // Import the test fixtures
 use crate::fixtures::math_service::MathService;
+use crate::fixtures::path_params_service::PathParamsService;
 use anyhow::Result;
   
 /// Test that verifies basic node creation functionality
@@ -247,6 +248,38 @@ async fn test_node_events() {
     }).await {
         Ok(_) => (), // Test completed within the timeout
         Err(_) => panic!("Test timed out after 10 seconds"),
+    }
+}
+
+/// Test that path parameters are correctly populated in the request context
+#[tokio::test]
+async fn test_path_params_in_context() {
+    // Create a node with a test network ID
+    let mut config = NodeConfig::new("test-node", "test_network");
+    config.network_config = None;
+    let mut node = Node::new(config).await.unwrap();
+    
+    // Create our path parameters test service
+    let service = PathParamsService::new("PathParams", "test");
+    
+    // Add the service to the node
+    node.add_service(service).await.unwrap();
+    
+    // Start the node to initialize all services
+    node.start().await.unwrap();
+    
+    // Make a request to a path that matches the template
+    let response = node.request("test/abc123/items/xyz789", ValueType::Null).await.unwrap();
+    
+    // Verify the response status is successful
+    assert_eq!(response.status, 200, "Request failed: {:?}", response);
+    
+    // Verify the path parameters were correctly extracted
+    if let Some(ValueType::Map(params)) = response.data {
+        assert!(matches!(params.get("param_1"), Some(ValueType::String(value)) if value == "abc123"));
+        assert!(matches!(params.get("param_2"), Some(ValueType::String(value)) if value == "xyz789"));
+    } else {
+        panic!("Expected a map of path parameters in the response");
     }
 }
  
