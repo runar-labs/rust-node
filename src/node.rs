@@ -61,25 +61,20 @@ pub trait LoadBalancingStrategy: Send + Sync {
     fn select_handler(&self, handlers: &[ActionHandler], context: &RequestContext) -> usize;
 }
 
-/// Round-robin load balancer
-#[derive(Clone)]
+/// Simple round-robin load balancer
+/// 
+/// INTENTION: Provide a basic load balancing strategy that distributes
+/// requests evenly across all available handlers in a sequential fashion.
+#[derive(Debug)]
 pub struct RoundRobinLoadBalancer {
     /// The current index for round-robin selection
     current_index: Arc<AtomicUsize>,
 }
 
-impl Debug for RoundRobinLoadBalancer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RoundRobinLoadBalancer")
-            .field("current_index", &self.current_index.load(Ordering::SeqCst))
-            .finish()
-    }
-}
-
 impl RoundRobinLoadBalancer {
     /// Create a new round-robin load balancer
     pub fn new() -> Self {
-        Self {
+        RoundRobinLoadBalancer {
             current_index: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -88,11 +83,14 @@ impl RoundRobinLoadBalancer {
 impl LoadBalancingStrategy for RoundRobinLoadBalancer {
     fn select_handler(&self, handlers: &[ActionHandler], _context: &RequestContext) -> usize {
         if handlers.is_empty() {
-            return 0; // Return 0 for empty list as a safe default
+            return 0;
         }
         
-        let current = self.current_index.fetch_add(1, Ordering::SeqCst);
-        current % handlers.len()
+        // Get the next index in a thread-safe way
+        let index = self.current_index
+            .fetch_add(1, Ordering::SeqCst) % handlers.len();
+            
+        index
     }
 }
 
@@ -1027,11 +1025,14 @@ impl Node {
         self.logger.debug(format!("Processing request: {}", topic_path));
         
         // First check for local handlers
-        if let Some(handler) = self.service_registry.get_local_action_handler(&topic_path).await {
+        if let Some((handler, path_params)) = self.service_registry.get_local_action_handler(&topic_path).await {
             self.logger.debug(format!("Executing local handler for: {}", topic_path));
             
-            // Create request context
-            let context = RequestContext::new(&topic_path, self.logger.clone());
+            // Create request context with path parameters
+            let mut context = RequestContext::new(&topic_path, self.logger.clone());
+            
+            // Set the extracted path parameters
+            context.path_params = path_params;
             
             // Execute the handler and return result
             return handler(Some(payload), context).await;
@@ -1042,18 +1043,22 @@ impl Node {
         if !remote_handlers.is_empty() {
             self.logger.debug(format!("Found {} remote handlers for: {}", remote_handlers.len(), topic_path));
             
-            // Create request context
-            let context = RequestContext::new(&topic_path, self.logger.clone());
-            
             // Apply load balancing strategy to select a handler
             let load_balancer = self.load_balancer.read().await;
-            let handler_index = load_balancer.select_handler(&remote_handlers, &context);
+            let handler_index = load_balancer.select_handler(&remote_handlers.iter().map(|(h, _)| h.clone()).collect::<Vec<_>>(), &RequestContext::new(&topic_path, self.logger.clone()));
+            
+            // Get the selected handler and its parameters
+            let (handler, path_params) = &remote_handlers[handler_index];
             
             self.logger.debug(format!("Selected remote handler {} of {} for: {}", 
                 handler_index + 1, remote_handlers.len(), topic_path));
             
+            // Create request context with path parameters
+            let mut context = RequestContext::new(&topic_path, self.logger.clone());
+            context.path_params = path_params.clone();
+            
             // Execute the selected handler
-            return remote_handlers[handler_index](Some(payload), context).await;
+            return handler(Some(payload), context).await;
         }
         
         // No handler found

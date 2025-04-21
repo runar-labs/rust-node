@@ -17,6 +17,29 @@ use runar_node::services::{ ServiceResponse, ActionHandler, EventContext};
 use runar_node::routing::TopicPath;
 use runar_common::logging::{Logger, Component};
 use runar_node::services::SubscriptionOptions;
+use runar_node::services::RequestContext;
+
+/// Create a test handler that validates its network ID
+fn create_test_handler(name: &str, expected_network_id: &str) -> ActionHandler {
+    let name = name.to_string();
+    let expected_network_id = expected_network_id.to_string();
+    
+    Arc::new(move |params, context| {
+        let name = name.clone();
+        let expected_network_id = expected_network_id.clone();
+        
+        Box::pin(async move {
+            println!("{} executed with network: {}", name, context.network_id());
+            
+            // Validate the network ID
+            if context.network_id() != expected_network_id {
+                return Err(anyhow::anyhow!("Network ID mismatch"));
+            }
+            
+            Ok(ServiceResponse::ok(ValueType::String(name.to_string())))
+        })
+    })
+}
 
 /// Test that verifies subscription functionality in the service registry
 /// 
@@ -152,11 +175,16 @@ async fn test_register_and_get_action_handler() {
             None
         ).await.unwrap();
         
-        // Get the handler
-        let retrieved_handler = registry.get_action_handler(&topic_path).await;
+        // Get the handler using the correct local method
+        let retrieved_handler = registry.get_local_action_handler(&topic_path).await;
         
         // Verify the handler was registered and can be retrieved
         assert!(retrieved_handler.is_some());
+        
+        // Check for a non-existent handler
+        let non_existent_path = TopicPath::new("math/nonexistent", "net1").unwrap();
+        let non_existent_handler = registry.get_local_action_handler(&non_existent_path).await;
+        assert!(non_existent_handler.is_none(), "Should not find a handler for a non-existent path");
     }).await {
         Ok(_) => (), // Test completed within the timeout
         Err(_) => panic!("Test timed out after 10 seconds"),
@@ -222,10 +250,10 @@ async fn test_multiple_action_handlers() {
             None
         ).await.unwrap();
         
-        // Get all handlers
-        let add_handler_result = registry.get_action_handler(&add_action_path).await;
-        let subtract_handler_result = registry.get_action_handler(&subtract_action_path).await;
-        let concat_handler_result = registry.get_action_handler(&concat_action_path).await;
+        // Get all handlers using the correct local method
+        let add_handler_result = registry.get_local_action_handler(&add_action_path).await;
+        let subtract_handler_result = registry.get_local_action_handler(&subtract_action_path).await;
+        let concat_handler_result = registry.get_local_action_handler(&concat_action_path).await;
         
         // Verify all handlers were registered and can be retrieved
         assert!(add_handler_result.is_some(), "Add handler should be registered");
@@ -241,58 +269,70 @@ async fn test_multiple_action_handlers() {
 /// 
 /// INTENTION: This test validates that the registry can properly:
 /// - Keep action handlers isolated by network
-/// - Only return handlers for the correct network
+/// - Return the correct handler for each network
 #[tokio::test]
 async fn test_action_handler_network_isolation() {
     // Wrap the test in a timeout to prevent it from hanging
     match timeout(Duration::from_secs(10), async {
-        let logger1 = Logger::new_root(Component::Service, "test1");
-        let logger2 = Logger::new_root(Component::Service, "test2");
+        // Create a registry
+        let logger = Logger::new_root(Component::Service, "test");
+        let registry = ServiceRegistry::new(logger.clone());
         
-        let registry1 = ServiceRegistry::new(logger1);
-        let registry2 = ServiceRegistry::new(logger2);
-        
-        // Create paths for different networks
-        let network1_action_path = TopicPath::new("math/add", "network1").unwrap();
-        let network2_action_path = TopicPath::new("math/add", "network2").unwrap();
+        // Define two paths with the same path but different network IDs
+        let network1_path = TopicPath::new("math/add", "network1").unwrap();
+        let network2_path = TopicPath::new("math/add", "network2").unwrap();
         
         // Create handlers for each network
-        let handler1: ActionHandler = Arc::new(|_params, _context| {
-            Box::pin(async move {
-                println!("Network 1 handler called");
-                Ok(ServiceResponse::ok_empty())
-            })
-        });
+        let handler1 = create_test_handler("Handler1", "network1");
+        let handler2 = create_test_handler("Handler2", "network2");
         
-        let handler2: ActionHandler = Arc::new(|_params, _context| {
-            Box::pin(async move {
-                println!("Network 2 handler called");
-                Ok(ServiceResponse::ok_empty())
-            })
-        });
+        println!("VERIFICATION 1: Testing handler retrieval");
         
-        // Register handlers in different networks
-        registry1.register_local_action_handler(
-            &network1_action_path,
-            handler1,
-            None
-        ).await.unwrap();
+        // Register handlers on their respective networks
+        registry.register_local_action_handler(&network1_path, handler1.clone(), None).await.unwrap();
+        registry.register_local_action_handler(&network2_path, handler2.clone(), None).await.unwrap();
         
-        registry2.register_local_action_handler(
-            &network2_action_path,
-            handler2,
-            None
-        ).await.unwrap();
+        println!("VERIFICATION 2: Testing handler execution with proper context");
         
-        // Verify network isolation
-        assert!(registry1.get_action_handler(&network1_action_path).await.is_some());
-        assert!(registry1.get_action_handler(&network2_action_path).await.is_none());
+        // Execute each handler with the correct network ID in the context
+        let request_ctx1 = RequestContext::new(&network1_path, logger.clone());
+        let request_ctx2 = RequestContext::new(&network2_path, logger.clone());
         
-        assert!(registry2.get_action_handler(&network2_action_path).await.is_some());
-        assert!(registry2.get_action_handler(&network1_action_path).await.is_none());
+        // Test handler 1 with network1 context
+        let result1 = registry.get_local_action_handler(&network1_path).await.unwrap();
+        result1(Some(ValueType::Null), request_ctx1).await.unwrap();
+        
+        // Test handler 2 with network2 context
+        let result2 = registry.get_local_action_handler(&network2_path).await.unwrap();
+        result2(Some(ValueType::Null), request_ctx2).await.unwrap();
+        
+        println!("\nVERIFICATION 3: Demonstrating the network isolation");
+        
+        // Create a wrong network path using the same action path but with a different network ID
+        let wrong_network_path = TopicPath::new("math/add", "wrong_network").unwrap();
+        
+        // This should now return None because network isolation is properly implemented
+        let handler_when_wrong_network = registry.get_local_action_handler(&wrong_network_path).await;
+        
+        // Now the bug is fixed - we should NOT find handlers registered for other networks
+        println!("Bug fixed: handler_when_wrong_network.is_some() = {}", handler_when_wrong_network.is_some());
+        assert!(handler_when_wrong_network.is_none(), "Should not find handlers from other networks");
+        
+        println!("\nVERIFICATION 4: Context validation is still good practice");
+        
+        // Create a context with the wrong network ID
+        let wrong_network_context = RequestContext::new(&wrong_network_path, logger.clone());
+        
+        // Even though the PathTrie bug is fixed, it's still good practice to validate network IDs
+        // in handlers for defense in depth
+        let handler1_with_wrong_ctx = handler1(Some(ValueType::Null), wrong_network_context.clone()).await;
+        assert!(handler1_with_wrong_ctx.is_err(), "Handler should validate network ID");
+        
+        println!("\nCONCLUSION: Network isolation works correctly");
+        println!("The PathTrie implementation properly isolates by network ID");
     }).await {
-        Ok(_) => (), // Test completed within the timeout
-        Err(_) => panic!("Test timed out after 10 seconds"),
+        Ok(_) => (),
+        Err(e) => panic!("Test timed out: {}", e),
     }
 }
 
@@ -440,10 +480,10 @@ async fn test_path_template_parameters() {
         registry.register_local_action_handler(&service_state_path, service_state_handler, None).await.unwrap();
         registry.register_local_action_handler(&action_path, action_handler, None).await.unwrap();
 
-        // Test that the correct handlers are found for the specific paths
-        let service_info_handler = registry.get_action_handler(&service_info_path).await;
-        let service_state_handler  = registry.get_action_handler(&service_state_path).await;
-        let action_handler = registry.get_action_handler(&action_path).await;
+        // Test that the correct handlers are found for the specific paths using the local method
+        let service_info_handler = registry.get_local_action_handler(&service_info_path).await;
+        let service_state_handler = registry.get_local_action_handler(&service_state_path).await;
+        let action_handler = registry.get_local_action_handler(&action_path).await;
 
         // Verify the handlers were found by template matching
         assert!(service_info_handler.is_some(), "service handler should be found via template matching");
@@ -452,18 +492,63 @@ async fn test_path_template_parameters() {
         
         // Test non-matching paths
         let user_profile_path = TopicPath::new("user/profile", "test_network").unwrap();
-        let non_matching_handler = registry.get_action_handler(&user_profile_path).await;
+        let non_matching_handler = registry.get_local_action_handler(&user_profile_path).await;
         assert!(non_matching_handler.is_none(), "Non-matching path should not find a handler");
         
         // Test partial matches (missing segments)
         let incomplete_path = TopicPath::new("services/auth", "test_network").unwrap();
-        let incomplete_handler = registry.get_action_handler(&incomplete_path).await;
+        let incomplete_handler = registry.get_local_action_handler(&incomplete_path).await;
         assert!(incomplete_handler.is_none(), "Incomplete path should not match a template");
         
         // Test with incorrect segment count
         let wrong_segments_path = TopicPath::new("services/auth/actions/login/extra", "test_network").unwrap();
-        let wrong_segments_handler = registry.get_action_handler(&wrong_segments_path).await;
+        let wrong_segments_handler = registry.get_local_action_handler(&wrong_segments_path).await;
         assert!(wrong_segments_handler.is_none(), "Path with wrong segment count should not match a template");
+    }).await {
+        Ok(_) => (), // Test completed within the timeout
+        Err(_) => panic!("Test timed out after 10 seconds"),
+    }
+}
+
+/// Test for local vs remote action handler separation
+///
+/// INTENTION: This test validates that the registry can properly:
+/// - Keep local and remote action handlers separate
+/// - Return the appropriate handlers based on whether we use local or remote lookup
+#[tokio::test]
+async fn test_local_remote_action_handler_separation() {
+    // Wrap the test in a timeout to prevent it from hanging
+    match timeout(Duration::from_secs(10), async {
+        let logger = Logger::new_root(Component::Service, "test");
+        let registry = ServiceRegistry::new(logger);
+        
+        // Create a common topic path for both local and remote
+        let action_path = TopicPath::new("math/add", "test_network").unwrap();
+        
+        // Create a local handler
+        let local_handler: ActionHandler = Arc::new(|_params, _context| {
+            Box::pin(async move {
+                println!("Local handler called");
+                Ok(ServiceResponse::ok_empty())
+            })
+        });
+        
+        // Register the local handler
+        registry.register_local_action_handler(
+            &action_path,
+            local_handler,
+            None
+        ).await.unwrap();
+        
+        // Verify we can get the local handler
+        let retrieved_local = registry.get_local_action_handler(&action_path).await;
+        assert!(retrieved_local.is_some(), "Local handler should be retrievable");
+        
+        // Check remote handlers - should be empty since we didn't register any
+        let remote_handlers = registry.get_remote_action_handlers(&action_path).await;
+        assert!(remote_handlers.is_empty(), "No remote handlers should be found");
+        
+        // The test could be extended to also register and test remote handlers if needed
     }).await {
         Ok(_) => (), // Test completed within the timeout
         Err(_) => panic!("Test timed out after 10 seconds"),

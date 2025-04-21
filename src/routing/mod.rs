@@ -18,7 +18,11 @@
 use anyhow::Result;
 use std::hash::{Hash, Hasher};
 use std::collections::HashMap;
-use std::fmt;
+use std::collections::hash_map::DefaultHasher;
+use std::fmt::Debug;
+use std::str::FromStr;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::convert::TryFrom;
 
 /// Type of a path, indicating what kind of resource is being addressed
 ///
@@ -171,11 +175,6 @@ pub struct TopicPath {
     /// - 11: MultiWildcard
     /// This allows us to quickly check segment types without iterating through segments
     segment_type_bitmap: u64,
-    
-    /// LRU cache for match results - up to 8 recent matches (small fixed size)
-    /// Key is the hash of the matched path, value is the match result
-    #[cfg(feature = "match_cache")]
-    match_cache: std::cell::RefCell<Option<lru::LruCache<u64, bool>>>,
 }
 
 // Implement Hash trait for TopicPath to enable use in HashMaps
@@ -441,8 +440,6 @@ impl TopicPath {
             cached_action_path,
             hash_components,
             segment_type_bitmap,
-            #[cfg(feature = "match_cache")]
-            match_cache: std::cell::RefCell::new(Some(lru::LruCache::new(8))),
         };
         
         Ok(result)
@@ -564,8 +561,6 @@ impl TopicPath {
             segment_count: 1,
             hash_components: Vec::new(),
             segment_type_bitmap: 0,
-            #[cfg(feature = "match_cache")]
-            match_cache: std::cell::RefCell::new(Some(lru::LruCache::new(8))),
         }
     }
 
@@ -661,8 +656,6 @@ impl TopicPath {
             cached_action_path: new_path_str,
             hash_components: Vec::new(),  // Recompute later if needed
             segment_type_bitmap,
-            #[cfg(feature = "match_cache")]
-            match_cache: std::cell::RefCell::new(Some(lru::LruCache::new(8))),
         })
     }
 
@@ -749,8 +742,6 @@ impl TopicPath {
             cached_action_path: path_str,
             hash_components: Vec::new(),  // Recompute later if needed
             segment_type_bitmap,
-            #[cfg(feature = "match_cache")]
-            match_cache: std::cell::RefCell::new(Some(lru::LruCache::new(8))),
         })
     }
 
@@ -955,75 +946,20 @@ impl TopicPath {
             return true;
         }
         
-        #[cfg(feature = "match_cache")]
-        {
-            // Check if we have a cached result
-            let topic_hash = {
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                topic.path.hash(&mut hasher);
-                hasher.finish()
-            };
-            
-            if let Some(cache) = self.match_cache.borrow_mut().as_mut() {
-                if let Some(&result) = cache.get(&topic_hash) {
-                    return result;
-                }
-            }
-        }
-        
         // Fast path 2: if segment counts don't match and there's no multi-wildcard,
         // the paths can't match
         if self.segment_count != topic.segment_count && !self.has_multi_wildcard() {
-            #[cfg(feature = "match_cache")]
-            {
-                // Cache the negative result
-                if let Some(cache) = self.match_cache.borrow_mut().as_mut() {
-                    let topic_hash = {
-                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                        topic.path.hash(&mut hasher);
-                        hasher.finish()
-                    };
-                    cache.put(topic_hash, false);
-                }
-            }
-            
             return false;
         }
         
         // Fast path 3: If neither path is a pattern, and they're not identical strings,
         // they can't match
         if !self.is_pattern && !topic.is_pattern {
-            #[cfg(feature = "match_cache")]
-            {
-                // Cache the negative result
-                if let Some(cache) = self.match_cache.borrow_mut().as_mut() {
-                    let topic_hash = {
-                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                        topic.path.hash(&mut hasher);
-                        hasher.finish()
-                    };
-                    cache.put(topic_hash, false);
-                }
-            }
-            
             return false;
         }
         
         // Otherwise, perform segment-by-segment matching
         let result = self.segments_match(&self.segments, &topic.segments);
-        
-        #[cfg(feature = "match_cache")]
-        {
-            // Cache the result
-            if let Some(cache) = self.match_cache.borrow_mut().as_mut() {
-                let topic_hash = {
-                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                    topic.path.hash(&mut hasher);
-                    hasher.finish()
-                };
-                cache.put(topic_hash, result);
-            }
-        }
         
         result
     }
@@ -1174,204 +1110,7 @@ impl TopicPath {
     }
 }
 
-/// WildcardSubscriptionRegistry provides efficient storage and lookup for subscriptions
-/// with support for wildcard pattern matching.
-///
-/// INTENTION: Optimize subscription storage and lookup based on whether a topic is an
-/// exact match or a wildcard pattern. This gives O(1) lookup for exact matches while
-/// still supporting powerful wildcard pattern matching.
-#[derive(Debug, Clone)]
-pub struct WildcardSubscriptionRegistry<T> {
-    /// Exact matches (no wildcards) - fastest lookup with O(1) complexity
-    exact_matches: HashMap<TopicPath, Vec<T>>,
-    
-    /// Patterns with single wildcards (* only) - separate for optimization
-    single_wildcard_patterns: Vec<(TopicPath, Vec<T>)>,
-    
-    /// Patterns with multi-segment wildcards (> wildcards) - separate for optimization
-    multi_wildcard_patterns: Vec<(TopicPath, Vec<T>)>,
-}
-
-impl<T: Clone> Default for WildcardSubscriptionRegistry<T> {
-    fn default() -> Self {
-        Self {
-            exact_matches: HashMap::new(),
-            single_wildcard_patterns: Vec::new(),
-            multi_wildcard_patterns: Vec::new(),
-        }
-    }
-}
-
-impl<T: Clone> WildcardSubscriptionRegistry<T> {
-    /// Create a new empty registry
-    pub fn new() -> Self {
-        Self::default()
-    }
-    
-    /// Add a subscription for a topic
-    ///
-    /// INTENTION: Store a subscription in the appropriate collection based on
-    /// whether it's an exact match or contains wildcards.
-    pub fn add(&mut self, topic: TopicPath, handler: T) {
-        if topic.is_pattern() {
-            if topic.has_multi_wildcard() {
-                // Handle multi-segment wildcard patterns
-                for (existing_pattern, handlers) in &mut self.multi_wildcard_patterns {
-                    if existing_pattern == &topic {
-                        handlers.push(handler);
-                        return;
-                    }
-                }
-                // If we didn't find an existing pattern, add a new entry
-                self.multi_wildcard_patterns.push((topic, vec![handler]));
-            } else {
-                // Handle single-segment wildcard patterns
-                for (existing_pattern, handlers) in &mut self.single_wildcard_patterns {
-                    if existing_pattern == &topic {
-                        handlers.push(handler);
-                        return;
-                    }
-                }
-                // If we didn't find an existing pattern, add a new entry
-                self.single_wildcard_patterns.push((topic, vec![handler]));
-            }
-        } else {
-            // Handle exact matches
-            self.exact_matches
-                .entry(topic)
-                .or_insert_with(Vec::new)
-                .push(handler);
-        }
-    }
-    
-    /// Remove a subscription
-    ///
-    /// INTENTION: Remove a subscription from the appropriate collection based on
-    /// the topic pattern type.
-    pub fn remove(&mut self, topic: &TopicPath) -> bool {
-        if topic.is_pattern() {
-            if topic.has_multi_wildcard() {
-                // Remove from multi-segment wildcard patterns
-                if let Some(index) = self.multi_wildcard_patterns
-                    .iter()
-                    .position(|(pattern, _)| pattern == topic) {
-                    self.multi_wildcard_patterns.remove(index);
-                    return true;
-                }
-            } else {
-                // Remove from single-segment wildcard patterns
-                if let Some(index) = self.single_wildcard_patterns
-                    .iter()
-                    .position(|(pattern, _)| pattern == topic) {
-                    self.single_wildcard_patterns.remove(index);
-                    return true;
-                }
-            }
-            false
-        } else {
-            // Remove from exact matches
-            self.exact_matches.remove(topic).is_some()
-        }
-    }
-    
-    /// Remove a specific subscription handler
-    ///
-    /// INTENTION: Remove a specific handler from a topic's subscription list
-    /// without removing all handlers for that topic.
-    pub fn remove_handler<F>(&mut self, topic: &TopicPath, predicate: F) -> bool 
-    where
-        F: Fn(&T) -> bool
-    {
-        if topic.is_pattern() {
-            if topic.has_multi_wildcard() {
-                // Remove from multi-segment wildcard patterns
-                if let Some((_, handlers)) = self.multi_wildcard_patterns
-                    .iter_mut()
-                    .find(|(pattern, _)| pattern == topic) {
-                    let original_len = handlers.len();
-                    handlers.retain(|handler| !predicate(handler));
-                    return handlers.len() < original_len;
-                }
-            } else {
-                // Remove from single-segment wildcard patterns
-                if let Some((_, handlers)) = self.single_wildcard_patterns
-                    .iter_mut()
-                    .find(|(pattern, _)| pattern == topic) {
-                    let original_len = handlers.len();
-                    handlers.retain(|handler| !predicate(handler));
-                    return handlers.len() < original_len;
-                }
-            }
-            false
-        } else {
-            // Remove from exact matches
-            if let Some(handlers) = self.exact_matches.get_mut(topic) {
-                let original_len = handlers.len();
-                handlers.retain(|handler| !predicate(handler));
-                handlers.len() < original_len
-            } else {
-                false
-            }
-        }
-    }
-    
-    /// Find all handlers that match a given topic
-    ///
-    /// INTENTION: Efficiently find all subscription handlers that match a given topic,
-    /// including both exact matches and wildcard pattern matches.
-    pub fn find_matches(&self, topic: &TopicPath) -> Vec<T> {
-        let mut results = Vec::new();
-        
-        // 1. Check exact matches - O(1)
-        if let Some(handlers) = self.exact_matches.get(topic) {
-            results.extend(handlers.clone());
-        }
-        
-        // 2. Check wildcard patterns - segment type bitmap lets us avoid iterating patterns
-        // without matching segment counts
-        for (pattern, handlers) in &self.single_wildcard_patterns {
-            if pattern.segment_count() == topic.segment_count() || pattern.has_multi_wildcard() {
-                if pattern.matches(topic) {
-                    results.extend(handlers.clone());
-                }
-            }
-        }
-        
-        // 3. Check multi-wildcards - can match varying segment counts
-        for (pattern, handlers) in &self.multi_wildcard_patterns {
-            if pattern.matches(topic) {
-                results.extend(handlers.clone());
-            }
-        }
-        
-        results
-    }
-    
-    /// Get all subscriptions in the registry
-    ///
-    /// INTENTION: Retrieve all subscriptions for monitoring or debugging purposes.
-    pub fn get_all_subscriptions(&self) -> Vec<(TopicPath, Vec<T>)> {
-        let mut result = Vec::new();
-        
-        // Add exact matches
-        for (topic, handlers) in &self.exact_matches {
-            result.push((topic.clone(), handlers.clone()));
-        }
-        
-        // Add single-wildcard patterns
-        for (topic, handlers) in &self.single_wildcard_patterns {
-            result.push((topic.clone(), handlers.clone()));
-        }
-        
-        // Add multi-wildcard patterns
-        for (topic, handlers) in &self.multi_wildcard_patterns {
-            result.push((topic.clone(), handlers.clone()));
-        }
-        
-        result
-    }
-}
-
 // Export the PathTrie module
 mod path_registry;
-pub use path_registry::PathTrie; 
+pub use path_registry::PathTrie;
+pub use path_registry::PathTrieMatch; 

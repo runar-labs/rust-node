@@ -50,20 +50,23 @@ impl RegistryService {
     
     /// Extract the service path parameter from the request context
     ///
-    /// INTENTION: Consistently extract the service_path parameter from the context's path_params,
-    /// providing clear error handling and logging for parameter extraction issues.
+    /// INTENTION: Extract the target service path (the service we want info about) 
+    /// from the path parameters extracted from the URL template.
     ///
-    /// This centralizes the parameter extraction logic that was previously duplicated across
-    /// multiple handler methods.
+    /// This is NOT about getting the context's handler service path.
+    /// It's about extracting the service name from the URL pattern like:
+    /// "$registry/services/math" where "math" is the service we want information about.
+    /// it uses the context path_params which contains the extracted parameters from the template
     fn extract_service_path(&self, ctx: &RequestContext) -> Result<String> {
-        // Get the service_path from path parameters
+        // Look for the path parameter that was extracted during template matching
         if let Some(path) = ctx.path_params.get("service_path") {
             ctx.logger.debug(format!("Using service_path '{}' from path parameters", path));
-            Ok(path.clone())
-        } else {
-            ctx.logger.error("Missing required 'service_path' parameter");
-            Err(anyhow!("Missing required 'service_path' parameter"))
+            return Ok(path.clone());
         }
+        
+        // If we get here, we couldn't find the target service path
+        ctx.logger.error("Missing required 'service_path' parameter");
+        Err(anyhow!("Missing required 'service_path' parameter"))
     }
     
     /// Register the list services action
@@ -105,7 +108,7 @@ impl RegistryService {
                         },
                         Err(_) => {
                             // Return error response if service_path is missing
-                            Ok(ServiceResponse::error(400, "Missing required 'service_path' parameter"))
+                            Ok(ServiceResponse::error(400, "Missing required service path parameter"))
                         }
                     }
                 })
@@ -136,7 +139,7 @@ impl RegistryService {
                         },
                         Err(_) => {
                             // Return error response if service_path is missing
-                            Ok(ServiceResponse::error(400, "Missing required 'service_path' parameter"))
+                            Ok(ServiceResponse::error(400, "Missing required service path parameter"))
                         }
                     }
                 })
