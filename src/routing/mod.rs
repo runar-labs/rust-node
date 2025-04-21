@@ -264,6 +264,7 @@ impl TopicPath {
     ///
     /// Example:
     /// ```
+    /// use runar_node::TopicPath;
     /// let service_path = TopicPath::new("main:auth", "default").expect("Valid path");
     /// let action_path = service_path.new_action_topic("login").expect("Valid action path");
     ///
@@ -287,6 +288,7 @@ impl TopicPath {
     ///
     /// Example:
     /// ```
+    /// use runar_node::TopicPath;
     /// let service_path = TopicPath::new("main:auth", "default").expect("Valid path");
     /// let event_path = service_path.new_event_topic("user_logged_in").expect("Valid event path");
     ///
