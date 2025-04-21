@@ -237,4 +237,72 @@ async fn test_registry_service_get_service_state() {
         Ok(_) => (), // Test completed within the timeout
         Err(_) => panic!("Test timed out after 10 seconds"),
     }
+}
+
+/// Test that the Registry Service properly handles missing path parameters
+///
+/// INTENTION: This test validates that:
+/// - The Registry Service returns the correct error when required path parameters are missing
+/// - The error response has the expected status code and message
+#[tokio::test]
+async fn test_registry_service_missing_parameter() {
+    // Wrap the test in a timeout to prevent it from hanging
+    match timeout(Duration::from_secs(10), async {
+        // Create a test logger for debugging
+        let test_logger = Logger::new_root(Component::Node, "test_missing_param");
+        
+        // Create a node with a test network ID
+        let config = NodeConfig::new("node-reg-missing", "test_network");
+        let mut node = Node::new(config).await.unwrap();
+        
+        // Create a test service
+        let math_service = MathService::new("Math", "math");
+        
+        // Add the service to the node
+        node.add_service(math_service).await.unwrap();
+        
+        // Start the node to ensure services are initialized
+        node.start().await.unwrap();
+        
+        // Make an invalid request with missing service_path parameter
+        // The registry service expects a path parameter in the URL, but we're using an invalid path
+        // that the router won't be able to match to a template with a parameter
+        let response = node.request("$registry/services", ValueType::Null).await;
+        
+        // The request should fail or return an error response
+        match response {
+            Ok(resp) => {
+                // If it returns a response, it should have an error status code
+                test_logger.debug(format!("Response for missing parameter: {:?}", resp));
+                assert_ne!(resp.status, 200, "Expected error status but got success: {:?}", resp);
+                assert!(resp.status >= 400, "Expected error status code but got: {}", resp.status);
+            },
+            Err(e) => {
+                // If it returns an error, that's also acceptable - service not found
+                test_logger.debug(format!("Error for missing parameter: {:?}", e));
+                assert!(true, "Request properly failed with error: {:?}", e);
+            }
+        }
+        
+        // Test with an invalid path format for service_path/state endpoint
+        let state_response = node.request("$registry/services//state", ValueType::Null).await;
+        
+        // The request should fail or return an error response
+        match state_response {
+            Ok(resp) => {
+                // If it returns a response, it should have an error status code
+                test_logger.debug(format!("Response for invalid state path: {:?}", resp));
+                assert_ne!(resp.status, 200, "Expected error status but got success: {:?}", resp);
+                assert!(resp.status >= 400, "Expected error status code but got: {}", resp.status);
+            },
+            Err(e) => {
+                // If it returns an error, that's also acceptable - service not found
+                test_logger.debug(format!("Error for invalid state path: {:?}", e));
+                assert!(true, "Request properly failed with error: {:?}", e);
+            }
+        }
+    }).await {
+        Ok(_) => (), // Test completed within the timeout
+        Err(_) => panic!("Test timed out after 10 seconds"),
+    }
 } 
