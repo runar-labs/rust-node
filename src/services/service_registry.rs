@@ -102,7 +102,8 @@ impl std::fmt::Debug for ServiceEntry {
 /// to ensure proper service isolation.
 pub struct ServiceRegistry {
     /// Local action handlers organized by path (using PathTrie instead of HashMap)
-    local_action_handlers: RwLock<PathTrie<ActionHandler>>,
+    /// Store both the handler and the original registration topic path for parameter extraction
+    local_action_handlers: RwLock<PathTrie<(ActionHandler, TopicPath)>>,
     
     /// Remote action handlers organized by path (using PathTrie instead of HashMap)
     remote_action_handlers: RwLock<PathTrie<Vec<ActionHandler>>>,
@@ -233,7 +234,7 @@ impl ServiceRegistry {
                 services.add_handler(service_topic, vec![service]);
             } else {
                 // Get the existing services for this topic
-                let mut existing_services = matches[0].clone();
+                let mut existing_services = matches[0].handler.clone();
                 
                 // Check if this service is already registered
                 if !existing_services.iter().any(|s| s.path() == service.path()) {
@@ -259,8 +260,11 @@ impl ServiceRegistry {
     ) -> Result<()> {
         self.logger.debug(format!("Registering local action handler for: {}", topic_path ));
         
-        // Store in the new local action handlers trie
-        self.local_action_handlers.write().await.add_handler(topic_path.clone(), handler);
+        // Store in the new local action handlers trie with the original topic path for parameter extraction
+        self.local_action_handlers.write().await.add_handler(
+            topic_path.clone(), 
+            (handler, topic_path.clone())
+        );
           
         Ok(())
     }
@@ -286,7 +290,7 @@ impl ServiceRegistry {
                 handlers_trie.add_handler(topic_path.clone(), vec![handler.clone()]);
             } else {
                 // Get existing handlers and add the new one
-                let mut existing_handlers = matches[0].clone();
+                let mut existing_handlers = matches[0].handler.clone();
                 existing_handlers.push(handler.clone());
                 
                 // Update the handlers in the trie
@@ -304,7 +308,7 @@ impl ServiceRegistry {
                 services.add_handler(topic_path.clone(), vec![remote_service]);
             } else {
                 // Get the existing services for this topic
-                let mut existing_services = matches[0].clone();
+                let mut existing_services = matches[0].handler.clone();
                 
                 // Check if this service is already registered
                 if !existing_services.iter().any(|s| s.peer_id() == remote_service.peer_id()) {
@@ -322,12 +326,13 @@ impl ServiceRegistry {
     /// Get a local action handler only
     ///
     /// INTENTION: Retrieve a handler for a specific action path that will be executed locally.
-    pub async fn get_local_action_handler(&self, topic_path: &TopicPath) -> Option<ActionHandler> {
+    /// Now returns both the handler and the original registration topic path for parameter extraction.
+    pub async fn get_local_action_handler(&self, topic_path: &TopicPath) -> Option<(ActionHandler, TopicPath)> {
         let handlers_trie = self.local_action_handlers.read().await;
         let matches = handlers_trie.find_matches(topic_path);
         
         if !matches.is_empty() {
-            Some(matches[0].clone())
+            Some(matches[0].handler.clone())
         } else {
             None
         }
@@ -341,7 +346,7 @@ impl ServiceRegistry {
         let matches = handlers_trie.find_matches(topic_path);
         
         if !matches.is_empty() {
-            matches[0].clone()
+            matches[0].handler.clone()
         } else {
             Vec::new()
         }
@@ -353,7 +358,7 @@ impl ServiceRegistry {
     /// supporting both local and remote handlers.
     pub async fn get_action_handler(&self, topic_path: &TopicPath) -> Option<ActionHandler> {
         // First try local handlers
-        if let Some(handler) = self.get_local_action_handler(topic_path).await {
+        if let Some((handler, _)) = self.get_local_action_handler(topic_path).await {
             return Some(handler);
         }
         
@@ -391,11 +396,12 @@ impl ServiceRegistry {
                 subscriptions.add_handler(topic_path.clone(), vec![(subscription_id.clone(), callback.clone())]);
             } else {
                 // Add to existing subscriptions
-                let mut existing_subscriptions = matches[0].clone();
-                existing_subscriptions.push((subscription_id.clone(), callback.clone()));
+                let mut updated_subscriptions = matches[0].handler.clone();
+                updated_subscriptions.push((subscription_id.clone(), callback.clone()));
                 
-                // Update the subscriptions in the trie
-                subscriptions.add_handler(topic_path.clone(), existing_subscriptions);
+                // First remove the old handlers, then add the updated ones
+                subscriptions.remove_handler(topic_path, |_| true);
+                subscriptions.add_handler(topic_path.clone(), updated_subscriptions);
             }
         }
         
@@ -428,11 +434,12 @@ impl ServiceRegistry {
                 subscriptions.add_handler(topic_path.clone(), vec![(subscription_id.clone(), callback.clone())]);
             } else {
                 // Add to existing subscriptions
-                let mut existing_subscriptions = matches[0].clone();
-                existing_subscriptions.push((subscription_id.clone(), callback.clone()));
+                let mut updated_subscriptions = matches[0].handler.clone();
+                updated_subscriptions.push((subscription_id.clone(), callback.clone()));
                 
-                // Update the subscriptions in the trie
-                subscriptions.add_handler(topic_path.clone(), existing_subscriptions);
+                // First remove the old handlers, then add the updated ones
+                subscriptions.remove_handler(topic_path, |_| true);
+                subscriptions.add_handler(topic_path.clone(), updated_subscriptions);
             }
         }
         
@@ -454,8 +461,8 @@ impl ServiceRegistry {
         
         // Flatten all matches into a single vector
         let mut result = Vec::new();
-        for subscription_list in matches {
-            result.extend(subscription_list.clone());
+        for match_item in matches {
+            result.extend(match_item.handler.clone());
         }
         
         result
@@ -470,8 +477,8 @@ impl ServiceRegistry {
         
         // Flatten all matches into a single vector
         let mut result = Vec::new();
-        for subscription_list in matches {
-            result.extend(subscription_list.clone());
+        for match_item in matches {
+            result.extend(match_item.handler.clone());
         }
         
         result
@@ -496,9 +503,6 @@ impl ServiceRegistry {
         self.service_states_by_service_path.read().await.clone()
     }
     
-    //REMOVED DONT PUT BACK - any code tha breaks need to be changed
-    // pub async fn get_all_action_handlers(&self, topic_path: &TopicPath) -> Vec<ActionHandler> {
-    
     /// Get all local services
     ///
     /// INTENTION: Provide access to all registered local services, allowing the
@@ -519,7 +523,8 @@ impl ServiceRegistry {
         let services = trie.find_matches(&dummy_path);
         
         // Group services by their topic path
-        for service in services {
+        for service_match in services {
+            let service = service_match.handler;
             result.insert(service.service_topic.clone(), service);
         }
         
@@ -551,7 +556,7 @@ impl ServiceRegistry {
                 let mut updated_subscriptions = Vec::new();
                 
                 // Create a new list without the subscription we want to remove
-                for (id, callback) in matches[0].clone() {
+                for (id, callback) in matches[0].handler.clone() {
                     if id != subscription_id {
                         updated_subscriptions.push((id, callback));
                     }
@@ -617,7 +622,7 @@ impl ServiceRegistry {
                 let mut updated_subscriptions = Vec::new();
                 
                 // Create a new list without the subscription we want to remove
-                for (id, callback) in matches[0].clone() {
+                for (id, callback) in matches[0].handler.clone() {
                     if id != subscription_id {
                         updated_subscriptions.push((id, callback));
                     }
@@ -658,6 +663,49 @@ impl ServiceRegistry {
         }
     }
     
+    /// Get metadata for all services with an option to filter internal services
+    ///
+    /// INTENTION: Retrieve metadata for all registered services with the option
+    /// to exclude internal services (those with paths starting with $)
+    pub async fn get_all_service_metadata(&self, include_internal_services: bool) -> HashMap<String, CompleteServiceMetadata> {
+        let mut result = HashMap::new();
+        let local_services = self.get_local_services().await;
+        let states = self.service_states_by_service_path.read().await;
+        
+        // Create timestamp for registration
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        
+        // Iterate through all services
+        for (_, service_entry) in local_services {
+            let service = &service_entry.service;
+            let path_str = service.path().to_string();
+            
+            // Skip internal services if not included
+            if !include_internal_services && path_str.starts_with("$") {
+                continue;
+            }
+            
+            let state = states.get(&path_str).cloned().unwrap_or(ServiceState::Unknown);
+            
+            // Create metadata using individual getter methods from the service
+            result.insert(path_str, CompleteServiceMetadata {
+                name: service.name().to_string(),
+                path: service.path().to_string(),
+                version: service.version().to_string(),
+                description: service.description().to_string(),
+                registered_actions: HashMap::new(), // Would need more complex logic to populate
+                registered_events: HashMap::new(),  // Would need more complex logic to populate
+                current_state: state,
+                registration_time: now,
+                last_start_time: None,
+            });
+        }
+        
+        result
+    }
 }
 
 #[async_trait::async_trait]
@@ -668,16 +716,16 @@ impl crate::services::RegistryDelegate for ServiceRegistry {
     }
     
     /// Get metadata for a specific service
-    async fn get_service_metadata(&self, service_path: &TopicPath) -> Option<CompleteServiceMetadata> {
+    async fn get_service_metadata(&self, topic_path: &TopicPath) -> Option<CompleteServiceMetadata> {
         // Find service in the local services trie
         let services = self.local_services.read().await;
-        let matches = services.find_matches(service_path);
+        let matches = services.find_matches(topic_path);
         
         if !matches.is_empty() {
-            let service_entry = &matches[0];
+            let service_entry = &matches[0].handler;
             let service = service_entry.service.clone();
             let states = self.service_states_by_service_path.read().await;
-            let service_path_str = service_path.service_path();
+            let service_path_str = topic_path.service_path();
             let state = states.get(&service_path_str).cloned().unwrap_or(ServiceState::Unknown);
              
             // Create timestamp for registration
@@ -707,45 +755,11 @@ impl crate::services::RegistryDelegate for ServiceRegistry {
         None
     }
     
-    /// Get metadata for all registered services
-    async fn get_all_service_metadata(&self) -> HashMap<String, CompleteServiceMetadata> {
-        // For now, just return local services
-        let mut result = HashMap::new();
-        let services = self.local_services.read().await;
-        let states = self.service_states_by_service_path.read().await;
-        
-        // Create timestamp for registration
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        
-        // Use a dummy path to get all handlers
-        let dummy_path = TopicPath::new_service("default", "dummy");
-        let service_entries = services.find_matches(&dummy_path);
-        
-        for service_entry in service_entries {
-            let service = &service_entry.service;
-            let path_str = service.path().to_string();
-            let state = states.get(&path_str).cloned().unwrap_or(ServiceState::Unknown);
-            
-            // Create metadata using individual getter methods from the service
-            result.insert(path_str, CompleteServiceMetadata {
-                name: service.name().to_string(),
-                path: service.path().to_string(),
-                version: service.version().to_string(),
-                description: service.description().to_string(),
-                registered_actions: HashMap::new(), // Would need more complex logic to populate
-                registered_events: HashMap::new(),  // Would need more complex logic to populate
-                current_state: state,
-                registration_time: now,
-                last_start_time: None,
-            });
-        }
-        
-        result
+    /// Get metadata for all registered services with an option to filter internal services
+    async fn get_all_service_metadata(&self, include_internal_services: bool) -> HashMap<String, CompleteServiceMetadata> {
+        self.get_all_service_metadata(include_internal_services).await
     }
- 
+
     /// Register a remote action handler
     async fn register_remote_action_handler(
         &self,

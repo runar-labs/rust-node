@@ -455,7 +455,7 @@ mod service_registry_wildcard_tests {
         
         // Get handlers and call them
         let handlers = registry.get_local_event_subscribers(&topic).await;
-        assert_eq!(handlers.len(), 2); // Both handlers should match
+        assert_eq!(handlers.len(), 2); // Should now be exactly 2 handlers, no duplicates
         
         for (_, handler) in handlers {
             let context = Arc::new(EventContext::new(&topic, Logger::new_root(Component::Service, "test")));
@@ -465,7 +465,7 @@ mod service_registry_wildcard_tests {
         // Check counters
         let count1 = *counter1.lock().await;
         let count2 = *counter2.lock().await;
-        assert_eq!(count1, 1);
+        assert_eq!(count1, 1); // Each callback should be called exactly once
         assert_eq!(count2, 1);
 
         Ok(())

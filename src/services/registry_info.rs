@@ -169,7 +169,7 @@ impl RegistryService {
         
         // Get all service states and metadata in one call
         let service_states = self.registry_delegate.get_all_service_states().await;
-        let service_metadata = self.registry_delegate.get_all_service_metadata().await;
+        let service_metadata = self.registry_delegate.get_all_service_metadata(false).await;
         
         // Combine the information
         for (path, state) in service_states {

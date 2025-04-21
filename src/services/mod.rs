@@ -16,14 +16,7 @@
 // This module is the cornerstone of the system's service architecture, defining
 // how services are structured, discovered, and interacted with.
 
-use anyhow::{anyhow, Result};
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::fmt::{Debug};
-use std::collections::HashMap;
-use crate::routing::TopicPath;
-
+// Module declarations
 pub mod service_registry;
 pub mod abstract_service;
 pub mod registry_info;
@@ -31,13 +24,23 @@ pub mod request_context;
 pub mod event_context;
 pub mod remote_service;
 
+// Import necessary components
+use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use anyhow::{anyhow, Result};
+use crate::routing::TopicPath;
+use runar_common::logging::{Logger, Component, LoggingContext};
 use runar_common::types::ValueType;
-use runar_common::logging::{Component, LoggingContext, Logger};
-use crate::services::abstract_service::{ActionMetadata, EventMetadata, CompleteServiceMetadata, ServiceState};
+
+// Import types from submodules
+use crate::services::abstract_service::{ActionMetadata, EventMetadata, ServiceState, CompleteServiceMetadata};
+use crate::services::remote_service::RemoteService;
+
 // Re-export the context types from their dedicated modules
 pub use crate::services::request_context::RequestContext;
 pub use crate::services::event_context::EventContext;
-pub use crate::services::remote_service::RemoteService;
 
 /// Handler for a service action
 ///
@@ -68,12 +71,12 @@ pub struct LifecycleContext {
 }
 
 impl LifecycleContext {
-    /// Create a new LifecycleContext with the given topic path and logger
+    /// Create a new LifecycleContext with a topic path and logger
     ///
     /// This is the primary constructor that takes the minimum required parameters.
     pub fn new(topic_path: &TopicPath, logger: Logger) -> Self {
         Self {
-            network_id: topic_path.network_id().to_string(),
+            network_id: topic_path.network_id(),
             service_path: topic_path.service_path(),
             config: None,
             logger,
@@ -92,7 +95,7 @@ impl LifecycleContext {
     /// Add a NodeDelegate to a LifecycleContext
     ///
     /// INTENTION: Provide access to node operations during service lifecycle events,
-    /// including action registration, request handling, and event dispatching.
+    /// including request processing and event dispatching.
     pub fn with_node_delegate(mut self, delegate: Arc<dyn NodeDelegate + Send + Sync>) -> Self {
         self.node_delegate = Some(delegate);
         self
@@ -166,7 +169,7 @@ impl LifecycleContext {
         // More detailed debug after TopicPath creation
         self.logger.debug(format!("register_action: created TopicPath {}", topic_path));
         
-        // Call the delegate with no metadata
+        // Call the delegate to register the action handler
         delegate.register_action_handler(&topic_path, handler, None).await
     }
 
@@ -857,9 +860,12 @@ pub trait RegistryDelegate: Send + Sync {
     /// Get metadata for a specific service
     async fn get_service_metadata(&self, service_path: &TopicPath) -> Option<CompleteServiceMetadata>;
     
-    /// Get metadata for all registered services in a single call
-    async fn get_all_service_metadata(&self) -> HashMap<String, CompleteServiceMetadata>;
-
+    /// Get metadata for all registered services with an option to filter internal services
+    ///
+    /// INTENTION: Retrieve metadata for all registered services with the option
+    /// to exclude internal services (those with paths starting with $)
+    async fn get_all_service_metadata(&self, include_internal_services: bool) -> HashMap<String, CompleteServiceMetadata>;
+    
     /// Register a remote action handler
     ///
     /// INTENTION: Allow RemoteLifecycleContext to register remote action handlers

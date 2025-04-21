@@ -545,6 +545,7 @@ impl Node {
             registry.update_service_state(service_path, ServiceState::Error).await?;
             return Err(anyhow!("Failed to initialize service: {}", e));
         }
+        registry.update_service_state(service_path, ServiceState::Initialized).await?;
 
         // Service initialized successfully, create the ServiceEntry and register it
         let service_entry = ServiceEntry {
@@ -1025,14 +1026,18 @@ impl Node {
         self.logger.debug(format!("Processing request: {}", topic_path));
         
         // First check for local handlers
-        if let Some((handler, path_params)) = self.service_registry.get_local_action_handler(&topic_path).await {
+        if let Some((handler, registration_path)) = self.service_registry.get_local_action_handler(&topic_path).await {
             self.logger.debug(format!("Executing local handler for: {}", topic_path));
             
-            // Create request context with path parameters
+            // Create request context
             let mut context = RequestContext::new(&topic_path, self.logger.clone());
             
-            // Set the extracted path parameters
-            context.path_params = path_params;
+            // Extract parameters using the original registration path
+            if let Ok(params) = topic_path.extract_params(&registration_path.action_path()) {
+                // Populate the path_params in the context
+                context.path_params = params;
+                self.logger.debug(format!("Extracted path parameters: {:?}", context.path_params));
+            }
             
             // Execute the handler and return result
             return handler(Some(payload), context).await;
@@ -1045,17 +1050,19 @@ impl Node {
             
             // Apply load balancing strategy to select a handler
             let load_balancer = self.load_balancer.read().await;
-            let handler_index = load_balancer.select_handler(&remote_handlers.iter().map(|(h, _)| h.clone()).collect::<Vec<_>>(), &RequestContext::new(&topic_path, self.logger.clone()));
+            let handler_index = load_balancer.select_handler(&remote_handlers, &RequestContext::new(&topic_path, self.logger.clone()));
             
-            // Get the selected handler and its parameters
-            let (handler, path_params) = &remote_handlers[handler_index];
+            // Get the selected handler
+            let handler = &remote_handlers[handler_index];
             
             self.logger.debug(format!("Selected remote handler {} of {} for: {}", 
                 handler_index + 1, remote_handlers.len(), topic_path));
             
-            // Create request context with path parameters
+            // Create request context
             let mut context = RequestContext::new(&topic_path, self.logger.clone());
-            context.path_params = path_params.clone();
+            
+            // For remote handlers, we don't have the registration path
+            // In the future, we should enhance the remote handler registry to include registration paths
             
             // Execute the selected handler
             return handler(Some(payload), context).await;
@@ -1064,6 +1071,7 @@ impl Node {
         // No handler found
         Err(anyhow!("No handler found for action: {}", topic_path))
     }
+     
 
     /// Publish with options - Helper method to implement the publish_with_options functionality
     async fn publish_with_options(&self, topic: impl Into<String>, data: ValueType, options: PublishOptions) -> Result<()> {
@@ -1716,7 +1724,11 @@ impl NodeDelegate for Node {
             Err(anyhow!("Subscription ID is required"))
         }
     }
-    
+
+    /// Register an action handler for a specific path
+    ///
+    /// INTENTION: Allow services to register handlers for actions through the NodeDelegate.
+    /// This consolidates all node interactions through a single interface.
     async fn register_action_handler(&self, topic_path: &TopicPath, handler: ActionHandler, metadata: Option<ActionMetadata>) -> Result<()> {
         self.service_registry.register_local_action_handler(topic_path, handler, metadata).await
     }
@@ -1734,11 +1746,11 @@ impl RegistryDelegate for Node {
         self.service_registry.get_service_metadata(service_path).await
     }
     
-    /// Get metadata for all registered services in a single call
-    async fn get_all_service_metadata(&self) -> HashMap<String, CompleteServiceMetadata> {
-        self.service_registry.get_all_service_metadata().await
+    /// Get metadata for all registered services with an option to filter internal services
+    async fn get_all_service_metadata(&self, include_internal_services: bool) -> HashMap<String, CompleteServiceMetadata> {
+        self.service_registry.get_all_service_metadata(include_internal_services).await
     }
- 
+    
     /// Register a remote action handler
     ///
     /// INTENTION: Delegates to the service registry to register a remote action handler.
@@ -1782,27 +1794,18 @@ impl NodeDiscoveryListener {
 // Implement Clone for Node
 impl Clone for Node {
     fn clone(&self) -> Self {
-        // Create a new Node with the same properties
-        // Note: this creates a new instance that shares the same internal state
-        // but is a distinct Node instance
         Self {
-            node_id: self.node_id.clone(),
             network_id: self.network_id.clone(),
             network_ids: self.network_ids.clone(),
+            node_id: self.node_id.clone(),
             config: self.config.clone(),
-            
-            // Service-related fields
             service_registry: self.service_registry.clone(),
+            logger: self.logger.clone(),
             running: AtomicBool::new(self.running.load(Ordering::SeqCst)),
             supports_networking: self.supports_networking,
             network_transport: self.network_transport.clone(),
             load_balancer: self.load_balancer.clone(),
-            default_load_balancer: self.default_load_balancer.clone(),
-            
-            // Logger
-            logger: self.logger.clone(),
-            
-            // Pending requests map
+            default_load_balancer: RoundRobinLoadBalancer::new(),
             event_payloads: self.event_payloads.clone(),
         }
     }

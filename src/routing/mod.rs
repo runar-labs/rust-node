@@ -332,6 +332,12 @@ impl TopicPath {
             if parts.len() != 2 {
                 return Err(format!("Invalid path format - should be 'network_id:service_path' or 'service_path': {}", path));
             }
+            
+            // Reject empty network IDs
+            if parts[0].is_empty() {
+                return Err(format!("Network ID cannot be empty: {}", path));
+            }
+            
             (parts[0], parts[1])
         } else {
             // No network_id prefix, use the default
@@ -608,7 +614,8 @@ impl TopicPath {
         
         // Create the new path string
         let new_path_str = if self.cached_action_path.is_empty() {
-            segment.to_string()
+            // For service-only paths, new path should include service path + new segment
+            format!("{}/{}", self.service_path, segment)
         } else {
             format!("{}/{}", self.cached_action_path, segment)
         };
@@ -775,13 +782,13 @@ impl TopicPath {
     /// use runar_node::routing::TopicPath;
     ///
     /// let template = "services/{service_path}/state";
-    /// let path = TopicPath::new("main:services/math/state", "default").expect("Valid path");
+    /// let path = TopicPath::new("main:services/math/state", "main").expect("Valid path");
     /// 
     /// let params = path.extract_params(template).expect("Template should match");
     /// assert_eq!(params.get("service_path"), Some(&"math".to_string()));
     /// 
     /// // Non-matching templates return an error
-    /// let non_matching = TopicPath::new("main:users/profile", "default").expect("Valid path");
+    /// let non_matching = TopicPath::new("main:users/profile", "main").expect("Valid path");
     /// assert!(non_matching.extract_params(template).is_err());
     /// ```
     pub fn extract_params(&self, template: &str) -> Result<std::collections::HashMap<String, String>, String> {
@@ -954,8 +961,24 @@ impl TopicPath {
         
         // Fast path 3: If neither path is a pattern, and they're not identical strings,
         // they can't match
-        if !self.is_pattern && !topic.is_pattern {
+        if !self.is_pattern && !topic.is_pattern && !self.has_templates && !topic.has_templates {
             return false;
+        }
+        
+        // Check for template path matching concrete path special case
+        if self.has_templates && !topic.has_templates {
+            // A template path doesn't match a concrete path in this direction
+            // For example: "services/{service_path}" doesn't match "services/math"
+            // But "services/math" does match "services/{service_path}"
+            return false;
+        }
+        
+        // Check for reverse template matching - concrete path matching template path
+        if !self.has_templates && topic.has_templates {
+            // A concrete path can match a template path
+            // For example: "services/math" matches "services/{service_path}"
+            // Verify by checking if the concrete path would extract valid parameters from the template
+            return topic.matches_template(&self.action_path());
         }
         
         // Otherwise, perform segment-by-segment matching

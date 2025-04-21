@@ -13,11 +13,9 @@ use tokio::time::timeout;
 
 use runar_common::types::ValueType; 
 use runar_node::services::service_registry::ServiceRegistry;
-use runar_node::services::{ ServiceResponse, ActionHandler, EventContext};
+use runar_node::services::{ServiceResponse, ActionHandler, EventContext, RequestContext, SubscriptionOptions};
 use runar_node::routing::TopicPath;
 use runar_common::logging::{Logger, Component};
-use runar_node::services::SubscriptionOptions;
-use runar_node::services::RequestContext;
 
 /// Create a test handler that validates its network ID
 fn create_test_handler(name: &str, expected_network_id: &str) -> ActionHandler {
@@ -300,11 +298,13 @@ async fn test_action_handler_network_isolation() {
         
         // Test handler 1 with network1 context
         let result1 = registry.get_local_action_handler(&network1_path).await.unwrap();
-        result1(Some(ValueType::Null), request_ctx1).await.unwrap();
+        let (handler1_retrieved, _) = result1;  // Extract the handler from the tuple
+        handler1_retrieved(Some(ValueType::Null), request_ctx1).await.unwrap();
         
         // Test handler 2 with network2 context
         let result2 = registry.get_local_action_handler(&network2_path).await.unwrap();
-        result2(Some(ValueType::Null), request_ctx2).await.unwrap();
+        let (handler2_retrieved, _) = result2;  // Extract the handler from the tuple
+        handler2_retrieved(Some(ValueType::Null), request_ctx2).await.unwrap();
         
         println!("\nVERIFICATION 3: Demonstrating the network isolation");
         
@@ -553,6 +553,67 @@ async fn test_local_remote_action_handler_separation() {
         Ok(_) => (), // Test completed within the timeout
         Err(_) => panic!("Test timed out after 10 seconds"),
     }
+}
+
+#[tokio::test]
+async fn test_multiple_network_ids() {
+    // Set up test logger
+    let logger = Logger::new_root(Component::Service, "test");
+    
+    // Create registry
+    let registry = ServiceRegistry::new(logger.clone());
+    
+    // Create network-specific action paths
+    let network1_path = TopicPath::new("network1:math/add", "default").unwrap();
+    let network2_path = TopicPath::new("network2:math/add", "default").unwrap();
+    
+    // Request contexts for each network
+    let request_ctx1 = RequestContext::new(&network1_path, logger.clone());
+    let request_ctx2 = RequestContext::new(&network2_path, logger.clone());
+    
+    // Create network-specific handlers
+    let network1_handler: ActionHandler = Arc::new(move |_params, context| {
+        if let Some(topic_path) = &context.topic_path {
+            let network_id = topic_path.network_id();
+            assert_eq!(network_id, "network1");
+            
+            Box::pin(async move {
+                Ok(ServiceResponse::ok(ValueType::String(format!("Response from {}", network_id))))
+            })
+        } else {
+            Box::pin(async move {
+                Ok(ServiceResponse::error(400, "Missing topic path"))
+            })
+        }
+    });
+    
+    let network2_handler: ActionHandler = Arc::new(move |_params, context| {
+        if let Some(topic_path) = &context.topic_path {
+            let network_id = topic_path.network_id();
+            assert_eq!(network_id, "network2");
+            
+            Box::pin(async move {
+                Ok(ServiceResponse::ok(ValueType::String(format!("Response from {}", network_id))))
+            })
+        } else {
+            Box::pin(async move {
+                Ok(ServiceResponse::error(400, "Missing topic path"))
+            })
+        }
+    });
+    
+    // Register handlers for different networks
+    registry.register_local_action_handler(&network1_path, network1_handler, None).await.unwrap();
+    registry.register_local_action_handler(&network2_path, network2_handler, None).await.unwrap();
+    
+    // Test that each network gets its own handler
+    let result1 = registry.get_local_action_handler(&network1_path).await.unwrap();
+    let (handler1, _) = result1;
+    handler1(Some(ValueType::Null), request_ctx1).await.unwrap();
+    
+    let result2 = registry.get_local_action_handler(&network2_path).await.unwrap();
+    let (handler2, _) = result2;
+    handler2(Some(ValueType::Null), request_ctx2).await.unwrap();
 }
  
  
