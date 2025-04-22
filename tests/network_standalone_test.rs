@@ -49,11 +49,6 @@ impl MockTransport {
 
 #[async_trait]
 impl NetworkTransport for MockTransport {
-    async fn initialize(&self) -> Result<(), NetworkError> {
-        self.logger.debug("MockTransport: initialize called");
-        Ok(())
-    }
-
     async fn start(&self) -> Result<(), NetworkError> {
         self.logger.debug("MockTransport: start called");
         Ok(())

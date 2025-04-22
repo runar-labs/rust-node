@@ -5,6 +5,8 @@
 // Standard library imports
 use std::fmt;
 use std::time::Duration;
+use std::ops::Range;
+use std::net::{SocketAddr, IpAddr, Ipv4Addr, TcpListener};
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Serialize, Deserialize};
@@ -16,7 +18,6 @@ use std::sync::Arc;
 use std::future::Future;
 use std::pin::Pin;
 use thiserror::Error;
-use std::net::{SocketAddr, IpAddr, Ipv4Addr};
 
 // Internal module declarations
 pub mod quic_transport;
@@ -25,7 +26,8 @@ pub mod peer_registry;
 
 // Re-export types/traits from submodules or parent modules
 pub use peer_registry::{PeerRegistry, PeerStatus, PeerEntry, PeerRegistryOptions};
-pub use quic_transport::{QuicTransport, QuicTransportOptions, pick_free_port};
+pub use quic_transport::{QuicTransport, QuicTransportOptions};
+// Don't re-export pick_free_port since it's defined in this module
 
 // Import NodeInfo from the discovery module
 use super::discovery::{NodeInfo, NodeDiscovery};
@@ -74,6 +76,17 @@ impl Default for TransportOptions {
             bind_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), pick_free_port(50000..51000).unwrap_or(0)),
         }
     }
+}
+
+/// Find a free port in the given range
+pub fn pick_free_port(port_range: Range<u16>) -> Option<u16> {
+    for port in port_range {
+        if let Ok(listener) = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port)) {
+            let bound_port = listener.local_addr().ok()?.port();
+            return Some(bound_port);
+        }
+    }
+    None
 }
 
 /// Types of messages that can be sent over the network

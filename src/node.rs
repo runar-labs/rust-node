@@ -10,7 +10,7 @@ use std::future::Future;
 use std::io::Read;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, AtomicU16, Ordering};
 use std::time::{Duration, SystemTime};
 use tokio::sync::{oneshot, RwLock};
 use uuid::Uuid;
@@ -20,6 +20,12 @@ use runar_common::types::ValueType;
 use runar_common::logging::{Logger, Component};
 use env_logger;
 use chrono;
+use rcgen;
+use rustls;
+use std::ops::Range;
+use std::net::{TcpListener, SocketAddr, IpAddr, Ipv4Addr};
+use runar_common::utils::Component as RunarComponent;
+use rustls::{Certificate, PrivateKey};
 
 use crate::network::{
     discovery::{MulticastDiscovery, NodeDiscovery, NodeInfo, DiscoveryOptions, DEFAULT_MULTICAST_ADDR},
@@ -41,6 +47,7 @@ use crate::services::abstract_service::{
 use crate::services::registry_info::RegistryService;
 use crate::services::service_registry::{ServiceRegistry, ServiceEntry};
 use crate::services::remote_service::RemoteService;
+use crate::TransportOptions;
 
 // Type alias for BoxFuture
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -258,16 +265,16 @@ pub struct NetworkConfig {
     
     /// Transport configuration
     pub transport_type: TransportType,
-    pub transport_options: HashMap<String, String>,
-    pub bind_address: String,
+    
+    /// Base transport options
+    pub transport_options: TransportOptions,
     
     /// QUIC transport options (fully configured)
-    pub quic_options: QuicTransportOptions,
+    pub quic_options: Option<QuicTransportOptions>,
     
     /// Discovery configuration
-    pub discovery_enabled: bool,
     pub discovery_providers: Vec<DiscoveryProviderConfig>,
-    pub discovery_options: DiscoveryOptions,
+    pub discovery_options: Option<DiscoveryOptions>,
     
     /// Advanced options
     pub connection_timeout_ms: u32,
@@ -347,17 +354,58 @@ impl DiscoveryProviderConfig {
     }
 }
 
+
 impl NetworkConfig {
-    pub fn new(bind_address: String) -> Self {
+    /// Create a new NetworkConfig with default settings for binding address
+    pub fn new() -> Self {
         Self {
             load_balancer: Arc::new(RoundRobinLoadBalancer::new()),
-            transport_type: TransportType::Quic,
-            transport_options: HashMap::new(),
-            bind_address: bind_address.clone(),
-            quic_options: QuicTransportOptions::new(),
-            discovery_enabled: true,
-            discovery_providers: vec![DiscoveryProviderConfig::default_multicast()],
-            discovery_options: DiscoveryOptions::default(),
+            transport_type: TransportType::Quic, 
+            transport_options: TransportOptions::default(),
+            quic_options: None,
+            discovery_providers: Vec::new(), // No providers by default
+            discovery_options: None, // No discovery options by default (disabled)
+            connection_timeout_ms: 30000,
+            request_timeout_ms: 30000,
+            max_connections: 100,
+            max_message_size: 1024 * 1024, // 1MB
+        }
+    }
+    
+    /// Create a new NetworkConfig with default QUIC transport settings
+    /// 
+    /// This is a convenience method that sets up a NetworkConfig with:
+    /// - Default QUIC transport
+    /// - Auto port selection
+    /// - Localhost binding
+    /// - Secure defaults for connection handling
+    pub fn with_quic(validate_certificates: bool) -> Self {
+        // Default QUIC configuration 
+        let mut quic_options = QuicTransportOptions::new().with_verify_certificates(validate_certificates);
+
+        // Generate self-signed certificates if none are provided
+        if quic_options.certificates.is_none() && quic_options.cert_path.is_none() {
+            match generate_self_signed_cert() {
+                Ok((cert, key)) => {
+                    quic_options = quic_options
+                        .with_certificates(vec![cert])
+                        .with_private_key(key);
+                },
+                Err(e) => {
+                    // Using static logging since we don't have a logger instance here
+                    log::error!("Failed to generate self-signed certificate: {}", e);
+                    // Continue without certs, will fail later when actually used
+                }
+            }
+        }
+ 
+        Self {
+            load_balancer: Arc::new(RoundRobinLoadBalancer::new()),
+            transport_type: TransportType::Quic, 
+            transport_options: TransportOptions::default(),
+            quic_options: Some(quic_options),
+            discovery_providers: Vec::new(), // No providers by default
+            discovery_options: None, // No discovery options by default (disabled)
             connection_timeout_ms: 30000,
             request_timeout_ms: 30000,
             max_connections: 100,
@@ -369,19 +417,9 @@ impl NetworkConfig {
         self.transport_type = transport_type;
         self
     }
-    
-    pub fn with_transport_option(mut self, key: &str, value: &str) -> Self {
-        self.transport_options.insert(key.to_string(), value.to_string());
-        self
-    }
-    
+     
     pub fn with_quic_options(mut self, options: QuicTransportOptions) -> Self {
-        self.quic_options = options;
-        self
-    }
-    
-    pub fn with_discovery_enabled(mut self, enabled: bool) -> Self {
-        self.discovery_enabled = enabled;
+        self.quic_options = Some(options);
         self
     }
     
@@ -391,7 +429,23 @@ impl NetworkConfig {
     }
     
     pub fn with_discovery_options(mut self, options: DiscoveryOptions) -> Self {
-        self.discovery_options = options;
+        self.discovery_options = Some(options);
+        self
+    }
+    
+    /// Enable multicast discovery with default settings
+    /// 
+    /// This is a convenience method that configures:
+    /// - Default multicast discovery provider
+    /// - Default discovery options
+    pub fn with_multicast_discovery(mut self) -> Self {
+        // Clear existing providers and add the default multicast provider
+        self.discovery_providers.clear();
+        self.discovery_providers.push(DiscoveryProviderConfig::default_multicast());
+        
+        // Use default discovery options
+        self.discovery_options = Some(DiscoveryOptions::default());
+        
         self
     }
 }
@@ -763,7 +817,7 @@ impl Node {
          
         
         // Initialize discovery if enabled
-        if network_config.discovery_enabled {
+        if let Some(discovery_options) = &network_config.discovery_options {
             self.logger.info("Initializing node discovery providers...");
             
             // Create node identifier
@@ -790,7 +844,7 @@ impl Node {
                 
                 match self.create_discovery_provider(
                     provider_config,
-                    network_config.discovery_options.clone()
+                    Some(discovery_options.clone())
                 ).await {
                     Ok(discovery) => {
                         // Configure discovery listener for this provider
@@ -832,18 +886,25 @@ impl Node {
     async fn create_transport(&self, network_config: &NetworkConfig, node_id: PeerId) -> Result<Box<dyn NetworkTransport>> {
         match network_config.transport_type {
             TransportType::Quic => {
-                self.logger.info("Creating QUIC transport using pre-configured options");
-                
-                // Use the pre-configured QuicTransportOptions directly
-                let transport = QuicTransport::new(
-                    node_id,
-                    network_config.quic_options.clone(),
-                    self.logger.clone()
-                );
-                
-                Ok(Box::new(transport) as Box<dyn NetworkTransport>)
-            },
-            // Add other transport types as they're implemented
+                // If QUIC is specified, use the QUIC transport
+                if let Some(_quic_options) = &network_config.quic_options {
+                    self.logger.debug("Creating QUIC transport");
+                    
+                    // Clone the NetworkConfig to avoid reference issues
+                    let owned_config = network_config.clone();
+                    
+                    let transport = QuicTransport::new(
+                        node_id,
+                        owned_config,
+                        self.logger.clone()
+                    );
+                    
+                    self.logger.debug("QUIC transport created");
+                    Ok(Box::new(transport))
+                } else {
+                    return Err(anyhow!("QUIC transport type specified but no QUIC options provided"));
+                }
+            }
         }
     }
 
@@ -851,13 +912,13 @@ impl Node {
     async fn create_discovery_provider(
         &self, 
         provider_config: &DiscoveryProviderConfig,
-        discovery_options: DiscoveryOptions
+        discovery_options: Option<DiscoveryOptions>
     ) -> Result<Box<dyn NodeDiscovery>> {
         match provider_config {
             DiscoveryProviderConfig::Multicast(options) => {
                 self.logger.info("Creating MulticastDiscovery provider with config options");
                 // Use .await to properly wait for the async initialization
-                let discovery = MulticastDiscovery::new(discovery_options).await?;
+                let discovery = MulticastDiscovery::new(discovery_options.unwrap_or_default()).await?;
                 Ok(Box::new(discovery) as Box<dyn NodeDiscovery>)
             },
             DiscoveryProviderConfig::Static(options) => {
@@ -1909,4 +1970,17 @@ impl Clone for Node {
             event_payloads: self.event_payloads.clone(),
         }
     }
+}
+
+/// Generate a self-signed certificate for testing/development
+fn generate_self_signed_cert() -> Result<(Certificate, PrivateKey)> {
+    // Generate self-signed certificates for development/testing
+    // In production, these should be replaced with proper certificates
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
+    let cert_der = cert.serialize_der()?;
+    let priv_key = cert.serialize_private_key_der();
+    let priv_key = PrivateKey(priv_key);
+    let certificate = Certificate(cert_der);
+    
+    Ok((certificate, priv_key))
 } 

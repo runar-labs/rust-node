@@ -15,4 +15,4 @@ pub mod discovery_test;
 
 // Tests being updated - these tests are in the process of being fixed for API compatibility
 // pub mod network_test;
-// pub mod remote_action_test; 
+pub mod remote_action_test; 

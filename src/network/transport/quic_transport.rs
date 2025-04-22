@@ -27,18 +27,9 @@ use uuid;
 // Internal module imports
 use super::{NetworkTransport, TransportFactory, TransportOptions, NetworkMessage, NetworkError, PeerId, MessageHandler, ConnectionCallback};
 use crate::network::discovery::NodeDiscovery;
+use crate::node::NetworkConfig;
 use runar_common::Logger;
-
-/// Find a free port in the given range
-pub fn pick_free_port(port_range: Range<u16>) -> Option<u16> {
-    for port in port_range {
-        if let Ok(listener) = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port)) {
-            return Some(listener.local_addr().ok()?.port());
-        }
-    }
-    None
-}
-
+ 
 // QUIC Transport Implementation
 //
 // INTENTION: Implement the NetworkTransport trait using high-performance,
@@ -70,8 +61,6 @@ impl PeerState {
 /// QUIC-specific transport options
 #[derive(Debug, Clone)]
 pub struct QuicTransportOptions {
-    /// Base transport options
-    pub transport_options: TransportOptions,
     /// TLS certificate chain (in DER format)
     pub certificates: Option<Vec<Certificate>>,
     /// TLS private key (in DER format)
@@ -97,15 +86,8 @@ pub struct QuicTransportOptions {
 impl QuicTransportOptions {
     /// Create a new instance with default settings and a randomly selected port
     pub fn new() -> Self {
-        let port = pick_free_port(50000..51000).unwrap_or(0);
-        let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-        
+       
         Self {
-            transport_options: TransportOptions {
-                bind_address: bind_addr,
-                timeout: Some(Duration::from_secs(30)),
-                max_message_size: Some(1024 * 1024), // 1MB default
-            },
             certificates: None,
             private_key: None,
             cert_path: None,
@@ -118,37 +100,7 @@ impl QuicTransportOptions {
             max_idle_streams_per_peer: 10,
         }
     }
-    
-    /// Set custom bind address
-    pub fn with_bind_address(mut self, addr: SocketAddr) -> Self {
-        self.transport_options.bind_address = addr;
-        self
-    }
-    
-    /// Set custom port (using localhost/127.0.0.1)
-    pub fn with_port(mut self, port: u16) -> Self {
-        self.transport_options.bind_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-        self
-    }
-    
-    /// Set port from a specific range (using localhost/127.0.0.1)
-    pub fn with_port_in_range(self, port_range: Range<u16>) -> Self {
-        let port = pick_free_port(port_range).unwrap_or(0);
-        self.with_port(port)
-    }
-    
-    /// Set timeout for network operations
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.transport_options.timeout = Some(timeout);
-        self
-    }
-    
-    /// Set maximum message size
-    pub fn with_max_message_size(mut self, size: usize) -> Self {
-        self.transport_options.max_message_size = Some(size);
-        self
-    }
-    
+       
     /// Set TLS certificate chain directly
     pub fn with_certificates(mut self, certs: Vec<Certificate>) -> Self {
         self.certificates = Some(certs);
@@ -209,66 +161,6 @@ impl QuicTransportOptions {
         self
     }
     
-    /// Create server configuration for QUIC
-    pub fn create_server_config(&self, logger: &Logger) -> Result<ServerConfig> {
-        // Create transport config
-        let mut transport_config = TransportConfig::default();
-        
-        // Set keep-alive interval
-        transport_config.keep_alive_interval(Some(Duration::from_millis(
-            self.keep_alive_interval_ms
-        )));
-        
-        // Set max concurrent streams
-        transport_config.max_concurrent_bidi_streams(
-            self.max_concurrent_bidi_streams.into()
-        );
-        
-        // Load certificates from memory or file
-        let (certs, key) = self.get_certificates_and_key(logger)?;
-        
-        // Create server configuration (will fail if no valid certificates are provided)
-        let mut server_config = ServerConfig::with_single_cert(certs, key)?;
-        server_config.transport = Arc::new(transport_config);
-        
-        Ok(server_config)
-    }
-    
-    /// Create client configuration for QUIC
-    pub fn create_client_config(&self, logger: &Logger) -> Result<ClientConfig> {
-        // Create transport config
-        let mut transport_config = TransportConfig::default();
-        
-        transport_config.keep_alive_interval(Some(Duration::from_millis(
-            self.keep_alive_interval_ms
-        )));
-        
-        transport_config.max_concurrent_bidi_streams(
-            self.max_concurrent_bidi_streams.into()
-        );
-        
-        let shared_transport_config = Arc::new(transport_config);
-        
-        // Create client configuration - using ClientConfig builder
-        let mut crypto_config = rustls::ClientConfig::builder()
-            .with_safe_defaults()
-            .with_root_certificates(rustls::RootCertStore::empty())
-            .with_no_client_auth();
-            
-        // Disable certificate verification if needed
-        // IMPORTANT: This should ONLY be used for development/testing and NEVER in production
-        if !self.verify_certificates {
-            logger.warn("SECURITY WARNING: Certificate verification is disabled. This configuration is NOT secure for production use!");
-            crypto_config.dangerous().set_certificate_verifier(Arc::new(NoVerification {}));
-        }
-        
-        // Apply transport config using the builder
-        let mut client_config = ClientConfig::new(Arc::new(crypto_config));
-        client_config.transport_config(shared_transport_config);
-        
-        Ok(client_config)
-    }
-    
     /// Get certificates and key from configuration
     fn get_certificates_and_key(&self, logger: &Logger) -> Result<(Vec<Certificate>, PrivateKey)> {
         // First check if certificates are provided directly in memory
@@ -305,6 +197,86 @@ impl QuicTransportOptions {
         logger.error("No TLS certificates provided. QUIC requires TLS certificates.");
         Err(anyhow!("No TLS certificates provided"))
     }
+    
+    /// Create server configuration for QUIC
+    pub fn create_server_config(&self, logger: &Logger) -> Result<ServerConfig> {
+        // Create transport config based on our options, not defaults
+        let mut transport_config = TransportConfig::default();
+        
+        // Apply all settings from our transport options
+        transport_config.keep_alive_interval(Some(Duration::from_millis(
+            self.keep_alive_interval_ms
+        )));
+        
+        transport_config.max_concurrent_bidi_streams(
+            self.max_concurrent_bidi_streams.into()
+        );
+        
+        // Set connection timeout based on our options
+        transport_config.max_idle_timeout(Some(Duration::from_millis(
+            self.connection_idle_timeout_ms
+        ).try_into().unwrap_or_else(|_| {
+            logger.warn(format!("Connection idle timeout {} ms is too large, using maximum allowed", 
+                self.connection_idle_timeout_ms));
+            // Use a very large timeout instead of MAX which doesn't exist
+            std::time::Duration::from_secs(u64::MAX / 1000).try_into().unwrap_or_default()
+        })));
+        
+        // Load certificates from memory or file
+        let (certs, key) = self.get_certificates_and_key(logger)?;
+        
+        // Create server configuration (will fail if no valid certificates are provided)
+        let mut server_config = ServerConfig::with_single_cert(certs, key)?;
+        server_config.transport = Arc::new(transport_config);
+        
+        Ok(server_config)
+    }
+    
+    /// Create client configuration for QUIC
+    pub fn create_client_config(&self, logger: &Logger) -> Result<ClientConfig> {
+        // Create transport config based on our options, not defaults
+        let mut transport_config = TransportConfig::default();
+        
+        // Apply all settings from our transport options
+        transport_config.keep_alive_interval(Some(Duration::from_millis(
+            self.keep_alive_interval_ms
+        )));
+        
+        transport_config.max_concurrent_bidi_streams(
+            self.max_concurrent_bidi_streams.into()
+        );
+        
+        // Set connection timeout based on our options
+        transport_config.max_idle_timeout(Some(Duration::from_millis(
+            self.connection_idle_timeout_ms
+        ).try_into().unwrap_or_else(|_| {
+            logger.warn(format!("Connection idle timeout {} ms is too large, using maximum allowed", 
+                self.connection_idle_timeout_ms));
+            // Use a very large timeout instead of MAX which doesn't exist
+            std::time::Duration::from_secs(u64::MAX / 1000).try_into().unwrap_or_default()
+        })));
+        
+        let shared_transport_config = Arc::new(transport_config);
+        
+        // Create client configuration - using ClientConfig builder
+        let mut crypto_config = rustls::ClientConfig::builder()
+            .with_safe_defaults()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth();
+            
+        // Disable certificate verification if needed
+        // IMPORTANT: This should ONLY be used for development/testing and NEVER in production
+        if !self.verify_certificates {
+            logger.warn("SECURITY WARNING: Certificate verification is disabled. This configuration is NOT secure for production use!");
+            crypto_config.dangerous().set_certificate_verifier(Arc::new(NoVerification {}));
+        }
+        
+        // Apply transport config using the builder
+        let mut client_config = ClientConfig::new(Arc::new(crypto_config));
+        client_config.transport_config(shared_transport_config);
+        
+        Ok(client_config)
+    }
 }
 
 impl Default for QuicTransportOptions {
@@ -318,7 +290,7 @@ pub struct QuicTransport {
     /// Local node identifier
     node_id: PeerId,
     /// Transport options
-    options: QuicTransportOptions,
+    network_config: NetworkConfig,
     /// QUIC endpoint
     endpoint: Arc<TokioMutex<Option<Endpoint>>>,
     /// Active connections to other nodes, managed by PeerState
@@ -341,10 +313,10 @@ pub struct QuicTransport {
 
 impl QuicTransport {
     /// Create a new QUIC transport
-    pub fn new(node_id: PeerId, options: QuicTransportOptions, logger: Logger) -> Self {
+    pub fn new(node_id: PeerId, network_config: NetworkConfig, logger: Logger) -> Self {
         Self {
             node_id,
-            options,
+            network_config,
             endpoint: Arc::new(TokioMutex::new(None)),
             connections: Arc::new(TokioRwLock::new(HashMap::new())),
             handlers: Arc::new(StdRwLock::new(Vec::new())),
@@ -359,16 +331,42 @@ impl QuicTransport {
     
     /// Setup the QUIC endpoint
     async fn setup_endpoint(&self) -> Result<Endpoint> {
-        // Create server config using the options
-        let server_config = self.options.create_server_config(&self.logger)?;
+        let bind_addr = self.network_config.transport_options.bind_address;
         
-        // Use the bind address from the options directly
-        let bind_addr = self.options.transport_options.bind_address;
+        // Log the bind address details
+        self.logger.info(format!("Setting up QUIC endpoint with bind address: {}", bind_addr));
+        self.logger.debug(format!("QUIC endpoint port: {} (from port range 50000..51000)", bind_addr.port()));
+        
+        // Create server config
+        let server_config = self.create_server_config()?;
+        
+        // Create the endpoint
+        let endpoint = Endpoint::server(server_config, bind_addr)
+            .map_err(|e| anyhow::anyhow!("Failed to setup endpoint: {}", e))?;
             
-        // Create endpoint from server config and socket address
-        let endpoint = Endpoint::server(server_config, bind_addr)?;
+        self.logger.info(format!("QUIC endpoint successfully bound to {}", endpoint.local_addr().unwrap_or_else(|_| String::from("unknown").parse().unwrap())));
         
         Ok(endpoint)
+    }
+    
+    /// Create server configuration for QUIC
+    fn create_server_config(&self) -> Result<ServerConfig> {
+        // Check if we have QUIC options configured
+        let quic_options = self.network_config.quic_options.as_ref()
+            .ok_or_else(|| anyhow!("No QUIC options provided in network config"))?;
+        
+        // Pass the logger to the options method
+        quic_options.create_server_config(&self.logger)
+    }
+
+    /// Create client configuration for QUIC
+    fn create_client_config(&self) -> Result<ClientConfig> {
+        // Check if we have QUIC options configured
+        let quic_options = self.network_config.quic_options.as_ref()
+            .ok_or_else(|| anyhow!("No QUIC options provided in network config"))?;
+        
+        // Pass the logger to the options method
+        quic_options.create_client_config(&self.logger)
     }
     
     /// Start the server task to accept incoming connections
@@ -377,7 +375,9 @@ impl QuicTransport {
         let handlers_arc: Arc<StdRwLock<Vec<MessageHandler>>> = Arc::clone(&self.handlers);
         let connections_arc: Arc<TokioRwLock<HashMap<PeerId, Arc<TokioMutex<PeerState>>>>> = Arc::clone(&self.connections);
         let callback_arc: Arc<TokioRwLock<Option<ConnectionCallback>>> = Arc::clone(&self.connection_callback);
-        let max_idle_streams = self.options.max_idle_streams_per_peer;
+        let max_idle_streams = self.network_config.quic_options.as_ref()
+            .map(|opts| opts.max_idle_streams_per_peer)
+            .unwrap_or(10); // Default if not specified
 
         let task = tokio::spawn(async move {
             logger.info(format!("QUIC server listening on {}", endpoint.local_addr().unwrap()));
@@ -588,7 +588,9 @@ impl QuicTransport {
         let (tx, mut rx) = mpsc::channel::<(NetworkMessage, PeerId)>(100);
         let connections_arc: Arc<TokioRwLock<HashMap<PeerId, Arc<TokioMutex<PeerState>>>>> = Arc::clone(&self.connections);
         let logger = self.logger.clone();
-        let max_idle_streams = self.options.max_idle_streams_per_peer;
+        let max_idle_streams = self.network_config.quic_options.as_ref()
+            .map(|opts| opts.max_idle_streams_per_peer)
+            .unwrap_or(10); // Default if not specified
 
         tokio::spawn(async move {
             while let Some((message, target_id)) = rx.recv().await {
@@ -758,7 +760,9 @@ impl QuicTransport {
         let connections_arc: Arc<TokioRwLock<HashMap<PeerId, Arc<TokioMutex<PeerState>>>>> = Arc::clone(&self.connections);
         let callback_arc: Arc<TokioRwLock<Option<ConnectionCallback>>> = Arc::clone(&self.connection_callback);
         let logger = self.logger.clone();
-        let connection_idle_timeout = Duration::from_millis(self.options.connection_idle_timeout_ms);
+        let connection_idle_timeout = self.network_config.quic_options.as_ref()
+            .map(|opts| Duration::from_millis(opts.connection_idle_timeout_ms))
+            .unwrap_or(Duration::from_secs(60)); // Default 60 seconds if not specified
         // Revert: No stream timeout needed here anymore
         let check_interval = Duration::max(Duration::from_secs(5), connection_idle_timeout / 4);
 
@@ -850,7 +854,7 @@ impl QuicTransport {
             }
         }
         // Fallback to the configured address if we can't get the actual one
-        self.options.transport_options.bind_address.to_string()
+        self.network_config.transport_options.bind_address.to_string()
     }
 }
 
@@ -990,7 +994,7 @@ impl NetworkTransport for QuicTransport {
             }
         }
         // Fallback to the configured address if we can't get the actual one
-        self.options.transport_options.bind_address.to_string()
+        self.network_config.transport_options.bind_address.to_string()
     }
     
     /// Get the local node identifier
@@ -1023,7 +1027,7 @@ impl NetworkTransport for QuicTransport {
             .ok_or_else(|| NetworkError::TransportError("QUIC endpoint not initialized".to_string()))?;
 
         // Create client config
-        let client_config = self.options.create_client_config(&self.logger)
+        let client_config = self.create_client_config()
             .map_err(|e| NetworkError::ConfigurationError(format!("Failed to create QUIC client config: {}", e)))?;
 
         // Attempt connection
@@ -1079,7 +1083,10 @@ impl NetworkTransport for QuicTransport {
             peer_id: target_peer_id.clone(),
             connection,
             last_used: Instant::now(),
-            idle_streams: TokioMutex::new(VecDeque::with_capacity(self.options.max_idle_streams_per_peer)), // Initialize pool
+            idle_streams: TokioMutex::new(VecDeque::with_capacity(self.network_config.quic_options.as_ref()
+                .map(|opts| opts.max_idle_streams_per_peer)
+                .unwrap_or(10) // Default if not specified
+            )),
         };
 
         // Store PeerState
@@ -1194,7 +1201,7 @@ impl NetworkTransport for QuicTransport {
         self.send_message(message.clone()).await?;
         
         // Wait for the response with a timeout
-        let timeout_duration = self.options.transport_options.timeout
+        let timeout_duration = self.network_config.transport_options.timeout
             .unwrap_or_else(|| Duration::from_secs(30));
         match timeout(timeout_duration, rx).await {
             Ok(response_result) => {
@@ -1313,28 +1320,3 @@ impl NetworkTransport for QuicTransport {
         }
     }
 }
-
-/// Factory for creating QUIC transport instances
-#[derive(Clone)]
-pub struct QuicTransportFactory {
-    options: QuicTransportOptions,
-    logger: Logger,
-}
-
-impl QuicTransportFactory {
-    /// Create a new factory
-    pub fn new(options: QuicTransportOptions, logger: Logger) -> Self {
-        QuicTransportFactory { options, logger }
-    }
-}
-
-#[async_trait]
-impl TransportFactory for QuicTransportFactory {
-    type Transport = QuicTransport;
-
-    async fn create_transport(&self, node_id: PeerId, logger: Logger) -> Result<Self::Transport> {
-        // Pass the factory's logger down, or use the provided one?
-        // Let's use the one passed specifically for this transport instance.
-        Ok(QuicTransport::new(node_id, self.options.clone(), logger))
-    }
-} 

@@ -6,60 +6,51 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
-use std::net::SocketAddr;
-use std::net::IpAddr;
-use std::net::Ipv4Addr;
+use std::net::{SocketAddr, IpAddr, Ipv4Addr};
 use std::str::FromStr;
 
 use runar_node::network::transport::{NetworkTransport, NetworkMessage, PeerId, TransportOptions};
-use runar_node::network::transport::quic_transport::{QuicTransport, QuicTransportOptions, pick_free_port};
+use runar_node::network::transport::quic_transport::QuicTransport;
+use runar_node::node::NetworkConfig;
 use runar_common::types::ValueType;
 use runar_common::Logger;
-use runar_common::Component;
-use tokio::sync::oneshot;
+use runar_common::Component; 
 use uuid::Uuid;
 use rustls::{Certificate, PrivateKey};
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::time::SystemTime;
+    use super::*; 
 
-    // Helper function to create a self-signed certificate for testing
-    fn create_test_certificates() -> (Vec<Certificate>, PrivateKey) {
-        // Generate a self-signed certificate for testing only
-        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-        let cert_der = cert.serialize_der().unwrap();
-        let priv_key = cert.serialize_private_key_der();
-        let priv_key = PrivateKey(priv_key);
-        let cert_chain = vec![Certificate(cert_der)];
-        
-        (cert_chain, priv_key)
-    }
-
-    // Helper function to create and initialize a test QuicTransport
-    async fn create_test_transport(options: Option<QuicTransportOptions>) -> Result<Arc<QuicTransport>> {
+ 
+    // Helper function to create and initialize a test QuicTransport with custom port
+    async fn create_test_transport(port: Option<u16>) -> Result<Arc<QuicTransport>> {
         // Create a unique PeerId for testing
         let node_id = PeerId::new(format!("test-node-{}", Uuid::new_v4()));
         
         // Create logger using runar_common Logger
         let logger = Logger::new_root(Component::Network, &node_id.node_id);
 
-        // If no options are provided, create default options with test certificates
-        let transport_options = if let Some(opts) = options {
-            opts
-        } else {
-            let (certs, key) = create_test_certificates();
-            QuicTransportOptions::new()
-                .with_certificates(certs)
-                .with_private_key(key)
-                .with_verify_certificates(false)
-        };
+        // Create a NetworkConfig with QUIC, using false to disable certificate validation
+        let mut config = NetworkConfig::with_quic(false);
         
-        // Create transport instance with the options
+        // Set a specific bind address with localhost (127.0.0.1)
+        // If port is None, the OS will choose a random free port (use 0)
+        let bind_port = port.unwrap_or(0);
+        let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), bind_port);
+        
+        // Replace the transport_options with our custom bind address
+        let transport_options = TransportOptions {
+            timeout: Some(Duration::from_secs(30)),
+            max_message_size: Some(1024 * 1024), // 1MB
+            bind_address: bind_addr,
+        };
+        config.transport_options = transport_options;
+        
+        // Create transport instance with the config
         let transport = QuicTransport::new(
             node_id.clone(), 
-            transport_options, 
+            config, 
             logger
         );
          
@@ -72,15 +63,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_quic_transport_local_address() -> Result<()> {
-        // Create custom options with a dynamic port range for the test using builder pattern
-        let (certs, key) = create_test_certificates();
-        let options = QuicTransportOptions::new()
-            .with_port_in_range(50000..50500)
-            .with_certificates(certs)
-            .with_private_key(key)
-            .with_verify_certificates(false);
-        
-        let transport = create_test_transport(Some(options)).await?;
+        // Create transport with port 0 - OS will assign a free port
+        let transport = create_test_transport(None).await?;
         
         // Check that we got a local address
         let local_addr_str = transport.get_local_address();
@@ -96,25 +80,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_connect_and_send() -> Result<()> {
-        // Create test certificates
-        let (certs1, key1) = create_test_certificates();
-        let (certs2, key2) = create_test_certificates();
-        
-        // Create two transports with custom options using builder pattern
-        let options1 = QuicTransportOptions::new()
-            .with_port_in_range(50500..51000)
-            .with_certificates(certs1)
-            .with_private_key(key1)
-            .with_verify_certificates(false);
-        
-        let options2 = QuicTransportOptions::new()
-            .with_port_in_range(51000..51500)
-            .with_certificates(certs2)
-            .with_private_key(key2)
-            .with_verify_certificates(false);
-        
-        let transport1 = create_test_transport(Some(options1)).await?;
-        let transport2 = create_test_transport(Some(options2)).await?;
+        // Create two transports with automatic port assignment
+        // Let the OS choose free ports to avoid conflicts
+        let transport1 = create_test_transport(None).await?;
+        let transport2 = create_test_transport(None).await?;
         
         // Get PeerIds and SocketAddrs
         let addr1_str = transport1.get_local_address();
@@ -137,7 +106,7 @@ mod tests {
             let tx_clone = tx.clone();
             tokio::spawn(async move {
                 if let Err(e) = tx_clone.send(msg).await {
-                    eprintln!("Test channel send error: {}", e);
+                    log::error!("Test channel send error: {}", e);
                 }
             });
             Ok(())

@@ -1,18 +1,17 @@
-use anyhow::{Result, anyhow};
-use runar_common::logging::{Component, Logger};
-use runar_common::types::{JsonValue, ValueType};
-use runar_node::network::{NetworkConfig, NetworkMessage, NodeConfig, PeerInfo};
-use runar_node::network::discovery::{DiscoveryOptions, MulticastDiscovery, NodeDiscovery, NodeInfo};
-use runar_node::network::transport::{NetworkTransport, PeerId, QuicTransport, QuicTransportOptions};
-use runar_node::routing::TopicPath;
-use runar_node::services::{ActionContext, ActionHandler, ServiceAction, ServiceEvent, ServiceRegistry, ServiceResponse};
+use anyhow::Result;
+use runar_common::logging::Logger;
+use runar_common::Component;
+use runar_common::types::ValueType;
+use runar_node::network::transport::QuicTransportOptions;
+use runar_node::node::{Node, NodeConfig, NetworkConfig, TransportType};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::time::sleep;
-use uuid::Uuid;
+
+// Import the fixture MathService
+use crate::fixtures::math_service::MathService;
 
 /// Tests for remote action invocation between nodes
 ///
@@ -24,14 +23,79 @@ mod remote_action_tests {
 
     /// Test for remote action calls between two nodes
     ///
-    /// INTENTION: Create two Node instances with network enabled, they shuold  discover and connect to each other
-    /// each node shouo dhave one math sercie with differente path.. so we can call it from each node and test
-    /// the remove calls
+    /// INTENTION: Create two Node instances with network enabled, they should discover and connect to each other
+    /// each node should have one math service with different path, so we can call it from each node and test
+    /// the remote calls
     #[tokio::test]
     async fn test_remote_action_call() -> Result<()> {
-        
-        
+        // Set up logging
+        let logger = Logger::new_root(Component::Network, "remote_action_test");
+        logger.info("Starting remote action call test");
+  
+        // Create node configurations with network enabled
+        let node1_config = NodeConfig::new("node1", "test")
+            .with_network_config(NetworkConfig::with_quic(false)
+            .with_multicast_discovery());
 
+        
+            
+        let node2_config = NodeConfig::new("node2", "test")
+            .with_network_config(NetworkConfig::with_quic(false).with_multicast_discovery());
+
+        // Create the nodes
+        let mut node1 = Node::new(node1_config).await?;
+        let mut node2 = Node::new(node2_config).await?;
+
+        // Create math services with different paths using the fixture
+        let math_service1 = MathService::new("math1", "math/service1");
+        let math_service2 = MathService::new("math2", "math/service2");
+
+        // Add services to nodes - don't wrap in Box
+        node1.add_service(math_service1).await?;
+        node2.add_service(math_service2).await?;
+
+        // Start nodes
+        node1.start().await?;
+        node2.start().await?;
+
+        // Wait for discovery and connection to happen (simple sleep)
+        logger.info("Waiting for nodes to discover each other...");
+        sleep(Duration::from_secs(3)).await;
+
+        // Test calling math service1 (on node1) from node2
+        logger.info("Testing remote action call from node2 to node1...");
+        let mut add_params_map = HashMap::new();
+        add_params_map.insert("a".to_string(), ValueType::Number(5.0.into()));
+        add_params_map.insert("b".to_string(), ValueType::Number(3.0.into()));
+        let add_params = ValueType::Map(add_params_map);
+        
+        let response = node2.request("math/service1/add".to_string(), add_params).await?;
+        if let Some(ValueType::Number(result)) = response.data {
+            assert_eq!(result, 8.0);
+            logger.info(format!("Add operation succeeded: 5 + 3 = {}", result));
+        } else {
+            return Err(anyhow::anyhow!("Unexpected response type: {:?}", response.data));
+        }
+
+        // Test calling math service2 (on node2) from node1
+        logger.info("Testing remote action call from node1 to node2...");
+        let mut multiply_params_map = HashMap::new();
+        multiply_params_map.insert("a".to_string(), ValueType::Number(4.0.into()));
+        multiply_params_map.insert("b".to_string(), ValueType::Number(7.0.into()));
+        let multiply_params = ValueType::Map(multiply_params_map);
+        
+        let response = node1.request("math/service2/multiply".to_string(), multiply_params).await?;
+        if let Some(ValueType::Number(result)) = response.data {
+            logger.info(format!("Multiply operation succeeded: 4 * 7 = {}", result));
+        } else {
+            return Err(anyhow::anyhow!("Unexpected response type: {:?}", response.data));
+        }
+
+        // Shut down nodes
+        node1.stop().await?;
+        node2.stop().await?;
+
+        logger.info("Remote action test completed successfully");
         Ok(())
     }
 } 
