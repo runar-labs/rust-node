@@ -113,7 +113,7 @@ impl MulticastDiscovery {
         let socket = Self::create_multicast_socket(socket_addr).await?;
         println!("Successfully created multicast socket with address: {}", socket_addr);
 
-        Ok(Self {
+        let instance = Self {
             options: Arc::new(RwLock::new(options)),
             nodes: Arc::new(RwLock::new(HashMap::new())), 
             local_node: Arc::new(RwLock::new(None)), 
@@ -126,7 +126,25 @@ impl MulticastDiscovery {
             announce_task: Mutex::new(None),
             cleanup_task: Mutex::new(None),
             discovery_callback: RwLock::new(None),
-        })
+        };
+        
+        // Initialize the tasks
+        let listener_handle = instance.start_listener_task();
+        *instance.listener_task.lock().await = Some(listener_handle);
+        
+        // Call start_sender_task and store results
+        let (sender_handle, tx) = instance.start_sender_task(); 
+        *instance.sender_task.lock().await = Some(sender_handle); 
+        *instance.tx.lock().await = Some(tx);
+        
+        // Start cleanup task
+        let cleanup_handle = instance.start_cleanup_task(
+            Arc::clone(&instance.nodes), 
+            instance.options.read().await.node_ttl
+        ); 
+        *instance.cleanup_task.lock().await = Some(cleanup_handle);
+
+        Ok(instance)
     }
     
     /// Create a new multicast discovery with a specific address and port
@@ -400,6 +418,7 @@ impl MulticastDiscovery {
 impl NodeDiscovery for MulticastDiscovery {
     async fn init(&self, options: DiscoveryOptions) -> Result<()> {
         println!("Initializing MulticastDiscovery with options: {:?}", options);
+        // Update options
         *self.options.write().await = options.clone();
         
         // Re-parse the multicast address from options to ensure it's valid
@@ -420,17 +439,7 @@ impl NodeDiscovery for MulticastDiscovery {
         *self.multicast_addr.lock().await = socket_addr;
         println!("Using multicast address: {}", socket_addr);
 
-        let listener_handle = self.start_listener_task();
-        *self.listener_task.lock().await = Some(listener_handle); 
-
-        // Call start_sender_task and store results
-        let (sender_handle, tx) = self.start_sender_task(); 
-        *self.sender_task.lock().await = Some(sender_handle); 
-        *self.tx.lock().await = Some(tx); 
-        
-        // Start cleanup task
-        let cleanup_handle = self.start_cleanup_task(Arc::clone(&self.nodes), options.node_ttl); 
-        *self.cleanup_task.lock().await = Some(cleanup_handle);
+        // Tasks are already initialized in the constructor, no need to duplicate here
         
         Ok(())
     }

@@ -10,9 +10,9 @@
 // Working tests - these tests have been updated to work with the current API
 pub mod capability_exchange_test;
 pub mod quic_transport_test;
+pub mod multicast_discovery_test;
+pub mod discovery_test;
 
 // Tests being updated - these tests are in the process of being fixed for API compatibility
 // pub mod network_test;
-// pub mod multicast_discovery_test;
-// pub mod discovery_test;
 // pub mod remote_action_test; 
