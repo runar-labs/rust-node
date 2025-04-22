@@ -9,6 +9,7 @@ use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 use std::net::SocketAddr;
 use async_trait::async_trait;
+use std::time::SystemTime;
 
 use runar_node::network::transport::{NetworkTransport, NetworkMessage, PeerId, MessageHandler};
 use runar_node::network::transport::{NetworkError, ConnectionCallback};
@@ -75,7 +76,6 @@ impl NetworkTransport for MockTransport {
         self.node_id.clone()
     }
 
-    // Correct signature: takes PeerId, not &NodeInfo
     async fn connect(&self, _node_id: PeerId, _address: SocketAddr) -> Result<(), NetworkError> {
         self.logger.debug("MockTransport: connect called");
         Ok(())
@@ -101,7 +101,6 @@ impl NetworkTransport for MockTransport {
         Ok(())
     }
 
-    // Correct name: register_message_handler
     fn register_message_handler(&self, _handler: MessageHandler) -> Result<()> {
         self.logger.debug("MockTransport: register_message_handler called");
         // Handler registration not really mocked here, messages go to sink
@@ -259,111 +258,105 @@ impl NodeDiscovery for MockDiscovery {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::time::SystemTime;
+#[tokio::test]
+async fn test_transport_send_message() -> Result<()> {
+    let transport = MockTransport::new("unused_network", "node-1");
     
-    #[tokio::test]
-    async fn test_transport_send_message() -> Result<()> {
-        let transport = MockTransport::new("unused_network", "node-1");
-        
-        let topic = "test/service/action".to_string();
-        let correlation_id = "test-correlation-id".to_string();
-        let params = ValueType::String("test params".to_string());
-        let message = NetworkMessage {
-            source: PeerId::new("node-1".to_string()),
-            destination: PeerId::new("node-2".to_string()),
-            message_type: "Request".to_string(),
-            payloads: vec![(topic.clone(), params.clone(), correlation_id.clone())],
-        };
-        
-        transport.send_message(message.clone()).await?;
+    let topic = "test/service/action".to_string();
+    let correlation_id = "test-correlation-id".to_string();
+    let params = ValueType::String("test params".to_string());
+    let message = NetworkMessage {
+        source: PeerId::new("node-1".to_string()),
+        destination: PeerId::new("node-2".to_string()),
+        message_type: "Request".to_string(),
+        payloads: vec![(topic.clone(), params.clone(), correlation_id.clone())],
+    };
+    
+    transport.send_message(message.clone()).await?;
 
-        let sent_messages = transport.get_sent_messages().await;
-        assert_eq!(sent_messages.len(), 1);
-        assert_eq!(sent_messages[0].message_type, "Request");
-        assert_eq!(sent_messages[0].payloads.len(), 1);
-        assert_eq!(sent_messages[0].payloads[0].0, topic);
-        assert_eq!(sent_messages[0].payloads[0].1, params);
-        assert_eq!(sent_messages[0].payloads[0].2, correlation_id);
-        
-        Ok(())
+    let sent_messages = transport.get_sent_messages().await;
+    assert_eq!(sent_messages.len(), 1);
+    assert_eq!(sent_messages[0].message_type, "Request");
+    assert_eq!(sent_messages[0].payloads.len(), 1);
+    assert_eq!(sent_messages[0].payloads[0].0, topic);
+    assert_eq!(sent_messages[0].payloads[0].1, params);
+    assert_eq!(sent_messages[0].payloads[0].2, correlation_id);
+    
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_discovery_register_node() -> Result<()> {
+    let discovery = MockDiscovery::new();
+    let (tx, mut rx) = mpsc::channel::<NodeInfo>(10);
+    
+    // Set a discovery listener
+    discovery.set_discovery_listener(Box::new(move |node_info| {
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = tx.send(node_info).await {
+                eprintln!("Channel send error: {}", e);
+            }
+        });
+    })).await?;
+    
+    let node_info = NodeInfo {
+        peer_id: PeerId::new("node-1".to_string()),
+        network_ids: vec!["test-network".to_string()],
+        address: "localhost:8080".to_string(),
+        capabilities: vec!["request".to_string(), "event".to_string()],
+        last_seen: SystemTime::now(),
+    };
+    
+    // Register node
+    discovery.register_node(node_info.clone()).await?;
+    
+    // Check if listener was notified
+    if let Some(received_node_info) = rx.recv().await {
+        assert_eq!(received_node_info.peer_id.node_id, "node-1");
+        assert_eq!(received_node_info.address, "localhost:8080");
+    } else {
+        return Err(anyhow!("Discovery listener was not notified"));
     }
     
-    #[tokio::test]
-    async fn test_discovery_register_node() -> Result<()> {
-        let discovery = MockDiscovery::new();
-        let (tx, mut rx) = mpsc::channel::<NodeInfo>(10);
-        
-        // Set a discovery listener
-        discovery.set_discovery_listener(Box::new(move |node_info| {
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                if let Err(e) = tx.send(node_info).await {
-                    eprintln!("Channel send error: {}", e);
-                }
-            });
-        })).await?;
-        
-        let node_info = NodeInfo {
-            peer_id: PeerId::new("node-1".to_string()),
-            network_ids: vec!["test-network".to_string()],
-            address: "localhost:8080".to_string(),
-            capabilities: vec!["request".to_string(), "event".to_string()],
-            last_seen: SystemTime::now(),
-        };
-        
-        // Register node
-        discovery.register_node(node_info.clone()).await?;
-        
-        // Check if listener was notified
-        if let Some(received_node_info) = rx.recv().await {
-            assert_eq!(received_node_info.peer_id.node_id, "node-1");
-            assert_eq!(received_node_info.address, "localhost:8080");
-        } else {
-            return Err(anyhow!("Discovery listener was not notified"));
-        }
-        
-        Ok(())
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_transport_handler() -> Result<()> {
+    // Create a channel
+    let (tx, mut rx) = mpsc::channel(10);
+    
+    // Use new PeerId constructor
+    let mut transport = MockTransport::new("unused_network", "node-1");
+    
+    // Set message sink
+    transport.set_message_sink(tx);
+    
+    // Create a test message using new NetworkMessage structure
+    let topic = "test/service/action".to_string();
+    let correlation_id = "test-correlation-id".to_string();
+    let params = ValueType::String("test params".to_string());
+    let message = NetworkMessage {
+        source: PeerId::new("node-2".to_string()),
+        destination: PeerId::new("node-1".to_string()),
+        message_type: "Request".to_string(),
+        payloads: vec![(topic.clone(), params.clone(), correlation_id.clone())],
+    };
+    
+    // Send the message using send_message
+    transport.send_message(message.clone()).await?;
+    
+    // Check if the message was received through the channel
+    if let Some(received) = rx.recv().await {
+        assert_eq!(received.source.node_id, "node-2");
+        assert_eq!(received.message_type, "Request");
+        // Check payload instead of old correlation_id field
+        assert_eq!(received.payloads.len(), 1);
+        assert_eq!(received.payloads[0].2, correlation_id);
+    } else {
+        return Err(anyhow!("No message received"));
     }
     
-    #[tokio::test]
-    async fn test_transport_handler() -> Result<()> {
-        // Create a channel
-        let (tx, mut rx) = mpsc::channel(10);
-        
-        // Use new PeerId constructor
-        let mut transport = MockTransport::new("unused_network", "node-1");
-        
-        // Set message sink
-        transport.set_message_sink(tx);
-        
-        // Create a test message using new NetworkMessage structure
-        let topic = "test/service/action".to_string();
-        let correlation_id = "test-correlation-id".to_string();
-        let params = ValueType::String("test params".to_string());
-        let message = NetworkMessage {
-            source: PeerId::new("node-2".to_string()),
-            destination: PeerId::new("node-1".to_string()),
-            message_type: "Request".to_string(),
-            payloads: vec![(topic.clone(), params.clone(), correlation_id.clone())],
-        };
-        
-        // Send the message using send_message
-        transport.send_message(message.clone()).await?;
-        
-        // Check if the message was received through the channel
-        if let Some(received) = rx.recv().await {
-            assert_eq!(received.source.node_id, "node-2");
-            assert_eq!(received.message_type, "Request");
-            // Check payload instead of old correlation_id field
-            assert_eq!(received.payloads.len(), 1);
-            assert_eq!(received.payloads[0].2, correlation_id);
-        } else {
-            return Err(anyhow!("No message received"));
-        }
-        
-        Ok(())
-    }
+    Ok(())
 } 

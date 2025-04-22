@@ -9,6 +9,9 @@ use std::net::SocketAddr;
 use std::collections::HashMap;
 use std::time::Instant;
 use std::collections::VecDeque;
+use std::io::Write;
+use std::net::{IpAddr, Ipv4Addr, TcpListener};
+use std::ops::Range;
 
 // External crate imports
 use anyhow::{anyhow, Result};
@@ -23,9 +26,18 @@ use uuid;
 
 // Internal module imports
 use super::{NetworkTransport, TransportFactory, TransportOptions, NetworkMessage, NetworkError, PeerId, MessageHandler, ConnectionCallback};
-use super::peer_registry::PeerRegistry;
 use crate::network::discovery::NodeDiscovery;
 use runar_common::Logger;
+
+/// Find a free port in the given range
+pub fn pick_free_port(port_range: Range<u16>) -> Option<u16> {
+    for port in port_range {
+        if let Ok(listener) = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port)) {
+            return Some(listener.local_addr().ok()?.port());
+        }
+    }
+    None
+}
 
 // QUIC Transport Implementation
 //
@@ -60,6 +72,10 @@ impl PeerState {
 pub struct QuicTransportOptions {
     /// Base transport options
     pub transport_options: TransportOptions,
+    /// TLS certificate chain (in DER format)
+    pub certificates: Option<Vec<Certificate>>,
+    /// TLS private key (in DER format)
+    pub private_key: Option<PrivateKey>,
     /// Path to the TLS certificate file
     pub cert_path: Option<String>,
     /// Path to the TLS private key file
@@ -78,20 +94,222 @@ pub struct QuicTransportOptions {
     pub max_idle_streams_per_peer: usize,
 }
 
+impl QuicTransportOptions {
+    /// Create a new instance with default settings and a randomly selected port
+    pub fn new() -> Self {
+        let port = pick_free_port(50000..51000).unwrap_or(0);
+        let bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+        
+        Self {
+            transport_options: TransportOptions {
+                bind_address: bind_addr,
+                timeout: Some(Duration::from_secs(30)),
+                max_message_size: Some(1024 * 1024), // 1MB default
+            },
+            certificates: None,
+            private_key: None,
+            cert_path: None,
+            key_path: None,
+            verify_certificates: true,
+            keep_alive_interval_ms: 5000,
+            max_concurrent_bidi_streams: 100,
+            connection_idle_timeout_ms: 60000,
+            stream_idle_timeout_ms: 30000,
+            max_idle_streams_per_peer: 10,
+        }
+    }
+    
+    /// Set custom bind address
+    pub fn with_bind_address(mut self, addr: SocketAddr) -> Self {
+        self.transport_options.bind_address = addr;
+        self
+    }
+    
+    /// Set custom port (using localhost/127.0.0.1)
+    pub fn with_port(mut self, port: u16) -> Self {
+        self.transport_options.bind_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+        self
+    }
+    
+    /// Set port from a specific range (using localhost/127.0.0.1)
+    pub fn with_port_in_range(self, port_range: Range<u16>) -> Self {
+        let port = pick_free_port(port_range).unwrap_or(0);
+        self.with_port(port)
+    }
+    
+    /// Set timeout for network operations
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.transport_options.timeout = Some(timeout);
+        self
+    }
+    
+    /// Set maximum message size
+    pub fn with_max_message_size(mut self, size: usize) -> Self {
+        self.transport_options.max_message_size = Some(size);
+        self
+    }
+    
+    /// Set TLS certificate chain directly
+    pub fn with_certificates(mut self, certs: Vec<Certificate>) -> Self {
+        self.certificates = Some(certs);
+        self
+    }
+    
+    /// Set TLS private key directly
+    pub fn with_private_key(mut self, key: PrivateKey) -> Self {
+        self.private_key = Some(key);
+        self
+    }
+    
+    /// Set TLS certificate path
+    pub fn with_cert_path(mut self, path: String) -> Self {
+        self.cert_path = Some(path);
+        self
+    }
+    
+    /// Set TLS private key path
+    pub fn with_key_path(mut self, path: String) -> Self {
+        self.key_path = Some(path);
+        self
+    }
+    
+    /// Set whether to verify certificates
+    pub fn with_verify_certificates(mut self, verify: bool) -> Self {
+        self.verify_certificates = verify;
+        self
+    }
+    
+    /// Set keep-alive interval
+    pub fn with_keep_alive_interval(mut self, interval_ms: u64) -> Self {
+        self.keep_alive_interval_ms = interval_ms;
+        self
+    }
+    
+    /// Set maximum number of concurrent bi-directional streams
+    pub fn with_max_concurrent_bidi_streams(mut self, max: u32) -> Self {
+        self.max_concurrent_bidi_streams = max;
+        self
+    }
+    
+    /// Set connection idle timeout
+    pub fn with_connection_idle_timeout(mut self, timeout_ms: u64) -> Self {
+        self.connection_idle_timeout_ms = timeout_ms;
+        self
+    }
+    
+    /// Set stream idle timeout
+    pub fn with_stream_idle_timeout(mut self, timeout_ms: u64) -> Self {
+        self.stream_idle_timeout_ms = timeout_ms;
+        self
+    }
+    
+    /// Set maximum number of idle streams per peer
+    pub fn with_max_idle_streams_per_peer(mut self, max: usize) -> Self {
+        self.max_idle_streams_per_peer = max;
+        self
+    }
+    
+    /// Create server configuration for QUIC
+    pub fn create_server_config(&self, logger: &Logger) -> Result<ServerConfig> {
+        // Create transport config
+        let mut transport_config = TransportConfig::default();
+        
+        // Set keep-alive interval
+        transport_config.keep_alive_interval(Some(Duration::from_millis(
+            self.keep_alive_interval_ms
+        )));
+        
+        // Set max concurrent streams
+        transport_config.max_concurrent_bidi_streams(
+            self.max_concurrent_bidi_streams.into()
+        );
+        
+        // Load certificates from memory or file
+        let (certs, key) = self.get_certificates_and_key(logger)?;
+        
+        // Create server configuration (will fail if no valid certificates are provided)
+        let mut server_config = ServerConfig::with_single_cert(certs, key)?;
+        server_config.transport = Arc::new(transport_config);
+        
+        Ok(server_config)
+    }
+    
+    /// Create client configuration for QUIC
+    pub fn create_client_config(&self, logger: &Logger) -> Result<ClientConfig> {
+        // Create transport config
+        let mut transport_config = TransportConfig::default();
+        
+        transport_config.keep_alive_interval(Some(Duration::from_millis(
+            self.keep_alive_interval_ms
+        )));
+        
+        transport_config.max_concurrent_bidi_streams(
+            self.max_concurrent_bidi_streams.into()
+        );
+        
+        let shared_transport_config = Arc::new(transport_config);
+        
+        // Create client configuration - using ClientConfig builder
+        let mut crypto_config = rustls::ClientConfig::builder()
+            .with_safe_defaults()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth();
+            
+        // Disable certificate verification if needed
+        // IMPORTANT: This should ONLY be used for development/testing and NEVER in production
+        if !self.verify_certificates {
+            logger.warn("SECURITY WARNING: Certificate verification is disabled. This configuration is NOT secure for production use!");
+            crypto_config.dangerous().set_certificate_verifier(Arc::new(NoVerification {}));
+        }
+        
+        // Apply transport config using the builder
+        let mut client_config = ClientConfig::new(Arc::new(crypto_config));
+        client_config.transport_config(shared_transport_config);
+        
+        Ok(client_config)
+    }
+    
+    /// Get certificates and key from configuration
+    fn get_certificates_and_key(&self, logger: &Logger) -> Result<(Vec<Certificate>, PrivateKey)> {
+        // First check if certificates are provided directly in memory
+        if let (Some(certs), Some(key)) = (&self.certificates, &self.private_key) {
+            return Ok((certs.clone(), key.clone()));
+        }
+        
+        // Otherwise try to load from files
+        if let (Some(cert_path), Some(key_path)) = (&self.cert_path, &self.key_path) {
+            // Read certificate file
+            let cert_file = std::fs::read(cert_path)?;
+            let cert_chain = rustls_pemfile::certs(&mut cert_file.as_slice())?
+                .into_iter()
+                .map(Certificate)
+                .collect::<Vec<_>>();
+                
+            // Read private key file
+            let key_file = std::fs::read(key_path)?;
+            let mut keys = rustls_pemfile::pkcs8_private_keys(&mut key_file.as_slice())?;
+            
+            if cert_chain.is_empty() {
+                return Err(anyhow!("No certificates found in certificate file"));
+            }
+            
+            if keys.is_empty() {
+                return Err(anyhow!("No private keys found in key file"));
+            }
+            
+            let key = PrivateKey(keys.remove(0));
+            return Ok((cert_chain, key));
+        }
+        
+        // If we get here, no certificates were provided
+        logger.error("No TLS certificates provided. QUIC requires TLS certificates.");
+        Err(anyhow!("No TLS certificates provided"))
+    }
+}
+
 impl Default for QuicTransportOptions {
     fn default() -> Self {
-        Self {
-            transport_options: TransportOptions::default(),
-            cert_path: None,  // No certificate by default, will generate self-signed for development
-            key_path: None,   // No key by default, will generate self-signed for development
-            // This setting is true by default for security, only disable in development
-            verify_certificates: true, 
-            keep_alive_interval_ms: 5000,  // 5 seconds
-            max_concurrent_bidi_streams: 100,
-            connection_idle_timeout_ms: 60000, // 60 seconds default
-            stream_idle_timeout_ms: 30000, // 30 seconds default
-            max_idle_streams_per_peer: 10, // Default max 10 idle streams
-        }
+        Self::new()
     }
 }
 
@@ -105,8 +323,6 @@ pub struct QuicTransport {
     endpoint: Arc<TokioMutex<Option<Endpoint>>>,
     /// Active connections to other nodes, managed by PeerState
     connections: Arc<TokioRwLock<HashMap<PeerId, Arc<TokioMutex<PeerState>>>>>,
-    /// Peer registry
-    peer_registry: Arc<PeerRegistry>,
     /// Handler for incoming messages
     handlers: Arc<StdRwLock<Vec<MessageHandler>>>,
     /// Background server task
@@ -131,7 +347,6 @@ impl QuicTransport {
             options,
             endpoint: Arc::new(TokioMutex::new(None)),
             connections: Arc::new(TokioRwLock::new(HashMap::new())),
-            peer_registry: Arc::new(PeerRegistry::new()),
             handlers: Arc::new(StdRwLock::new(Vec::new())),
             server_task: Arc::new(TokioMutex::new(None)),
             cleanup_task: Arc::new(TokioMutex::new(None)),
@@ -144,147 +359,16 @@ impl QuicTransport {
     
     /// Setup the QUIC endpoint
     async fn setup_endpoint(&self) -> Result<Endpoint> {
-        // Create server config
-        let server_config = self.create_server_config()?;
+        // Create server config using the options
+        let server_config = self.options.create_server_config(&self.logger)?;
         
-        // Create endpoint config
-        // let mut endpoint_config = EndpointConfig::default(); // EndpointConfig is likely unused
-        
-        // Create the endpoint
-        // Unwrap the Option<String> before parsing, provide default
-        let bind_addr_str = self.options.transport_options.bind_address
-            .as_deref() // Convert Option<String> to Option<&str>
-            .unwrap_or("0.0.0.0:0"); // Provide default if None
-            
-        let socket_addr: SocketAddr = bind_addr_str.parse()
-            .map_err(|e| anyhow!("Invalid bind address format '{}': {}", bind_addr_str, e))?;
+        // Use the bind address from the options directly
+        let bind_addr = self.options.transport_options.bind_address;
             
         // Create endpoint from server config and socket address
-        let endpoint = Endpoint::server(server_config, socket_addr)?;
+        let endpoint = Endpoint::server(server_config, bind_addr)?;
         
         Ok(endpoint)
-    }
-    
-    /// Create server configuration for QUIC
-    fn create_server_config(&self) -> Result<ServerConfig> {
-        // Create transport config
-        let mut transport_config = TransportConfig::default();
-        
-        // Set keep-alive interval
-        transport_config.keep_alive_interval(Some(Duration::from_millis(
-            self.options.keep_alive_interval_ms
-        )));
-        
-        // Set max concurrent streams
-        transport_config.max_concurrent_bidi_streams(
-            self.options.max_concurrent_bidi_streams.into()
-        );
-        
-        // Load certificates and private key
-        let (cert, key) = self.load_certificates()?;
-        
-        // Create server configuration
-        let server_crypto = if let (Some(cert_chain), Some(key)) = (cert, key) {
-            let mut server_config = ServerConfig::with_single_cert(cert_chain, key)?;
-            server_config.transport = Arc::new(transport_config);
-            Ok(server_config)
-        } else {
-            // Generate self-signed certificate for development
-            self.generate_self_signed_cert()
-        }?;
-        
-        Ok(server_crypto)
-    }
-    
-    /// Create client configuration for QUIC
-    fn create_client_config(&self) -> Result<ClientConfig> {
-        // Create transport config
-        let mut transport_config = TransportConfig::default();
-        
-        transport_config.keep_alive_interval(Some(Duration::from_millis(
-            self.options.keep_alive_interval_ms
-        )));
-        
-        transport_config.max_concurrent_bidi_streams(
-            self.options.max_concurrent_bidi_streams.into()
-        );
-        
-        let shared_transport_config = Arc::new(transport_config);
-        
-        // Create client configuration - using ClientConfig builder
-        let mut crypto_config = rustls::ClientConfig::builder()
-            .with_safe_defaults()
-            .with_root_certificates(rustls::RootCertStore::empty())
-            .with_no_client_auth();
-            
-        // Disable certificate verification if needed
-        // IMPORTANT: This should ONLY be used for development/testing and NEVER in production
-        // Security will be improved in a future update
-        if !self.options.verify_certificates {
-            self.logger.warn("SECURITY WARNING: Certificate verification is disabled. This configuration is NOT secure for production use!");
-            crypto_config.dangerous().set_certificate_verifier(Arc::new(NoVerification {}));
-        }
-        
-        // Apply transport config using the builder
-        let mut client_config = ClientConfig::new(Arc::new(crypto_config));
-        client_config.transport_config(shared_transport_config);
-        
-        Ok(client_config)
-    }
-    
-    /// Load certificates and private key from files
-    fn load_certificates(&self) -> Result<(Option<Vec<Certificate>>, Option<PrivateKey>)> {
-        if let (Some(cert_path), Some(key_path)) = (&self.options.cert_path, &self.options.key_path) {
-            // Read certificate file
-            let cert_file = std::fs::read(cert_path)?;
-            let cert_chain = rustls_pemfile::certs(&mut cert_file.as_slice())?
-                .into_iter()
-                .map(Certificate)
-                .collect();
-                
-            // Read private key file
-            let key_file = std::fs::read(key_path)?;
-            let mut keys = rustls_pemfile::pkcs8_private_keys(&mut key_file.as_slice())?;
-            
-            if keys.is_empty() {
-                Err(anyhow!("No private keys found in key file"))
-            } else {
-                let key = PrivateKey(keys.remove(0));
-                Ok((Some(cert_chain), Some(key)))
-            }
-        } else {
-            // No certificates provided
-            Ok((None, None))
-        }
-    }
-    
-    /// Generate a self-signed certificate for development
-    fn generate_self_signed_cert(&self) -> Result<ServerConfig> {
-        // IMPORTANT: Self-signed certificates should ONLY be used for development/testing
-        // This is NOT secure for production use and will be improved in future updates
-        self.logger.warn("SECURITY WARNING: Using self-signed certificate. This is NOT secure for production use!");
-        
-        // For development only - generate a self-signed certificate
-        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-        let cert_der = cert.serialize_der().unwrap();
-        let priv_key = cert.serialize_private_key_der();
-        let priv_key = PrivateKey(priv_key);
-        let cert_chain = vec![Certificate(cert_der)];
-        
-        let mut server_config = ServerConfig::with_single_cert(cert_chain, priv_key)?;
-        let mut transport_config = TransportConfig::default();
-        
-        transport_config.keep_alive_interval(Some(Duration::from_millis(
-            self.options.keep_alive_interval_ms
-        )));
-        
-        transport_config.max_concurrent_bidi_streams(
-            self.options.max_concurrent_bidi_streams.into()
-        );
-        
-        server_config.transport = Arc::new(transport_config);
-        
-        Ok(server_config)
     }
     
     /// Start the server task to accept incoming connections
@@ -754,6 +838,20 @@ impl QuicTransport {
             }
         }
     }
+
+    /// Get the local address this transport is bound to
+    fn get_local_address(&self) -> String {
+        // Get the actual bound address from the endpoint
+        if let Ok(ep_lock) = self.endpoint.try_lock() {
+            if let Some(ep) = ep_lock.as_ref() {
+                if let Ok(addr) = ep.local_addr() {
+                    return addr.to_string();
+                }
+            }
+        }
+        // Fallback to the configured address if we can't get the actual one
+        self.options.transport_options.bind_address.to_string()
+    }
 }
 
 /// Certificate verifier that accepts any certificate
@@ -886,8 +984,16 @@ impl NetworkTransport for QuicTransport {
     
     /// Get the local address this transport is bound to
     fn get_local_address(&self) -> String {
-        // Current implementation of local_address but return as string
-        "0.0.0.0:0".to_string()
+        // Get the actual bound address from the endpoint
+        if let Ok(ep_lock) = self.endpoint.try_lock() {
+            if let Some(ep) = ep_lock.as_ref() {
+                if let Ok(addr) = ep.local_addr() {
+                    return addr.to_string();
+                }
+            }
+        }
+        // Fallback to the configured address if we can't get the actual one
+        self.options.transport_options.bind_address.to_string()
     }
     
     /// Get the local node identifier
@@ -898,6 +1004,13 @@ impl NetworkTransport for QuicTransport {
     /// Connect to a remote node at a specific address
     async fn connect(&self, target_peer_id: PeerId, target_addr: SocketAddr) -> Result<(), NetworkError> {
         self.logger.info(format!("Attempting QUIC connect to {} at {}", target_peer_id, target_addr));
+
+        // Validate the target address
+        if target_addr.port() == 0 {
+            let err_msg = format!("Cannot connect to {}: invalid port 0", target_addr);
+            self.logger.error(&err_msg);
+            return Err(NetworkError::ConnectionError(err_msg));
+        }
 
         // Check if already connected
         let connections_read = self.connections.read().await;
@@ -913,7 +1026,7 @@ impl NetworkTransport for QuicTransport {
             .ok_or_else(|| NetworkError::TransportError("QUIC endpoint not initialized".to_string()))?;
 
         // Create client config
-        let client_config = self.create_client_config()
+        let client_config = self.options.create_client_config(&self.logger)
             .map_err(|e| NetworkError::ConfigurationError(format!("Failed to create QUIC client config: {}", e)))?;
 
         // Attempt connection
@@ -1013,10 +1126,15 @@ impl NetworkTransport for QuicTransport {
     
     /// Check if connected to a specific node
     fn is_connected(&self, node_id: PeerId) -> bool {
-        // Correctly check the map
-        tokio::runtime::Handle::current().block_on(async {
-            self.connections.read().await.contains_key(&node_id)
-        })
+        // Use try_read instead of block_on to avoid runtime panic
+        match self.connections.try_read() {
+            Ok(guard) => guard.contains_key(&node_id),
+            Err(_) => {
+                // If we can't get the lock immediately, log a warning and return false
+                self.logger.warn(format!("Failed to acquire read lock when checking connection to {}", node_id));
+                false
+            }
+        }
     }
     
     /// Register a message handler for incoming messages

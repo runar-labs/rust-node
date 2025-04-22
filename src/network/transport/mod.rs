@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::future::Future;
 use std::pin::Pin;
 use thiserror::Error;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, IpAddr, Ipv4Addr};
 
 // Internal module declarations
 pub mod quic_transport;
@@ -25,7 +25,7 @@ pub mod peer_registry;
 
 // Re-export types/traits from submodules or parent modules
 pub use peer_registry::{PeerRegistry, PeerStatus, PeerEntry, PeerRegistryOptions};
-pub use quic_transport::{QuicTransport, QuicTransportOptions};
+pub use quic_transport::{QuicTransport, QuicTransportOptions, pick_free_port};
 
 // Import NodeInfo from the discovery module
 use super::discovery::{NodeInfo, NodeDiscovery};
@@ -60,21 +60,18 @@ impl fmt::Display for PeerId {
 pub struct TransportOptions {
     /// Timeout for network operations
     pub timeout: Option<Duration>,
-    /// Whether to use encryption for transport
-    pub use_encryption: bool,
     /// Maximum message size in bytes
     pub max_message_size: Option<usize>,
-    /// Bind address for the transport (e.g., "0.0.0.0:8080")
-    pub bind_address: Option<String>,
+    /// Bind address for the transport
+    pub bind_address: SocketAddr,
 }
 
 impl Default for TransportOptions {
     fn default() -> Self {
         Self {
             timeout: Some(Duration::from_secs(30)),
-            use_encryption: true,
             max_message_size: Some(1024 * 1024), // 1MB default
-            bind_address: None,
+            bind_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), pick_free_port(50000..51000).unwrap_or(0)),
         }
     }
 }
@@ -106,11 +103,6 @@ pub struct NetworkMessage {
     /// Message type (Request, Response, Event, etc.)
     pub message_type: String,
     
-    //REMOVED DONT ADD BACK.. ANY CODE THAT BREAKSM NEED TO CHANGE OT USE payloads .. 
-    //actiosn and events will both use this for consistentyc
-    // pub topic: String,
-    // pub payload: ValueType,
-    // pub correlation_id: Option<String>,
     /// List of  payloads 
     /// Each entry contains (topic, payload, correlation_id)
     pub payloads: Vec<(String, ValueType, String)>,

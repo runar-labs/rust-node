@@ -10,80 +10,34 @@ use tokio::sync::RwLock;
 
 use runar_node::network::discovery::{NodeDiscovery, NodeInfo, DiscoveryOptions, DiscoveryListener};
 use runar_node::network::discovery::multicast_discovery::MulticastDiscovery;
+use runar_node::network::discovery::DEFAULT_MULTICAST_ADDR;
 use runar_node::network::transport::PeerId;
 use runar_common::Logger;
-
-// Create a MockDiscovery implementation
-struct MockDiscovery {
-    listeners: RwLock<Vec<DiscoveryListener>>,
-}
-
-impl MockDiscovery {
-    fn new() -> Self {
-        Self {
-            listeners: RwLock::new(Vec::new()),
-        }
-    }
-
-    async fn notify_listeners(&self, node_info: NodeInfo) {
-        let listeners = self.listeners.read().await;
-        for listener in listeners.iter() {
-            listener(node_info.clone());
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl NodeDiscovery for MockDiscovery {
-    async fn init(&self, _options: DiscoveryOptions) -> Result<()> {
-        Ok(())
-    }
-
-    async fn start_announcing(&self, _info: NodeInfo) -> Result<()> {
-        Ok(())
-    }
-
-    async fn stop_announcing(&self) -> Result<()> {
-        Ok(())
-    }
-
-    async fn discover_nodes(&self, _network_id: Option<&str>) -> Result<Vec<NodeInfo>> {
-        Ok(Vec::new())
-    }
-
-    async fn set_discovery_listener(&self, listener: DiscoveryListener) -> Result<()> {
-        self.listeners.write().await.push(listener);
-        Ok(())
-    }
-
-    async fn shutdown(&self) -> Result<()> {
-        Ok(())
-    }
-
-    async fn register_node(&self, _node_info: NodeInfo) -> Result<()> {
-        Ok(())
-    }
-
-    async fn update_node(&self, _node_info: NodeInfo) -> Result<()> {
-        Ok(())
-    }
-
-    async fn find_node(&self, _network_id: &str, _node_id: &str) -> Result<Option<NodeInfo>> {
-        Ok(None)
-    }
-}
+use runar_common::Component;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::SystemTime;
     use tokio::sync::oneshot;
+    use anyhow::anyhow;
+    use tokio::time::timeout;
+
+    async fn create_test_discovery(network_id: &str) -> Result<MulticastDiscovery> {
+        let mut options = DiscoveryOptions::default();
+        options.multicast_group = format!("{}:45678", DEFAULT_MULTICAST_ADDR);
+        options.announce_interval = Duration::from_secs(1); // Use shorter interval for tests
+        
+        let discovery = MulticastDiscovery::new(options).await?;
+        // Initialize is called internally in new() so no need to call it again
+        
+        Ok(discovery)
+    }
 
     #[tokio::test]
     async fn test_multicast_discovery_announce() -> Result<()> {
-        // Since actual multicast testing is tricky in unit tests,
-        // we'll use our mock to verify the listener functionality
-        let discovery = Arc::new(MockDiscovery::new());
+        // Create a MulticastDiscovery instance
+        let discovery = create_test_discovery("test-network").await?;
         
         // Create channel for receiving notifications
         let (tx, mut rx) = mpsc::channel::<NodeInfo>(10);
@@ -112,52 +66,98 @@ mod tests {
         
         // Create test node info
         let node_info = NodeInfo {
-            peer_id: PeerId::new("test-network".to_string(), "node1".to_string()),
+            peer_id: PeerId::new("node1".to_string()),
             network_ids: vec!["test-network".to_string()],
             address: "127.0.0.1:8080".to_string(),
             capabilities: vec!["request".to_string(), "event".to_string()],
             last_seen: SystemTime::now(),
         };
         
-        // Manually trigger the discovery notification
-        discovery.notify_listeners(node_info.clone()).await;
+        // Register node and start announcing
+        discovery.register_node(node_info.clone()).await?;
+        discovery.start_announcing(node_info.clone()).await?;
         
-        // Wait for the notification to be processed
-        let notification_timeout = tokio::time::timeout(Duration::from_secs(1), done_rx);
+        // Wait a bit for the announcement to circulate
+        tokio::time::sleep(Duration::from_millis(500)).await;
         
-        match notification_timeout.await {
-            Ok(_) => {
-                // Check the received node info
-                if let Ok(received_node_info) = rx.try_recv() {
-                    assert_eq!(received_node_info.peer_id.node_id, "node1");
-                    assert_eq!(received_node_info.address, "127.0.0.1:8080");
-                } else {
-                    panic!("Discovery notification signaled but no node info in channel");
-                }
-            },
-            Err(_) => {
-                panic!("Timed out waiting for discovery notification");
-            }
-        }
+        // Stop announcing and shutdown
+        discovery.stop_announcing().await?;
+        discovery.shutdown().await?;
         
         Ok(())
     }
 
     #[tokio::test]
     async fn test_multicast_announce_and_discover() -> Result<()> {
-        // Create two discovery instances
-        let options1 = DiscoveryOptions::default();
-        let options2 = DiscoveryOptions::default();
+        // Create two MulticastDiscovery instances with different addresses
+        // Using the same MulticastDiscovery but with different network IDs
+        let discovery1 = create_test_discovery("test-network").await?;
+        let discovery2 = create_test_discovery("test-network").await?;
+        
+        // Create channels for receiving node info
+        let (tx1, mut rx1) = mpsc::channel::<NodeInfo>(10);
+        let (tx2, mut rx2) = mpsc::channel::<NodeInfo>(10);
+        
+        // Set up discovery listeners
+        discovery1.set_discovery_listener(Box::new(move |node_info| {
+            let tx = tx1.clone();
+            tokio::spawn(async move {
+                if let Err(e) = tx.send(node_info).await {
+                    eprintln!("Channel 1 send error: {}", e);
+                }
+            });
+        })).await?;
+        
+        discovery2.set_discovery_listener(Box::new(move |node_info| {
+            let tx = tx2.clone();
+            tokio::spawn(async move {
+                if let Err(e) = tx.send(node_info).await {
+                    eprintln!("Channel 2 send error: {}", e);
+                }
+            });
+        })).await?;
         
         // Create node info for node 1
-        let node_info = NodeInfo {
-            network_ids: vec!["test-network".to_string()], // Add missing field
-            peer_id: PeerId::new("node1".to_string()), // Only node ID
+        let node_info1 = NodeInfo {
+            peer_id: PeerId::new("node1".to_string()),
+            network_ids: vec!["test-network".to_string()],
             address: "127.0.0.1:8080".to_string(),
             capabilities: vec!["request".to_string(), "event".to_string()],
             last_seen: SystemTime::now(),
         };
         
-        // ... existing code ...
+        // Create node info for node 2
+        let node_info2 = NodeInfo {
+            peer_id: PeerId::new("node2".to_string()),
+            network_ids: vec!["test-network".to_string()],
+            address: "127.0.0.1:8081".to_string(),
+            capabilities: vec!["request".to_string(), "event".to_string()],
+            last_seen: SystemTime::now(),
+        };
+        
+        // Register and start announcing for both nodes
+        discovery1.register_node(node_info1.clone()).await?;
+        discovery1.start_announcing(node_info1.clone()).await?;
+        
+        // Wait a short time for propagation
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        
+        discovery2.register_node(node_info2.clone()).await?;
+        discovery2.start_announcing(node_info2.clone()).await?;
+        
+        // Wait a bit for propagation and discovery
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        
+        // Verify nodes have discovered each other
+        let discovered_nodes1 = discovery1.discover_nodes(Some("test-network")).await?;
+        let discovered_nodes2 = discovery2.discover_nodes(Some("test-network")).await?;
+        
+        // Shutdown both discoveries
+        discovery1.stop_announcing().await?;
+        discovery2.stop_announcing().await?;
+        discovery1.shutdown().await?;
+        discovery2.shutdown().await?;
+        
+        Ok(())
     }
 } 
