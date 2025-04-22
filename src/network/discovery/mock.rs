@@ -14,10 +14,6 @@ use crate::network::transport::PeerId;
 pub struct MockNodeDiscovery {
     /// Known nodes
     nodes: Arc<RwLock<HashMap<String, NodeInfo>>>,
-    /// Local node info
-    local_node: RwLock<Option<NodeInfo>>,
-    /// Discovery callback
-    discovery_callback: RwLock<Option<Box<dyn Fn(NodeInfo) + Send + Sync>>>,
     /// Listeners for discovery events
     listeners: Arc<RwLock<Vec<DiscoveryListener>>>,
 }
@@ -27,8 +23,6 @@ impl MockNodeDiscovery {
     pub fn new() -> Self {
         Self {
             nodes: Arc::new(RwLock::new(HashMap::new())),
-            local_node: RwLock::new(None),
-            discovery_callback: RwLock::new(None),
             listeners: Arc::new(RwLock::new(Vec::new())),
         }
     }

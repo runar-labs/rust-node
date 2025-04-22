@@ -14,15 +14,13 @@ use runar_node::network::transport::quic_transport::QuicTransport;
 use runar_node::node::NetworkConfig;
 use runar_common::types::ValueType;
 use runar_common::Logger;
-use runar_common::Component; 
+use runar_common::Component;
 use uuid::Uuid;
-use rustls::{Certificate, PrivateKey};
 
 #[cfg(test)]
 mod tests {
-    use super::*; 
+    use super::*;
 
- 
     // Helper function to create and initialize a test QuicTransport with custom port
     async fn create_test_transport(port: Option<u16>) -> Result<Arc<QuicTransport>> {
         // Create a unique PeerId for testing

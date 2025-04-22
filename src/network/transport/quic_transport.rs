@@ -9,9 +9,6 @@ use std::net::SocketAddr;
 use std::collections::HashMap;
 use std::time::Instant;
 use std::collections::VecDeque;
-use std::io::Write;
-use std::net::{IpAddr, Ipv4Addr, TcpListener};
-use std::ops::Range;
 
 // External crate imports
 use anyhow::{anyhow, Result};
@@ -25,11 +22,14 @@ use tokio::sync::oneshot;
 use uuid;
 
 // Internal module imports
-use super::{NetworkTransport, TransportFactory, TransportOptions, NetworkMessage, NetworkError, PeerId, MessageHandler, ConnectionCallback};
+use super::{NetworkTransport, NetworkMessage, NetworkError, PeerId, MessageHandler, ConnectionCallback};
 use crate::network::discovery::NodeDiscovery;
 use crate::node::NetworkConfig;
 use runar_common::Logger;
- 
+
+// Re-export pick_free_port from parent module for backward compatibility
+pub use super::pick_free_port;
+
 // QUIC Transport Implementation
 //
 // INTENTION: Implement the NetworkTransport trait using high-performance,
@@ -643,7 +643,7 @@ impl QuicTransport {
                                     let ack_result = timeout(Duration::from_secs(5), recv_stream.read_to_end(64)).await;
                                     
                                     let mut pool_full = false;
-                                    let mut state = state_mutex.lock().await;
+                                    let state = state_mutex.lock().await;
                                     let mut idle_streams_guard = state.idle_streams.lock().await;
                                     if idle_streams_guard.len() < max_idle_streams {
                                         logger.debug(format!("Returning stream to pool for {}", target_id));
@@ -687,74 +687,6 @@ impl QuicTransport {
         Ok(tx)
     }
     
-    /// Handle an incoming connection
-    async fn handle_connection(&self, conn: quinn::Connection) -> Result<()> {
-        self.logger.info(format!("Handling new QUIC connection from: {}", conn.remote_address()));
-        loop {
-            match conn.accept_bi().await {
-                Ok((mut send_stream, mut recv_stream)) => {
-                    self.logger.debug("Accepted new QUIC bidirectional stream");
-                    
-                    let handlers_arc: Arc<StdRwLock<Vec<MessageHandler>>> = Arc::clone(&self.handlers);
-                    let logger_clone = self.logger.clone();
-
-                    tokio::spawn(async move {
-                        let max_size = 1024 * 1024; 
-                        match recv_stream.read_to_end(max_size).await {
-                            Ok(data) => {
-                                logger_clone.debug(format!("Received {} bytes on QUIC stream", data.len()));
-                                match bincode::deserialize::<NetworkMessage>(&data) {
-                                    Ok(message) => {
-                                        // Use standard RwLock instead of Tokio RwLock
-                                        if let Ok(handlers_guard) = handlers_arc.read() {
-                                            for handler in handlers_guard.iter() {
-                                                if let Err(e) = handler(message.clone()) {
-                                                    logger_clone.error(format!("Error in QUIC message handler: {}", e));
-                                                }
-                                            }
-                                        }
-                                        
-                                        let ack = b"ACK";
-                                        if let Err(e) = send_stream.write_all(ack).await {
-                                            logger_clone.error(format!("Failed to send QUIC ACK: {}", e));
-                                        }
-                                        if let Err(e) = send_stream.finish().await {
-                                             logger_clone.warn(format!("Failed to finish QUIC send stream after ACK: {}", e));
-                                        }
-                                    },
-                                    Err(e) => {
-                                        logger_clone.error(format!("Failed to deserialize QUIC message: {}", e));
-                                    }
-                                }
-                            },
-                            Err(e) => {
-                                logger_clone.error(format!("Error reading QUIC receive stream: {}", e));
-                            }
-                        }
-                    });
-                },
-                 Err(ConnectionError::ApplicationClosed { .. }) => {
-                    self.logger.info("QUIC Connection closed by application.");
-                    break;
-                },
-                 Err(ConnectionError::LocallyClosed) => {
-                    self.logger.info("QUIC Connection closed locally.");
-                    break;
-                 },
-                 Err(ConnectionError::TimedOut) => {
-                     self.logger.warn("QUIC Connection timed out.");
-                     break;
-                 },
-                 Err(e) => {
-                    self.logger.error(format!("Error accepting QUIC stream: {}", e));
-                    break; 
-                }
-            }
-        }
-        self.logger.info(format!("Finished handling QUIC connection from: {}", conn.remote_address()));
-        Ok(())
-    }
-
     /// Start the background task to clean up idle connections ONLY
     async fn start_cleanup_task(&self) -> Result<JoinHandle<()>> {
         let connections_arc: Arc<TokioRwLock<HashMap<PeerId, Arc<TokioMutex<PeerState>>>>> = Arc::clone(&self.connections);
@@ -841,20 +773,6 @@ impl QuicTransport {
                  eprintln!("Error executing connection callback for peer {}: {}", peer_id, e); 
             }
         }
-    }
-
-    /// Get the local address this transport is bound to
-    fn get_local_address(&self) -> String {
-        // Get the actual bound address from the endpoint
-        if let Ok(ep_lock) = self.endpoint.try_lock() {
-            if let Some(ep) = ep_lock.as_ref() {
-                if let Ok(addr) = ep.local_addr() {
-                    return addr.to_string();
-                }
-            }
-        }
-        // Fallback to the configured address if we can't get the actual one
-        self.network_config.transport_options.bind_address.to_string()
     }
 }
 

@@ -17,12 +17,8 @@
 
 use anyhow::Result;
 use std::hash::{Hash, Hasher};
-use std::collections::HashMap;
-use std::collections::hash_map::DefaultHasher;
 use std::fmt::Debug;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::convert::TryFrom;
 
 /// Type of a path, indicating what kind of resource is being addressed
 ///

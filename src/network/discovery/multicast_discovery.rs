@@ -23,7 +23,6 @@ use super::{NodeDiscovery, NodeInfo, DiscoveryOptions, DiscoveryListener};
 use crate::network::transport::PeerId;
 
 // Default multicast address and port
-const DEFAULT_MULTICAST_ADDR: &str = "239.255.42.98";
 const DEFAULT_MULTICAST_PORT: u16 = 45678;
 
 // Message formats for multicast communication
@@ -46,17 +45,6 @@ impl MulticastMessage {
             MulticastMessage::DiscoveryRequest(_) => None, // Requests don't inherently have a sender ID in this structure
         }
     }
-    
-    // Helper to set sender ID (useful for sender task)
-    // Consumes self and returns a new message, might need adjustment based on usage
-    fn with_sender_id(mut self, sender: PeerId) -> Self {
-         match &mut self {
-            MulticastMessage::Announce(ref mut info) => info.peer_id = sender,
-            MulticastMessage::Goodbye(ref mut id) => *id = sender,
-            MulticastMessage::DiscoveryRequest(_) => {}, // No ID field
-        }
-        self
-    }
 }
 
 // Define DiscoveryCallback type alias for clarity
@@ -75,8 +63,6 @@ pub struct MulticastDiscovery {
     sender_task: Mutex<Option<JoinHandle<()>>>,   
     announce_task: Mutex<Option<JoinHandle<()>>>, 
     cleanup_task: Mutex<Option<JoinHandle<()>>>,  
-    // Discovery callback field 
-    discovery_callback: RwLock<Option<DiscoveryCallback>>, 
     // Multicast address field
     multicast_addr: Arc<Mutex<SocketAddr>>, 
 }
@@ -125,7 +111,6 @@ impl MulticastDiscovery {
             sender_task: Mutex::new(None), 
             announce_task: Mutex::new(None),
             cleanup_task: Mutex::new(None),
-            discovery_callback: RwLock::new(None),
         };
         
         // Initialize the tasks

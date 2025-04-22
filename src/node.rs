@@ -10,7 +10,7 @@ use std::future::Future;
 use std::io::Read;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
 use tokio::sync::{oneshot, RwLock};
 use uuid::Uuid;
@@ -22,9 +22,6 @@ use env_logger;
 use chrono;
 use rcgen;
 use rustls;
-use std::ops::Range;
-use std::net::{TcpListener, SocketAddr, IpAddr, Ipv4Addr};
-use runar_common::utils::Component as RunarComponent;
 use rustls::{Certificate, PrivateKey};
 
 use crate::network::{
@@ -32,8 +29,7 @@ use crate::network::{
     ServiceCapability, ActionCapability
 };
 use crate::network::transport::{
-    NetworkTransport, NetworkMessage, MessageCallback, PeerId, 
-    BaseNetworkTransport, MessageHandler, QuicTransport, QuicTransportOptions
+    NetworkTransport, NetworkMessage, MessageCallback, PeerId, MessageHandler, QuicTransport, QuicTransportOptions
 };
 use crate::routing::TopicPath;
 use crate::services::{
@@ -1220,7 +1216,7 @@ impl Node {
                 handler_index + 1, remote_handlers.len(), topic_path));
             
             // Create request context
-            let mut context = RequestContext::new(&topic_path, self.logger.clone());
+            let context = RequestContext::new(&topic_path, self.logger.clone());
             
             // For remote handlers, we don't have the registration path
             // In the future, we should enhance the remote handler registry to include registration paths
