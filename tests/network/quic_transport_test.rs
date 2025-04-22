@@ -62,10 +62,7 @@ mod tests {
             transport_options, 
             logger
         );
-        
-        // Initialize the transport
-        transport.initialize().await?;
-        
+         
         // Start the transport
         transport.start().await?;
 

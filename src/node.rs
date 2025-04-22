@@ -27,7 +27,7 @@ use crate::network::{
 };
 use crate::network::transport::{
     NetworkTransport, NetworkMessage, MessageCallback, PeerId, 
-    BaseNetworkTransport, MessageHandler
+    BaseNetworkTransport, MessageHandler, QuicTransport, QuicTransportOptions
 };
 use crate::routing::TopicPath;
 use crate::services::{
@@ -261,9 +261,13 @@ pub struct NetworkConfig {
     pub transport_options: HashMap<String, String>,
     pub bind_address: String,
     
+    /// QUIC transport options (fully configured)
+    pub quic_options: QuicTransportOptions,
+    
     /// Discovery configuration
     pub discovery_enabled: bool,
     pub discovery_providers: Vec<DiscoveryProviderConfig>,
+    pub discovery_options: DiscoveryOptions,
     
     /// Advanced options
     pub connection_timeout_ms: u32,
@@ -279,43 +283,81 @@ pub enum TransportType {
     // Add other transport types as needed
 }
 
-/// Discovery provider configuration
+/// Discovery provider configuration using proper typed options instead of string hashmaps
 #[derive(Clone, Debug)]
-pub struct DiscoveryProviderConfig {
-    pub provider_type: DiscoveryProviderType,
-    pub options: HashMap<String, String>,
+pub enum DiscoveryProviderConfig {
+    /// Multicast discovery configuration
+    Multicast(MulticastDiscoveryOptions),
+    
+    /// Static discovery configuration
+    Static(StaticDiscoveryOptions),
+    
+    // Other discovery types can be added here as needed
 }
 
-/// Discovery provider type
+/// Options specific to multicast discovery
 #[derive(Clone, Debug)]
-pub enum DiscoveryProviderType {
-    Multicast,
-    Static,
-    // Add other discovery types as needed
+pub struct MulticastDiscoveryOptions {
+    /// Multicast group address
+    pub multicast_group: String,
+    
+    /// Announcement interval 
+    pub announce_interval: Duration,
+    
+    /// Discovery timeout
+    pub discovery_timeout: Duration,
+    
+    /// Time-to-live for discovered nodes
+    pub node_ttl: Duration,
+    
+    /// Whether to use multicast for discovery
+    pub use_multicast: bool,
+    
+    /// Whether to only discover on local network
+    pub local_network_only: bool,
+}
+
+/// Options specific to static discovery
+#[derive(Clone, Debug)]
+pub struct StaticDiscoveryOptions {
+    /// List of static node addresses
+    pub node_addresses: Vec<String>,
+    
+    /// Refresh interval for checking static nodes
+    pub refresh_interval: Duration,
 }
 
 impl DiscoveryProviderConfig {
     pub fn default_multicast() -> Self {
-        let mut options = HashMap::new();
-        options.insert("multicast_group".to_string(), DEFAULT_MULTICAST_ADDR.to_string());
-        options.insert("port".to_string(), "43210".to_string());
-        
-        Self {
-            provider_type: DiscoveryProviderType::Multicast,
-            options,
-        }
+        DiscoveryProviderConfig::Multicast(MulticastDiscoveryOptions {
+            multicast_group: DEFAULT_MULTICAST_ADDR.to_string(),
+            announce_interval: Duration::from_secs(30),
+            discovery_timeout: Duration::from_secs(30),
+            node_ttl: Duration::from_secs(60),
+            use_multicast: true,
+            local_network_only: true,
+        })
+    }
+    
+    pub fn default_static(addresses: Vec<String>) -> Self {
+        DiscoveryProviderConfig::Static(StaticDiscoveryOptions {
+            node_addresses: addresses,
+            refresh_interval: Duration::from_secs(60),
+        })
     }
 }
-//IFX: move allthe config types to a theyr proper files.. node.rs is too crowded at the moment. keep kjust node config here .. to make it easy toread.. all others move.
+
 impl NetworkConfig {
     pub fn new(bind_address: String) -> Self {
         Self {
             load_balancer: Arc::new(RoundRobinLoadBalancer::new()),
             transport_type: TransportType::Quic,
             transport_options: HashMap::new(),
-            bind_address,
+            bind_address: bind_address.clone(),
+            quic_options: QuicTransportOptions::new(),
             discovery_enabled: true,
             discovery_providers: vec![DiscoveryProviderConfig::default_multicast()],
+            discovery_options: DiscoveryOptions::default(),
             connection_timeout_ms: 30000,
             request_timeout_ms: 30000,
             max_connections: 100,
@@ -333,6 +375,11 @@ impl NetworkConfig {
         self
     }
     
+    pub fn with_quic_options(mut self, options: QuicTransportOptions) -> Self {
+        self.quic_options = options;
+        self
+    }
+    
     pub fn with_discovery_enabled(mut self, enabled: bool) -> Self {
         self.discovery_enabled = enabled;
         self
@@ -340,6 +387,11 @@ impl NetworkConfig {
     
     pub fn with_discovery_provider(mut self, provider: DiscoveryProviderConfig) -> Self {
         self.discovery_providers.push(provider);
+        self
+    }
+    
+    pub fn with_discovery_options(mut self, options: DiscoveryOptions) -> Self {
+        self.discovery_options = options;
         self
     }
 }
@@ -690,65 +742,39 @@ impl Node {
         
         // Get the configuration
         let config = &self.config;
-        let network_options = config.network_config.as_ref()
+        let network_config = config.network_config.as_ref()
             .ok_or_else(|| anyhow!("Network configuration is required"))?;
         
         // Initialize the network transport
         if self.network_transport.read().await.is_none() {
             self.logger.info("Initializing network transport...");
             
-            // Create network transport
-            let node_identifier = PeerId::new(
-                self.node_id.clone(),
-            );
+            // Create network transport using the factory pattern based on transport_type
+            let node_identifier = PeerId::new(self.node_id.clone());
+            let transport = self.create_transport(network_config, node_identifier.clone()).await?;
             
-            let transport_options: HashMap<String, String> = network_options
-                .transport_options
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            
-            // This is simplified for now - we'd create the appropriate transport type based on config
-            let transport = {
-                // Instead of using TransportType enum which doesn't exist, just create the transport directly
-                self.logger.info("Using BaseNetworkTransport as default");
-                Box::new(BaseNetworkTransport::new(
-                    node_identifier.clone(),
-                    self.logger.clone()
-                )) as Box<dyn NetworkTransport>
-            };
+            self.logger.info("Initializing network transport layer...");
+            transport.start().await.map_err(|e| anyhow!("Failed to initialize transport: {}", e))?;
             
             // Store the transport
             let mut transport_guard = self.network_transport.write().await;
             *transport_guard = Some(transport);
         }
+         
         
         // Initialize discovery if enabled
-        if network_options.discovery_enabled {
-            self.logger.info("Initializing node discovery...");
+        if network_config.discovery_enabled {
+            self.logger.info("Initializing node discovery providers...");
             
             // Create node identifier
-            let node_identifier = PeerId::new(
-                self.node_id.clone(),
-            );
+            let node_identifier = PeerId::new(self.node_id.clone());
             
-            // Support only multicast discovery for now
-            let discovery_options = DiscoveryOptions::default();
-            let discovery = MulticastDiscovery::new(discovery_options).await?;
+            // Check if any providers are configured
+            if network_config.discovery_providers.is_empty() {
+                return Err(anyhow!("No discovery providers configured"));
+            }
             
-            // Handle the discovery separately from the network transport
-            // Set up the discovery listener to handle node discoveries
-            let node_clone = self.clone();
-            discovery.set_discovery_listener(Box::new(move |node_info| {
-                let node = node_clone.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = node.handle_discovered_node(node_info).await {
-                        node.logger.error(format!("Failed to handle discovered node: {}", e));
-                    }
-                });
-            })).await?;
-            
-            // Create node info for this node
+            // Create node info for this node once (used for all providers)
             let local_info = NodeInfo {
                 peer_id: node_identifier,
                 network_ids: self.config.network_ids.clone(),
@@ -757,16 +783,90 @@ impl Node {
                 last_seen: SystemTime::now(),
             };
             
-            // Start announcing this node's presence
-            discovery.start_announcing(local_info).await?;
-            
-            // Store discovery in its own field or variable instead of network_transport
-            // For now, we'll just initialize and use it directly
+            // Iterate through all discovery providers and initialize each one
+            for provider_config in &network_config.discovery_providers {
+                // Create a discovery provider instance
+                let provider_type = format!("{:?}", provider_config);
+                
+                match self.create_discovery_provider(
+                    provider_config,
+                    network_config.discovery_options.clone()
+                ).await {
+                    Ok(discovery) => {
+                        // Configure discovery listener for this provider
+                        let node_clone = self.clone();
+                        let provider_type_clone = provider_type.clone();
+                        
+                        discovery.set_discovery_listener(Box::new(move |node_info| {
+                            let node = node_clone.clone();
+                            let provider_type_clone = provider_type_clone.clone();
+                            
+                            tokio::spawn(async move {
+                                if let Err(e) = node.handle_discovered_node(node_info).await {
+                                    node.logger.error(format!("Failed to handle node discovered by {} provider: {}", 
+                                        provider_type_clone, e));
+                                }
+                            });
+                        })).await?;
+                        
+                        // Start announcing on this provider
+                        self.logger.info(format!("Starting to announce on {:?} discovery provider", provider_type));
+                        discovery.start_announcing(local_info.clone()).await?;
+                    },
+                    Err(e) => {
+                        // Log the error but continue with other providers
+                        self.logger.error(format!("Failed to initialize {:?} discovery provider: {}", 
+                            provider_type, e));
+                        // Don't return immediately, try other providers
+                    }
+                }
+            }
         }
         
         self.logger.info("Networking started successfully");
         
         Ok(())
+    }
+
+    /// Create a transport instance based on the transport type in the config
+    async fn create_transport(&self, network_config: &NetworkConfig, node_id: PeerId) -> Result<Box<dyn NetworkTransport>> {
+        match network_config.transport_type {
+            TransportType::Quic => {
+                self.logger.info("Creating QUIC transport using pre-configured options");
+                
+                // Use the pre-configured QuicTransportOptions directly
+                let transport = QuicTransport::new(
+                    node_id,
+                    network_config.quic_options.clone(),
+                    self.logger.clone()
+                );
+                
+                Ok(Box::new(transport) as Box<dyn NetworkTransport>)
+            },
+            // Add other transport types as they're implemented
+        }
+    }
+
+    /// Create a discovery provider based on the provider type
+    async fn create_discovery_provider(
+        &self, 
+        provider_config: &DiscoveryProviderConfig,
+        discovery_options: DiscoveryOptions
+    ) -> Result<Box<dyn NodeDiscovery>> {
+        match provider_config {
+            DiscoveryProviderConfig::Multicast(options) => {
+                self.logger.info("Creating MulticastDiscovery provider with config options");
+                // Use .await to properly wait for the async initialization
+                let discovery = MulticastDiscovery::new(discovery_options).await?;
+                Ok(Box::new(discovery) as Box<dyn NodeDiscovery>)
+            },
+            DiscoveryProviderConfig::Static(options) => {
+                self.logger.info("Static discovery provider configured");
+                // Implement static discovery when needed
+                Err(anyhow!("Static discovery provider not yet implemented"))
+            },
+            // Add other discovery types as they're implemented
+        }
     }
 
     /// Handle discovery of a new node

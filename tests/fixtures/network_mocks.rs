@@ -24,10 +24,7 @@ impl MockTransport {
 
 #[async_trait]
 impl NetworkTransport for MockTransport {
-    async fn initialize(&self) -> Result<(), NetworkError> {
-        Ok(())
-    }
-    
+ 
     async fn start(&self) -> Result<(), NetworkError> {
         Ok(())
     }

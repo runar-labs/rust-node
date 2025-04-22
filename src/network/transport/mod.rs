@@ -120,9 +120,7 @@ pub type ConnectionCallback = Arc<dyn Fn(PeerId, bool) -> BoxFuture<'static, Res
 /// Network transport interface
 #[async_trait]
 pub trait NetworkTransport: Send + Sync {
-    /// Initializes the transport layer
-    async fn initialize(&self) -> Result<(), NetworkError>;
-    
+ 
     /// Start listening for incoming connections
     async fn start(&self) -> Result<(), NetworkError>;
     
@@ -296,11 +294,7 @@ pub enum NetworkError {
 
 #[async_trait]
 impl NetworkTransport for BaseNetworkTransport {
-    /// Initializes the transport layer
-    async fn initialize(&self) -> Result<(), NetworkError> {
-        Ok(())
-    }
-    
+ 
     /// Start listening for incoming connections
     async fn start(&self) -> Result<(), NetworkError> {
         Ok(())

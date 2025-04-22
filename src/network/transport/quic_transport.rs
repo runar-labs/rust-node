@@ -874,8 +874,9 @@ impl rustls::client::ServerCertVerifier for NoVerification {
 
 #[async_trait]
 impl NetworkTransport for QuicTransport {
-    /// Initializes the transport layer
-    async fn initialize(&self) -> Result<(), NetworkError> {
+ 
+    /// Start listening for incoming connections
+    async fn start(&self) -> Result<(), NetworkError> {
         self.logger.info("Initializing QUIC transport...");
         let endpoint = self.setup_endpoint().await
             .map_err(|e| NetworkError::TransportError(format!("Failed to setup endpoint: {}", e)))?;
@@ -915,11 +916,7 @@ impl NetworkTransport for QuicTransport {
         Ok(())
     }
     
-    /// Start listening for incoming connections
-    async fn start(&self) -> Result<(), NetworkError> {
-        // Current implementation - call appropriate methods
-        Ok(())
-    }
+     
     
     /// Stop listening for incoming connections
     async fn stop(&self) -> Result<(), NetworkError> {
