@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::future::Future;
 use std::pin::Pin;
 use thiserror::Error;
+use rand;
 
 // Internal module declarations
 pub mod quic_transport;
@@ -70,23 +71,53 @@ pub struct TransportOptions {
 
 impl Default for TransportOptions {
     fn default() -> Self {
+
+        let port = pick_free_port(50000..51000).unwrap_or(0);
+        let bind_address = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
+        println!("TransportOptions Using port: {}", port);
         Self {
             timeout: Some(Duration::from_secs(30)),
             max_message_size: Some(1024 * 1024), // 1MB default
-            bind_address: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), pick_free_port(50000..51000).unwrap_or(0)),
+            bind_address: bind_address,
         }
     }
 }
 
-/// Find a free port in the given range
+/// Find a free port in the given range using a randomized approach
 pub fn pick_free_port(port_range: Range<u16>) -> Option<u16> {
-    for port in port_range {
-        if let Ok(listener) = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port)) {
-            let bound_port = listener.local_addr().ok()?.port();
-            return Some(bound_port);
+    use rand::Rng;
+    let mut rng = rand::rng();
+    let range_size = port_range.end - port_range.start;
+    
+    // Limit number of attempts to avoid infinite loops
+    let max_attempts = 50;
+    let mut attempts = 0;
+    
+    while attempts < max_attempts {
+        // Generate a random port within the range
+        let port = port_range.start + rng.random_range(0..range_size);
+        
+        // Check if the port is available for TCP
+        if let Ok(tcp_listener) = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port)) {
+            let bound_port = match tcp_listener.local_addr() {
+                Ok(addr) => addr.port(),
+                Err(_) => {
+                    attempts += 1;
+                    continue;
+                }
+            };
+            
+            // For UDP/QUIC protocols, we should also check UDP availability
+            // Since TcpListener only checks TCP ports
+            if let Ok(_) = std::net::UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), bound_port)) {
+                return Some(bound_port);
+            }
         }
+        
+        attempts += 1;
     }
-    None
+    
+    None // No free port found after max attempts
 }
 
 /// Types of messages that can be sent over the network

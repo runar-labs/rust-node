@@ -277,6 +277,36 @@ pub struct NetworkConfig {
     pub request_timeout_ms: u32,
     pub max_connections: u32,
     pub max_message_size: usize,
+    pub max_chunk_size: usize,
+}
+
+impl std::fmt::Display for NetworkConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "NetworkConfig: transport:{:?} bind_address:{} msg_size:{}/{}KB timeout:{}ms",
+            self.transport_type,
+            self.transport_options.bind_address,
+            self.max_message_size / 1024,
+            self.max_chunk_size / 1024,
+            self.connection_timeout_ms
+        )?;
+
+        if let Some(discovery_options) = &self.discovery_options {
+            if discovery_options.use_multicast {
+                write!(
+                    f,
+                    " multicast discovery interval:{}ms timeout:{}ms",
+                    discovery_options.announce_interval.as_millis(),
+                    discovery_options.discovery_timeout.as_millis()
+                )?;
+            }
+
+            write!(f, " ttl:{}s", discovery_options.node_ttl.as_secs())?;
+        }
+
+        Ok(())
+    }
 }
 
 /// Transport type enum
@@ -352,19 +382,20 @@ impl DiscoveryProviderConfig {
 
 
 impl NetworkConfig {
-    /// Create a new NetworkConfig with default settings for binding address
+    /// Creates a new network configuration with default settings.
     pub fn new() -> Self {
         Self {
             load_balancer: Arc::new(RoundRobinLoadBalancer::new()),
-            transport_type: TransportType::Quic, 
+            transport_type: TransportType::Quic,
             transport_options: TransportOptions::default(),
             quic_options: None,
-            discovery_providers: Vec::new(), // No providers by default
-            discovery_options: None, // No discovery options by default (disabled)
-            connection_timeout_ms: 30000,
-            request_timeout_ms: 30000,
+            discovery_providers: Vec::new(),
+            discovery_options: Some(DiscoveryOptions::default()),
+            connection_timeout_ms: 60000,
+            request_timeout_ms: 10000,
             max_connections: 100,
-            max_message_size: 1024 * 1024, // 1MB
+            max_message_size: 1024 * 1024 * 10, // 10MB default
+            max_chunk_size: 1024 * 1024 * 10, // 10MB default
         }
     }
     
@@ -406,6 +437,7 @@ impl NetworkConfig {
             request_timeout_ms: 30000,
             max_connections: 100,
             max_message_size: 1024 * 1024, // 1MB
+            max_chunk_size: 1024 * 1024, // 1MB
         }
     }
     
@@ -487,6 +519,26 @@ impl NodeConfig {
     pub fn with_request_timeout(mut self, timeout_ms: u64) -> Self {
         self.request_timeout_ms = timeout_ms;
         self
+    }
+}
+
+// Implement Display for NodeConfig to enable logging it directly
+impl std::fmt::Display for NodeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "NodeConfig: node_id:{} network:{} request_timeout:{}ms",
+            self.node_id,
+            self.default_network_id,
+            self.request_timeout_ms
+        )?;
+        
+        // Add network configuration details if available
+        if let Some(network_config) = &self.network_config {
+            write!(f, " {}", network_config)?;
+        }
+        
+        Ok(())
     }
 }
 
@@ -794,6 +846,9 @@ impl Node {
         let config = &self.config;
         let network_config = config.network_config.as_ref()
             .ok_or_else(|| anyhow!("Network configuration is required"))?;
+        
+        // Log the network configuration
+        self.logger.info(format!("Network config: {}", network_config));
         
         // Initialize the network transport
         if self.network_transport.read().await.is_none() {

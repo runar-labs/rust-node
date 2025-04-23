@@ -3,7 +3,7 @@ use runar_common::logging::Logger;
 use runar_common::Component;
 use runar_common::types::ValueType;
 use runar_node::network::transport::QuicTransportOptions;
-use runar_node::node::{Node, NodeConfig, NetworkConfig, TransportType};
+use runar_node::node::{Node, NodeConfig, NetworkConfig, TransportType, LoggingConfig, LogLevel};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -28,34 +28,43 @@ mod remote_action_tests {
     /// the remote calls
     #[tokio::test]
     async fn test_remote_action_call() -> Result<()> {
-        // Set up logging
+        // Configure logging to ensure test logs are displayed
+        let logging_config = LoggingConfig::new()
+            .with_default_level(LogLevel::Info);
+        logging_config.apply();
+        
+        // Set up logger
         let logger = Logger::new_root(Component::Network, "remote_action_test");
         logger.info("Starting remote action call test");
   
+
+        // Create math services with different paths using the fixture
+        let math_service1 = MathService::new("math1", "math1");
+        let math_service2 = MathService::new("math2", "math2");
+
+
         // Create node configurations with network enabled
         let node1_config = NodeConfig::new("node1", "test")
             .with_network_config(NetworkConfig::with_quic(false)
             .with_multicast_discovery());
 
+        logger.info(format!("Node1 config: {}", node1_config));
         
-            
+        let mut node1 = Node::new(node1_config).await?;
+        node1.add_service(math_service1).await?;
+
+        node1.start().await?;
+        //after node 1 starts and use the port .. next node will use the next available port
+
         let node2_config = NodeConfig::new("node2", "test")
             .with_network_config(NetworkConfig::with_quic(false).with_multicast_discovery());
 
-        // Create the nodes
-        let mut node1 = Node::new(node1_config).await?;
+        logger.info(format!("Node2 config: {}", node2_config));
+          
         let mut node2 = Node::new(node2_config).await?;
 
-        // Create math services with different paths using the fixture
-        let math_service1 = MathService::new("math1", "math/service1");
-        let math_service2 = MathService::new("math2", "math/service2");
 
-        // Add services to nodes - don't wrap in Box
-        node1.add_service(math_service1).await?;
         node2.add_service(math_service2).await?;
-
-        // Start nodes
-        node1.start().await?;
         node2.start().await?;
 
         // Wait for discovery and connection to happen (simple sleep)

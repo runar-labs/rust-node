@@ -6,10 +6,11 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
-use std::net::{SocketAddr, IpAddr, Ipv4Addr};
+use std::net::{SocketAddr, IpAddr, Ipv4Addr, TcpListener, UdpSocket};
 use std::str::FromStr;
+use std::collections::HashSet;
 
-use runar_node::network::transport::{NetworkTransport, NetworkMessage, PeerId, TransportOptions};
+use runar_node::network::transport::{NetworkTransport, NetworkMessage, PeerId, TransportOptions, pick_free_port};
 use runar_node::network::transport::quic_transport::QuicTransport;
 use runar_node::node::NetworkConfig;
 use runar_common::types::ValueType;
@@ -57,6 +58,49 @@ mod tests {
 
         // Return Arc for easier sharing if needed
         Ok(Arc::new(transport))
+    }
+    
+    #[test]
+    fn test_pick_free_port_randomized() -> Result<()> {
+        // Define a port range for testing
+        let port_range = 40000..50000;
+        
+        // Try to find multiple free ports to verify randomization
+        let mut ports = HashSet::new();
+        
+        // Try finding 5 different ports
+        for _ in 0..5 {
+            match pick_free_port(port_range.clone()) {
+                Some(port) => {
+                    // The port should be within the specified range
+                    assert!(port >= port_range.start);
+                    assert!(port < port_range.end);
+                    
+                    // Verify the port is actually usable for TCP
+                    let tcp_result = TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port));
+                    assert!(tcp_result.is_ok(), "Port {} should be available for TCP", port);
+                    
+                    // Verify the port is actually usable for UDP
+                    let udp_result = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port));
+                    assert!(udp_result.is_ok(), "Port {} should be available for UDP", port);
+                    
+                    // Save the port to check for randomness
+                    ports.insert(port);
+                },
+                None => {
+                    // It's unlikely that no free port is found in such a large range,
+                    // so this is probably an error
+                    panic!("Failed to find a free port in range {:?}", port_range);
+                }
+            }
+        }
+        
+        // If the function is properly randomized, we should get multiple different ports
+        // However, there's a small chance all 5 could be the same just by coincidence
+        // So we'll just check that we found at least 2 different ports
+        assert!(ports.len() > 1, "Expected multiple different ports, found: {:?}", ports);
+        
+        Ok(())
     }
 
     #[tokio::test]
