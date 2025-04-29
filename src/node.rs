@@ -23,6 +23,7 @@ use chrono;
 use rcgen;
 use rustls;
 use rustls::{Certificate, PrivateKey};
+use std::net::SocketAddr;
 
 use crate::network::{
     discovery::{MulticastDiscovery, NodeDiscovery, NodeInfo, DiscoveryOptions, DEFAULT_MULTICAST_ADDR},
@@ -988,15 +989,49 @@ impl Node {
             self.logger.warn("Received node discovery event but networking is disabled");
             return Ok(());
         }
+
+        let peer_id = node_info.peer_id.clone();
         
-        self.logger.info(format!("Discovery listener found node: {}", node_info.peer_id));
+        self.logger.info(format!("Discovery listener found node: {}", peer_id));
         
-        // For now, just log discovery events
-        // The actual connection logic will be handled by the Node
-        self.logger.info(format!("Node discovery event for: {}", node_info.peer_id));
+        let transport = self.network_transport.read().await;
+        if let Some(transport) = transport.as_ref() {
+            let address = node_info.address.clone();
+            // Store the discovered node using the transport
+            if let Ok(_) = transport.register_discovered_node(node_info.clone()).await {
+                self.logger.info(format!("Added node to registry: {}", peer_id));
+                
+                // Always connect to the peer for now
+                let should_connect = true; // In future: perform public/private key checks
+                
+                if should_connect {
+                     
+                    // Try to connect to the peer
+                    if let Ok(addr) = address.parse::<SocketAddr>() {
+                        match transport.connect(peer_id.clone(), addr).await {
+                            Ok(_) => {
+                                self.logger.info(format!("Connected to peer: {}", peer_id));
+                                
+                                // Process capabilities AFTER successful connection
+                                let _ = self.process_remote_capabilities(
+                                    node_info.clone()
+                                ).await;
+                            },
+                            Err(e) => self.logger.warn(format!("Failed to connect to peer: {} - Error: {}", 
+                                peer_id, e))
+                        }
+                    } else {
+                        self.logger.warn(format!("Invalid address format for peer: {} - {}", 
+                            peer_id, address));
+                    }
+                }
+            } else {
+                self.logger.warn(format!("Failed to add node to registry: {}", peer_id));
+            }
+        } else {
+            self.logger.warn("No transport available to handle discovered node");
+        }
         
-        // We'll implement proper connection logic elsewhere to avoid the
-        // linter errors related to mutability and type mismatches
         Ok(())
     }
 
@@ -1327,8 +1362,8 @@ impl Node {
     async fn process_remote_capabilities(
         &self,
         node_info: NodeInfo,
-        capabilities: Vec<String>,
     ) -> Result<Vec<Arc<RemoteService>>> {
+        let capabilities = node_info.capabilities.clone();
         self.logger.info(format!(
             "Processing {} capabilities from node {}",
             capabilities.len(),

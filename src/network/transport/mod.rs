@@ -42,19 +42,19 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PeerId {
     /// Unique ID for this node within the network
-    pub node_id: String,
+    pub public_key: String,
 }
 
 impl PeerId {
     /// Create a new NodeIdentifier
     pub fn new(node_id: String) -> Self {
-        Self {node_id }
+        Self {public_key: node_id }
     }
 }
 
 impl fmt::Display for PeerId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.node_id)
+        write!(f, "{}", self.public_key)
     }
 }
 
@@ -214,7 +214,7 @@ pub trait NetworkTransport: Send + Sync {
     async fn stop_discovery(&self) -> Result<(), NetworkError>;
     
     /// Register a discovered node
-    async fn register_discovered_node(&self, node_id: PeerId) -> Result<(), NetworkError>;
+    async fn register_discovered_node(&self, node_info: NodeInfo) -> Result<(), NetworkError>;
     
     /// Get all discovered nodes
     fn get_discovered_nodes(&self) -> Vec<PeerId>;
@@ -433,7 +433,7 @@ impl NetworkTransport for BaseNetworkTransport {
     }
     
     /// Register a discovered node
-    async fn register_discovered_node(&self, node_id: PeerId) -> Result<(), NetworkError> {
+    async fn register_discovered_node(&self, node_info: NodeInfo) -> Result<(), NetworkError> {
         Ok(())
     }
     

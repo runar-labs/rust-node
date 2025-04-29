@@ -28,7 +28,7 @@ mod tests {
         let node_id = PeerId::new(format!("test-node-{}", Uuid::new_v4()));
         
         // Create logger using runar_common Logger
-        let logger = Logger::new_root(Component::Network, &node_id.node_id);
+        let logger = Logger::new_root(Component::Network, &node_id.public_key);
 
         // Create a NetworkConfig with QUIC, using false to disable certificate validation
         let mut config = NetworkConfig::with_quic(false);

@@ -257,7 +257,7 @@ mod tests {
         // Find the node
         let found_node = discovery.find_node("net1", "node1").await.unwrap();
         assert!(found_node.is_some());
-        assert_eq!(found_node.unwrap().peer_id.node_id, "node1");
+        assert_eq!(found_node.unwrap().peer_id.public_key, "node1");
 
         // Find non-existent node
         let not_found_node = discovery.find_node("net1", "node2").await.unwrap();

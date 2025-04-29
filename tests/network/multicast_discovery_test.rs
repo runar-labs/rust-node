@@ -158,9 +158,9 @@ mod tests {
         assert!(discovered_nodes2.len() >= 1, "Discovery 2 should have found at least 1 node");
         
         // Check if discovery1 contains node2's info
-        let node1_found_node2 = discovered_nodes1.iter().any(|n| n.peer_id.node_id == "node2");
+        let node1_found_node2 = discovered_nodes1.iter().any(|n| n.peer_id.public_key == "node2");
         // Check if discovery2 contains node1's info
-        let node2_found_node1 = discovered_nodes2.iter().any(|n| n.peer_id.node_id == "node1");
+        let node2_found_node1 = discovered_nodes2.iter().any(|n| n.peer_id.public_key == "node1");
         
         // Print discovery results for debugging
         println!("Discovery 1 found {} nodes", discovered_nodes1.len());

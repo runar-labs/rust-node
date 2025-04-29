@@ -42,8 +42,9 @@ pub struct PeerEntry {
     pub networks: HashSet<String>,
     /// Additional metadata about the peer (arbitrary key-value pairs)
     pub metadata: HashMap<String, String>,
-    /// Public key of the peer (used as the primary identifier)
-    pub public_key: Option<String>,
+    // REMOVED DO NOT PUT BACK - the is is in info.peer_id 
+    // Public key of the peer (used as the primary identifier)
+    // pub public_key: Option<String>,
 }
 
 impl PeerEntry {
@@ -59,19 +60,10 @@ impl PeerEntry {
             status_changed: SystemTime::now(),
             connection_attempts: 0,
             networks,
-            metadata: HashMap::new(),
-            public_key: None,
+            metadata: HashMap::new(), 
         }
     }
-
-    /// Create a new peer entry with a public key and network ID
-    pub fn with_public_key(info: NodeInfo, public_key: String, network_id: String) -> Self {
-        // Call the updated new method with network_id
-        let mut entry = Self::new(info, network_id);
-        entry.public_key = Some(public_key);
-        entry
-    }
-
+ 
     /// Update the peer's status
     pub fn set_status(&mut self, status: PeerStatus) {
         self.status = status;
@@ -112,7 +104,7 @@ impl Default for PeerRegistryOptions {
 
 /// Registry of known peers in the network
 pub struct PeerRegistry {
-    /// Peers indexed by their public key (when available) or node_id
+    /// Peers indexed by their peer_id
     peers: RwLock<HashMap<String, PeerEntry>>,
     /// Index of network_id to peer_ids for efficient lookup
     network_index: RwLock<HashMap<String, HashSet<String>>>,
@@ -142,44 +134,64 @@ impl PeerRegistry {
     }
 
     /// Add a peer to the registry
-    pub fn add_peer(&self, info: NodeInfo, public_key: Option<String>, network_id: String) -> Result<()> {
-        let node_id = info.peer_id.node_id.clone();
-        let peer_id = Self::get_peer_id(public_key.as_deref(), &node_id);
+    pub fn add_peer(&self, info: NodeInfo) -> Result<()> {
+        // Use public key from the peer_id as the unique identifier
+        let peer_id_str = info.peer_id.public_key.clone();
         
-        let mut peers = self.peers.write().unwrap();
-        let mut network_index = self.network_index.write().unwrap();
-        
-        // Get or create the network's peer set using the passed network_id
-        let network_peers = network_index
-            .entry(network_id.clone())
-            .or_insert_with(HashSet::new);
+        // First check if any of the networks have reached their limit
+        {
+            let network_index = self.network_index.read().unwrap();
             
-        // Check if we've reached the limit for this network
-        if !network_peers.contains(&peer_id) && 
-           network_peers.len() >= self.options.max_peers_per_network {
-            anyhow::bail!("Maximum number of peers reached for network {}", network_id);
+            for network_id in &info.network_ids {
+                if let Some(network_peers) = network_index.get(network_id) {
+                    // Only check networks where this peer isn't already registered
+                    if !network_peers.contains(&peer_id_str) && 
+                       network_peers.len() >= self.options.max_peers_per_network {
+                        anyhow::bail!("Maximum number of peers reached for network {}", network_id);
+                    }
+                }
+            }
         }
         
-        // Add to the network index
-        network_peers.insert(peer_id.clone());
+        // If we've passed the limit checks, now we can modify the data structures
+        let mut peers = self.peers.write().unwrap();
+        let mut network_index = self.network_index.write().unwrap();
+
+        // Add the peer to all networks
+        for network_id in &info.network_ids {
+            // Get or create the network's peer set
+            let network_peers = network_index
+                .entry(network_id.clone())
+                .or_insert_with(HashSet::new);
+                
+            // Add to the network index
+            network_peers.insert(peer_id_str.clone());
+        }
         
         // Add or update peer
-        if let Some(existing_peer) = peers.get_mut(&peer_id) {
+        if let Some(existing_peer) = peers.get_mut(&peer_id_str) {
             // Update existing peer
-            existing_peer.add_network(network_id.clone());
             existing_peer.info.last_seen = info.last_seen;
             // Only update address and capabilities if they exist
             if !info.address.is_empty() {
                 existing_peer.info.address = info.address;
             }
             existing_peer.info.capabilities.extend(info.capabilities);
+            
+            // Update network IDs in the peer entry
+            for network_id in &info.network_ids {
+                existing_peer.add_network(network_id.clone());
+            }
         } else {
-            // Create new peer, passing the network_id argument
-            let peer_entry = match public_key {
-                Some(pk) => PeerEntry::with_public_key(info, pk, network_id.clone()),
-                None => PeerEntry::new(info, network_id.clone()),
-            };
-            peers.insert(peer_id, peer_entry);
+            // Create new peer entry with all its networks
+            let mut peer_entry = PeerEntry::new(info.clone(), info.network_ids[0].clone());
+            
+            // Add remaining networks if there are more than one
+            for network_id in info.network_ids.iter().skip(1) {
+                peer_entry.add_network(network_id.clone());
+            }
+            
+            peers.insert(peer_id_str, peer_entry);
         }
             
         Ok(())
@@ -187,7 +199,7 @@ impl PeerRegistry {
 
     /// Update a peer's status
     pub fn update_peer_status(&self, id: &PeerId, status: PeerStatus, public_key: Option<&str>) -> Result<()> {
-        let peer_id = Self::get_peer_id(public_key, &id.node_id);
+        let peer_id = Self::get_peer_id(public_key, &id.public_key);
         
         let mut peers = self.peers.write().unwrap();
         
@@ -201,7 +213,7 @@ impl PeerRegistry {
 
     /// Update a peer's last seen time and other information
     pub fn update_peer(&self, info: NodeInfo, public_key: Option<&str>, network_id: String) -> Result<()> {
-        let peer_id = Self::get_peer_id(public_key, &info.peer_id.node_id);
+        let peer_id = Self::get_peer_id(public_key, &info.peer_id.public_key);
         
         let mut peers = self.peers.write().unwrap();
         let mut network_index = self.network_index.write().unwrap();
@@ -229,7 +241,7 @@ impl PeerRegistry {
 
     /// Find a peer by its node identifier and optional public key
     pub fn find_peer(&self, id: &PeerId, public_key: Option<&str>) -> Option<PeerEntry> {
-        let peer_id = Self::get_peer_id(public_key, &id.node_id);
+        let peer_id = Self::get_peer_id(public_key, &id.public_key);
         
         let peers = self.peers.read().unwrap();
         peers.get(&peer_id).cloned()
@@ -272,7 +284,7 @@ impl PeerRegistry {
 
     /// Remove a peer from the registry
     pub fn remove_peer(&self, id: &PeerId, public_key: Option<&str>) -> Result<()> {
-        let peer_id = Self::get_peer_id(public_key, &id.node_id);
+        let peer_id = Self::get_peer_id(public_key, &id.public_key);
         
         let mut peers = self.peers.write().unwrap();
         let mut network_index = self.network_index.write().unwrap();

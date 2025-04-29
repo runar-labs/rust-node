@@ -89,7 +89,7 @@ impl NetworkTransport for MockTransport {
         Ok(())
     }
     
-    async fn register_discovered_node(&self, _node_id: PeerId) -> Result<(), NetworkError> {
+    async fn register_discovered_node(&self, _node_info: NodeInfo) -> Result<(), NetworkError> {
         Ok(())
     }
     

@@ -29,7 +29,7 @@ impl MockNodeDiscovery {
 
     /// Add a test node to the discovery service
     pub fn add_test_node(&self, info: NodeInfo) {
-        self.nodes.write().unwrap().insert(info.peer_id.node_id.clone(), info);
+        self.nodes.write().unwrap().insert(info.peer_id.public_key.clone(), info);
     }
 
     /// Clear all nodes

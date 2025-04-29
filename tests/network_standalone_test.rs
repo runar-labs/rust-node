@@ -134,7 +134,7 @@ impl NetworkTransport for MockTransport {
         Ok(())
     }
 
-    async fn register_discovered_node(&self, _node_id: PeerId) -> Result<(), NetworkError> {
+    async fn register_discovered_node(&self, _node_info: NodeInfo) -> Result<(), NetworkError> {
         self.logger.debug("MockTransport: register_discovered_node called");
         Ok(())
     }
@@ -244,7 +244,7 @@ impl NodeDiscovery for MockDiscovery {
         
         for network_nodes in nodes.values() {
             if let Some(node) = network_nodes.iter()
-                .find(|node| node.peer_id.node_id == node_id) {
+                .find(|node| node.peer_id.public_key == node_id) {
                 return Ok(Some(node.clone()));
             }
         }
@@ -308,7 +308,7 @@ async fn test_discovery_register_node() -> Result<()> {
     
     // Check if listener was notified
     if let Some(received_node_info) = rx.recv().await {
-        assert_eq!(received_node_info.peer_id.node_id, "node-1");
+        assert_eq!(received_node_info.peer_id.public_key, "node-1");
         assert_eq!(received_node_info.address, "localhost:8080");
     } else {
         return Err(anyhow!("Discovery listener was not notified"));
@@ -344,7 +344,7 @@ async fn test_transport_handler() -> Result<()> {
     
     // Check if the message was received through the channel
     if let Some(received) = rx.recv().await {
-        assert_eq!(received.source.node_id, "node-2");
+        assert_eq!(received.source.public_key, "node-2");
         assert_eq!(received.message_type, "Request");
         // Check payload instead of old correlation_id field
         assert_eq!(received.payloads.len(), 1);

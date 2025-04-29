@@ -32,14 +32,14 @@ async fn test_memory_discovery_register_and_find() -> Result<()> {
     // Find nodes in the network
     let nodes = discovery.discover_nodes(Some("test-network")).await?;
     assert_eq!(nodes.len(), 1);
-    assert_eq!(nodes[0].peer_id.node_id, "node-1");
+    assert_eq!(nodes[0].peer_id.public_key, "node-1");
     assert_eq!(nodes[0].address, "localhost:8080");
     
     // Find by ID
     let found = discovery.find_node("test-network", "node-1").await?;
     assert!(found.is_some());
     let found_node = found.unwrap();
-    assert_eq!(found_node.peer_id.node_id, "node-1");
+    assert_eq!(found_node.peer_id.public_key, "node-1");
     
     // Try to find a non-existent node
     let not_found = discovery.find_node("test-network", "node-2").await?;
@@ -174,12 +174,12 @@ async fn test_memory_discovery_cleanup() -> Result<()> {
     println!("After cleanup: found {} nodes", nodes_after_sleep.len());
     
     // Fresh node should still be there
-    let fresh_node_exists = nodes_after_sleep.iter().any(|n| n.peer_id.node_id == "fresh-node");
+    let fresh_node_exists = nodes_after_sleep.iter().any(|n| n.peer_id.public_key == "fresh-node");
     assert!(fresh_node_exists, "Fresh node should still exist after cleanup");
     
     // Stale node might be removed, but test is vulnerable to timing issues
     // So we make the test more informative without failing it unnecessarily
-    let stale_node_exists = nodes_after_sleep.iter().any(|n| n.peer_id.node_id == "stale-node");
+    let stale_node_exists = nodes_after_sleep.iter().any(|n| n.peer_id.public_key == "stale-node");
     if stale_node_exists {
         println!("Note: Stale node still exists, cleanup task might not have run yet - this is a timing issue, not necessarily a bug");
     } else {
@@ -259,12 +259,12 @@ async fn test_memory_discovery_multiple_networks() -> Result<()> {
     // Verify nodes in network-1
     let nodes1 = discovery.discover_nodes(Some("network-1")).await?;
     assert_eq!(nodes1.len(), 1);
-    assert_eq!(nodes1[0].peer_id.node_id, "node-1");
+    assert_eq!(nodes1[0].peer_id.public_key, "node-1");
     
     // Verify nodes in network-2
     let nodes2 = discovery.discover_nodes(Some("network-2")).await?;
     assert_eq!(nodes2.len(), 1);
-    assert_eq!(nodes2[0].peer_id.node_id, "node-2");
+    assert_eq!(nodes2[0].peer_id.public_key, "node-2");
     
     // Verify empty for non-existent network
     let nodes3 = discovery.discover_nodes(Some("network-3")).await?;

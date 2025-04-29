@@ -23,7 +23,8 @@ use uuid;
 
 // Internal module imports
 use super::{NetworkTransport, NetworkMessage, NetworkError, PeerId, MessageHandler, ConnectionCallback};
-use crate::network::discovery::NodeDiscovery;
+use super::peer_registry::{PeerRegistry, PeerStatus, PeerEntry};
+use crate::network::discovery::{NodeDiscovery, NodeInfo};
 use crate::node::NetworkConfig;
 use runar_common::Logger;
 
@@ -307,6 +308,8 @@ pub struct QuicTransport {
     pending_requests: Arc<TokioRwLock<HashMap<String, oneshot::Sender<NetworkMessage>>>>,
     /// Connection status callback
     connection_callback: Arc<TokioRwLock<Option<ConnectionCallback>>>,
+    /// Registry of known peers
+    peer_registry: Arc<PeerRegistry>,
     /// Logger instance
     logger: Logger,
 }
@@ -314,6 +317,9 @@ pub struct QuicTransport {
 impl QuicTransport {
     /// Create a new QUIC transport
     pub fn new(node_id: PeerId, network_config: NetworkConfig, logger: Logger) -> Self {
+        // Create peer registry with default options
+        let peer_registry = Arc::new(PeerRegistry::new());
+        
         Self {
             node_id,
             network_config,
@@ -325,6 +331,7 @@ impl QuicTransport {
             message_tx: Arc::new(TokioMutex::new(None)),
             pending_requests: Arc::new(TokioRwLock::new(HashMap::new())),
             connection_callback: Arc::new(TokioRwLock::new(None)),
+            peer_registry,
             logger,
         }
     }
@@ -432,7 +439,7 @@ impl QuicTransport {
             }
             Err(_) => { // Timeout
                 logger.error("Timeout waiting for handshake stream.");
-                conn.close(2u32.into(), b"handshake timeout");
+                conn.close(2u32.into(), b"handshakeconnections timeout");
                 return Err(anyhow!("Handshake timeout"));
             }
         };
@@ -774,6 +781,74 @@ impl QuicTransport {
             }
         }
     }
+
+    /// Register a peer in the registry
+    pub fn register_peer(&self, info: NodeInfo) -> Result<()> {
+        self.logger.debug(format!("Registering peer {} ", info.peer_id));
+        self.peer_registry.add_peer(info)
+    }
+
+    
+    /// Update peer status
+    pub fn update_peer_status(&self, peer_id: &PeerId, status: PeerStatus) -> Result<()> {
+        self.logger.debug(format!("Updating peer {} status to {:?}", peer_id, status));
+        self.peer_registry.update_peer_status(peer_id, status, None)
+    }
+    
+    /// Find a peer by its ID
+    pub fn find_peer(&self, peer_id: &PeerId) -> Option<PeerEntry> {
+        self.peer_registry.find_peer(peer_id, None)
+    }
+    
+    /// Find all peers in a specific network
+    pub fn find_peers_by_network(&self, network_id: &str) -> Vec<PeerEntry> {
+        self.peer_registry.find_peers_by_network(network_id)
+    }
+    
+    /// Get peer registry
+    pub fn peer_registry(&self) -> Arc<PeerRegistry> {
+        self.peer_registry.clone()
+    }
+
+    /// Connect to a peer using its peer ID
+    pub async fn connect_to_peer(&self, peer_id: &PeerId) -> Result<()> {
+        // Find the peer in the registry
+        if let Some(peer) = self.find_peer(peer_id) {
+            // Update status to connecting
+            self.update_peer_status(peer_id, PeerStatus::Connecting)?;
+            
+            self.logger.info(format!("Connecting to peer: {} at {}", peer_id, peer.info.address));
+            
+            // Get address from peer info
+            let address = match peer.info.address.parse::<SocketAddr>() {
+                Ok(addr) => addr,
+                Err(e) => {
+                    self.logger.error(format!("Failed to parse peer address: {} - {}", peer.info.address, e));
+                    self.update_peer_status(peer_id, PeerStatus::Disconnected)?;
+                    return Err(anyhow::anyhow!("Invalid peer address: {}", e));
+                }
+            };
+            
+            // Attempt connection
+            match self.connect(peer_id.clone(), address).await {
+                Ok(_) => {
+                    // Update status to connected
+                    self.update_peer_status(peer_id, PeerStatus::Connected)?;
+                    self.logger.info(format!("Successfully connected to peer: {}", peer_id));
+                    Ok(())
+                },
+                Err(e) => {
+                    // Update status to disconnected
+                    self.update_peer_status(peer_id, PeerStatus::Disconnected)?;
+                    self.logger.error(format!("Failed to connect to peer: {} - {}", peer_id, e));
+                    Err(anyhow::anyhow!("Connection failed: {}", e))
+                }
+            }
+        } else {
+            self.logger.warn(format!("Attempted to connect to unknown peer: {}", peer_id));
+            Err(anyhow::anyhow!("Peer not found in registry: {}", peer_id))
+        }
+    }
 }
 
 /// Certificate verifier that accepts any certificate
@@ -837,9 +912,7 @@ impl NetworkTransport for QuicTransport {
         self.logger.info("QUIC transport initialized successfully.");
         Ok(())
     }
-    
-     
-    
+ 
     /// Stop listening for incoming connections
     async fn stop(&self) -> Result<(), NetworkError> {
         self.logger.info("Stopping QUIC transport...");
@@ -900,7 +973,30 @@ impl NetworkTransport for QuicTransport {
         // Check if server_task is Some
         true
     }
-    
+
+
+    /// Register a discovered node
+    async fn register_discovered_node(&self, node_info: NodeInfo) -> Result<(), NetworkError> {
+        let node_id = node_info.peer_id.clone();
+        // If we already have this node in the registry, just return success
+        if let Some(_entry) = self.peer_registry.find_peer(&node_id, None) {
+            self.logger.debug(format!("Node {} already in registry", node_id));
+            return Ok(());
+        }
+         
+        // Add to registry using our helper method
+        match self.register_peer(node_info) {
+            Ok(_) => {
+                self.logger.debug(format!("Added node {} to registry", node_id));
+                Ok(())
+            },
+            Err(e) => {
+                self.logger.error(format!("Failed to add node {} to registry: {}", node_id, e));
+                Err(NetworkError::DiscoveryError(format!("Failed to register node: {}", e)))
+            }
+        }
+    }
+
     /// Get the local address this transport is bound to
     fn get_local_address(&self) -> String {
         // Get the actual bound address from the endpoint
@@ -950,7 +1046,7 @@ impl NetworkTransport for QuicTransport {
 
         // Attempt connection
         self.logger.debug(format!("Establishing QUIC connection to {} at {}", target_peer_id, target_addr));
-        let connection = endpoint.connect_with(client_config, target_addr, &self.get_local_node_id().node_id)  
+        let connection = endpoint.connect_with(client_config, target_addr, &self.get_local_node_id().public_key)  
             .map_err(|e| NetworkError::ConnectionError(format!("Failed to initiate connection: {}", e)))?
             .await // Await the connection attempt
             .map_err(|e| NetworkError::ConnectionError(format!("QUIC connection failed for {}: {}", target_peer_id, e)))?;
@@ -1190,12 +1286,6 @@ impl NetworkTransport for QuicTransport {
     /// Stop node discovery process
     async fn stop_discovery(&self) -> Result<(), NetworkError> {
         self.logger.warn("stop_discovery not implemented for QuicTransport");
-        Ok(())
-    }
-    
-    /// Register a discovered node
-    async fn register_discovered_node(&self, node_id: PeerId) -> Result<(), NetworkError> {
-        self.logger.warn(format!("register_discovered_node not implemented for QuicTransport (called for {})", node_id));
         Ok(())
     }
     
