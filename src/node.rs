@@ -154,6 +154,7 @@ impl From<Component> for ComponentKey {
             Component::Service => ComponentKey::Service,
             Component::Database => ComponentKey::Database,
             Component::Network => ComponentKey::Network,
+            Component::NetworkDiscovery => ComponentKey::Network,
             Component::System => ComponentKey::System,
             Component::Custom(name) => ComponentKey::Custom(name.to_string()),
         }
@@ -556,7 +557,7 @@ pub struct Node {
     pub(crate) network_ids: Vec<String>,
 
     /// The node ID for this node
-    pub(crate) node_id: String,
+    pub(crate) peer_id: PeerId,
 
     /// Configuration for this node
     pub(crate) config: NodeConfig,
@@ -625,12 +626,12 @@ impl Node {
         logger.info(format!("Initializing node '{}' in network '{}'...", node_id, default_network_id));
         
         let service_registry = Arc::new(ServiceRegistry::new(logger.clone()));
-        
+        let peer_id = PeerId::new(node_id.clone());
         // Create the node (with network fields now included)
         let mut node = Self {
             network_id: default_network_id,
             network_ids,
-            node_id,
+            peer_id,
             config,
             logger: logger.clone(),
             service_registry,
@@ -856,8 +857,8 @@ impl Node {
             self.logger.info("Initializing network transport...");
             
             // Create network transport using the factory pattern based on transport_type
-            let node_identifier = PeerId::new(self.node_id.clone());
-            let transport = self.create_transport(network_config, node_identifier.clone()).await?;
+            let node_identifier =   self.peer_id.clone();
+            let transport = self.create_transport(network_config, node_identifier).await?;
             
             self.logger.info("Initializing network transport layer...");
             transport.start().await.map_err(|e| anyhow!("Failed to initialize transport: {}", e))?;
@@ -872,22 +873,12 @@ impl Node {
         if let Some(discovery_options) = &network_config.discovery_options {
             self.logger.info("Initializing node discovery providers...");
             
-            // Create node identifier
-            let node_identifier = PeerId::new(self.node_id.clone());
-            
             // Check if any providers are configured
             if network_config.discovery_providers.is_empty() {
                 return Err(anyhow!("No discovery providers configured"));
             }
-            
-            // Create node info for this node once (used for all providers)
-            let local_info = NodeInfo {
-                peer_id: node_identifier,
-                network_ids: self.config.network_ids.clone(),
-                address: self.get_node_address().await?,
-                capabilities: self.get_node_capabilities().await?,
-                last_seen: SystemTime::now(),
-            };
+
+            let local_info = self.get_local_node_info().await?;
             
             // Iterate through all discovery providers and initialize each one
             for provider_config in &network_config.discovery_providers {
@@ -917,7 +908,7 @@ impl Node {
                         
                         // Start announcing on this provider
                         self.logger.info(format!("Starting to announce on {:?} discovery provider", provider_type));
-                        discovery.start_announcing(local_info.clone()).await?;
+                        discovery.start_announcing().await?;
                     },
                     Err(e) => {
                         // Log the error but continue with other providers
@@ -966,11 +957,14 @@ impl Node {
         provider_config: &DiscoveryProviderConfig,
         discovery_options: Option<DiscoveryOptions>
     ) -> Result<Box<dyn NodeDiscovery>> {
+
+        let node_info = self.get_local_node_info().await?;
+
         match provider_config {
             DiscoveryProviderConfig::Multicast(options) => {
                 self.logger.info("Creating MulticastDiscovery provider with config options");
                 // Use .await to properly wait for the async initialization
-                let discovery = MulticastDiscovery::new(discovery_options.unwrap_or_default()).await?;
+                let discovery = MulticastDiscovery::new(node_info , discovery_options.unwrap_or_default(),self.logger.with_component(Component::NetworkDiscovery)).await?;
                 Ok(Box::new(discovery) as Box<dyn NodeDiscovery>)
             },
             DiscoveryProviderConfig::Static(options) => {
@@ -1050,7 +1044,7 @@ impl Node {
             "Request" => self.handle_network_request(message).await,
             "Response" => self.handle_network_response(message).await,
             "Event" => self.handle_network_event(message).await,
-            "Discovery" => self.handle_network_discovery(message).await,
+            // "Discovery" => self.handle_network_discovery(message).await,
             _ => {
                 self.logger.warn(format!("Unknown message type: {}", message.message_type));
                 Ok(())
@@ -1076,11 +1070,7 @@ impl Node {
         
         // Get local node ID (remains the same)
         let network_transport = self.network_transport.read().await;
-        let local_node_id = if let Some(transport) = network_transport.as_ref() {
-            transport.get_local_node_id()
-        } else {
-            PeerId::new(self.node_id.clone())
-        };
+        let local_peer_id = self.peer_id.clone();
         drop(network_transport); // Drop read lock
         
         // Process the request locally using extracted topic and params
@@ -1089,7 +1079,7 @@ impl Node {
             Ok(response) => {
                 // Create response message - destination is the original source
                 let response_message = NetworkMessage {
-                    source: local_node_id.clone(), // Source is now self
+                    source: local_peer_id , // Source is now self
                     destination: message.source.clone(), // Destination is the original request source
                     message_type: "Response".to_string(),
                     // Response payload tuple: Use original topic, response data, and original correlation_id
@@ -1122,7 +1112,7 @@ impl Node {
                     ("message".to_string(), ValueType::String(e.to_string())),
                 ]));
                 let response_message = NetworkMessage {
-                    source: local_node_id.clone(), // Source is self
+                    source: local_peer_id , // Source is self
                     destination: message.source.clone(), // Destination is the original request source
                     message_type: "Error".to_string(), // Use Error type
                     // Error payload tuple: Use original topic, error details, and original correlation_id
@@ -1243,18 +1233,7 @@ impl Node {
         
         Ok(())
     }
-
-    /// Handle a network discovery message
-    async fn handle_network_discovery(&self, _message: NetworkMessage) -> Result<()> {
-        // Skip if networking is not enabled
-        if !self.supports_networking {
-            self.logger.warn("Received network discovery message but networking is disabled");
-            return Ok(());
-        }
-        
-        // Implementation will be provided when network discovery is implemented
-        Ok(())
-    }
+ 
 
     /// Handle a request for a specific action - Stable API DO NOT CHANGE UNLESS EXPLICITLY ASKED TO DO SO!
     ///
@@ -1370,41 +1349,22 @@ impl Node {
             node_info.peer_id
         ));
         
-        // Check if capabilities is empty BEFORE consuming it with into_iter
+        // Check if capabilities is empty
         if capabilities.is_empty() {
             self.logger.info("Received empty capabilities list.");
             return Ok(Vec::new()); // Nothing to process
         }
 
-        // Deserialize capability strings into ServiceCapability structs
-        let service_capabilities: Vec<ServiceCapability> = capabilities.into_iter()
-            .filter_map(|cap_str| {
-                match serde_json::from_str::<ServiceCapability>(&cap_str) {
-                    Ok(cap) => Some(cap),
-                    Err(e) => {
-                        self.logger.warn(format!("Failed to deserialize capability string: {}. Error: {}", cap_str, e));
-                        None
-                    }
-                }
-            })
-            .collect();
-
-        // Check if deserialization yielded any results
-        if service_capabilities.is_empty() {
-            self.logger.warn("Failed to deserialize any valid capabilities from non-empty input list.");
-            return Ok(Vec::new());
-        }
-
         // Get the local node ID
-        let local_node_id = PeerId::new(self.node_id.clone());
+        let local_peer_id = self.peer_id.clone();
         
         // Create RemoteService instances directly
         let remote_services = match RemoteService::create_from_capabilities(
             node_info.peer_id.clone(),
-            service_capabilities,
+            capabilities,
             self.network_transport.clone(),
             self.logger.clone(), // Pass logger directly
-            local_node_id,
+            local_peer_id,
             self.config.request_timeout_ms,
         ).await {
             Ok(services) => services,
@@ -1674,128 +1634,48 @@ impl Node {
         Ok(capabilities)
     }
 
-    /// Announce local services to a remote node
-    ///
-    /// This method gathers the capabilities of all local services and sends them
-    /// to a newly discovered node.
-    async fn announce_local_services(&self, peer_id: &PeerId) -> Result<()> {
-        // Collect local service capabilities
-        let capabilities = self.collect_local_service_capabilities().await?;
-        
-        if capabilities.is_empty() {
-            self.logger.debug(format!("No services to announce to {}", peer_id));
-            return Ok(());
-        }
-        
-        // Serialize each capability to a JSON string
-        let mut capability_strings = Vec::with_capacity(capabilities.len());
-        
-        for capability in capabilities {
-            match serde_json::to_string(&capability) {
-                Ok(json_str) => {
-                    self.logger.debug(format!(
-                        "Announcing service {} to {} with network_id={} and {} actions",
-                        capability.service_path,
-                        peer_id,
-                        capability.network_id,
-                        capability.actions.len()
-                    ));
-                    capability_strings.push(json_str);
-                },
-                Err(e) => {
-                    self.logger.warn(format!(
-                        "Failed to serialize capability for service {}: {}",
-                        capability.service_path, e
-                    ));
-                    continue;
-                }
-            }
-        }
-        
-        // Prepare topic path for service registry
-        let topic_path = match TopicPath::new("$registry/service_capabilities", &self.network_id) {
-            Ok(path) => path,
-            Err(e) => {
-                return Err(anyhow!("Invalid topic path: {}", e));
-            }
-        };
-        
-        // Prepare message payload with capability strings
-        let node_id = PeerId::new(self.node_id.clone());
-        
-        self.logger.info(format!(
-            "Sending {} service capabilities to {}",
-            capability_strings.len(), peer_id
-        ));
-        
-        // Convert capability strings to ValueType for the payload
-        let payload = match serde_json::to_value(&capability_strings) {
-            Ok(val) => ValueType::from(val),
-            Err(e) => {
-                self.logger.warn(format!("Failed to convert capabilities to payload: {}", e));
-                return Err(anyhow!("Failed to convert capabilities to payload: {}", e));
-            }
-        };
-        
-        // Create network message with capability strings
-        let message = NetworkMessage {
-            source: node_id,
-            destination: peer_id.clone(), // Destination is mandatory
-            message_type: "Request".to_string(),
-            // Ensure correlation_id is String, not Option<String>
-            payloads: vec![(topic_path.as_str().to_string(), payload, Uuid::new_v4().to_string())],
-        };
-        
-        // Since we can't send directly, just log what we would do
-        self.logger.debug(format!("Would send service capabilities to {}", peer_id));
-        
-        Ok(())
-    }
-
     /// Get the node's public network address
     ///
     /// This retrieves the address that other nodes should use to connect to this node.
     async fn get_node_address(&self) -> Result<String> {
-        // Since the local_address method isn't implemented, just return a placeholder
-        Ok("127.0.0.1:0".to_string())
-    }
-
-    /// Get the node's capabilities
-    ///
-    /// This returns a list of capabilities that represent the services this node provides.
-    async fn get_node_capabilities(&self) -> Result<Vec<String>> {
-        //TODO .. need to check if this is used
-        Ok(Vec::new())
-    }
-
-    /// Initialize network transport if available
-    async fn init_network_transport(&mut self) -> Result<()> {
-        // Early return if networking is disabled
+        // If networking is disabled, return empty string
         if !self.supports_networking {
-            self.logger.debug("Network transport initialization skipped - networking is disabled");
-            return Ok(());
-        }
-
-        // Get a mutable reference to the transport
-        let transport = self.network_transport.clone();
-        let mut transport_guard = transport.write().await;
-        
-        if let Some(transport) = transport_guard.as_mut() {
-            self.logger.info("Initializing network transport...".to_string());
-            
-            // Create a message handler
-            let message_handler = self.create_message_handler();
-            
-            self.logger.debug("Transport is initialized, but message handler registration is not implemented yet");
-            
-            // Note: The actual implementation should register the message handler with the transport
-            // This would typically involve a method like transport.register_message_handler(),
-            // but that method isn't implemented yet or has a different signature
-            
-            self.logger.info("Network transport initialized successfully".to_string());
+            return Ok(String::new());
         }
         
-        Ok(())
+        // First, try to get the address from the network transport if available
+        let transport_guard = self.network_transport.read().await;
+        if let Some(transport) = transport_guard.as_ref() {
+            let address = transport.get_local_address();
+            if !address.is_empty() {
+                return Ok(address);
+            }
+        }
+        
+        // If transport is not available or didn't provide an address,
+        // try to get the address from the network config
+        if let Some(network_config) = &self.config.network_config {
+            return Ok(network_config.transport_options.bind_address.to_string());
+        }
+        
+        // If networking is disabled or no address is available, return empty string
+        Ok(String::new())
+    }
+    
+    /// Get information about the local node
+    ///
+    /// INTENTION: Create a complete NodeInfo structure for this node,
+    /// including its network IDs, address, and capabilities.
+    pub async fn get_local_node_info(&self) -> Result<NodeInfo> {
+        let node_info = NodeInfo {
+            peer_id: self.peer_id.clone(),
+            network_ids: self.network_ids.clone(),
+            address: self.get_node_address().await?,
+            capabilities: self.collect_local_service_capabilities().await?,
+            last_seen: std::time::SystemTime::now(),
+        };
+        
+        Ok(node_info)
     }
 
     /// Shutdown the network components
@@ -2044,7 +1924,7 @@ impl Clone for Node {
         Self {
             network_id: self.network_id.clone(),
             network_ids: self.network_ids.clone(),
-            node_id: self.node_id.clone(),
+            peer_id: self.peer_id.clone(),
             config: self.config.clone(),
             service_registry: self.service_registry.clone(),
             logger: self.logger.clone(),

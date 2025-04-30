@@ -8,11 +8,14 @@ use tokio::time;
 
 use runar_node::network::discovery::{NodeDiscovery, NodeInfo, DiscoveryOptions, MemoryDiscovery};
 use runar_node::network::transport::PeerId;
+use runar_node::network::capabilities::{ServiceCapability, ActionCapability, EventCapability};
+use runar_common::logging::{Logger, Component};
 
 #[tokio::test]
 async fn test_memory_discovery_register_and_find() -> Result<()> {
     // Create a discovery instance
-    let discovery = MemoryDiscovery::new();
+    let logger = Logger::new_root(Component::NetworkDiscovery, "test_memory_discovery");
+    let discovery = MemoryDiscovery::new(logger);
     
     // Initialize with default options
     discovery.init(DiscoveryOptions::default()).await?;
@@ -22,7 +25,30 @@ async fn test_memory_discovery_register_and_find() -> Result<()> {
         peer_id: PeerId::new("node-1".to_string()),
         network_ids: vec!["test-network".to_string()],
         address: "localhost:8080".to_string(),
-        capabilities: vec!["request".to_string(), "event".to_string()],
+        capabilities: vec![
+            ServiceCapability {
+                network_id: "test-network".to_string(),
+                service_path: "test/service".to_string(),
+                name: "Test Service".to_string(),
+                version: "1.0.0".to_string(),
+                description: "Test service for unit tests".to_string(),
+                actions: vec![
+                    ActionCapability {
+                        name: "request".to_string(),
+                        description: "Test request".to_string(),
+                        params_schema: None,
+                        result_schema: None,
+                    }
+                ],
+                events: vec![
+                    EventCapability {
+                        topic: "event".to_string(),
+                        description: "Test event".to_string(),
+                        data_schema: None,
+                    }
+                ],
+            }
+        ],
         last_seen: SystemTime::now(),
     };
     
@@ -54,7 +80,8 @@ async fn test_memory_discovery_register_and_find() -> Result<()> {
 #[tokio::test]
 async fn test_memory_discovery_update_node() -> Result<()> {
     // Create a discovery instance
-    let discovery = MemoryDiscovery::new();
+    let logger = Logger::new_root(Component::NetworkDiscovery, "test_memory_discovery");
+    let discovery = MemoryDiscovery::new(logger);
     
     // Initialize with default options
     discovery.init(DiscoveryOptions::default()).await?;
@@ -67,7 +94,24 @@ async fn test_memory_discovery_update_node() -> Result<()> {
         peer_id: PeerId::new("node-1".to_string()),
         network_ids: vec!["test-network".to_string()],
         address: "localhost:8080".to_string(),
-        capabilities: vec!["request".to_string()],
+        capabilities: vec![
+            ServiceCapability {
+                network_id: "test-network".to_string(),
+                service_path: "test/service".to_string(),
+                name: "Test Service".to_string(),
+                version: "1.0.0".to_string(),
+                description: "Test service for unit tests".to_string(),
+                actions: vec![
+                    ActionCapability {
+                        name: "request".to_string(),
+                        description: "Test request".to_string(),
+                        params_schema: None,
+                        result_schema: None,
+                    }
+                ],
+                events: vec![],
+            }
+        ],
         last_seen: now,
     };
     
@@ -83,7 +127,30 @@ async fn test_memory_discovery_update_node() -> Result<()> {
         peer_id: PeerId::new("node-1".to_string()),
         network_ids: vec!["test-network".to_string()],
         address: "localhost:8080".to_string(),
-        capabilities: vec!["request".to_string(), "event".to_string()],
+        capabilities: vec![
+            ServiceCapability {
+                network_id: "test-network".to_string(),
+                service_path: "test/service".to_string(),
+                name: "Test Service".to_string(),
+                version: "1.0.0".to_string(),
+                description: "Test service for unit tests".to_string(),
+                actions: vec![
+                    ActionCapability {
+                        name: "request".to_string(),
+                        description: "Test request".to_string(),
+                        params_schema: None,
+                        result_schema: None,
+                    }
+                ],
+                events: vec![
+                    EventCapability {
+                        topic: "event".to_string(),
+                        description: "Test event".to_string(),
+                        data_schema: None,
+                    }
+                ],
+            }
+        ],
         last_seen: updated_now,
     };
     
@@ -93,8 +160,10 @@ async fn test_memory_discovery_update_node() -> Result<()> {
     let found = discovery.find_node("test-network", "node-1").await?;
     assert!(found.is_some());
     let found_node = found.unwrap();
-    assert_eq!(found_node.capabilities.len(), 2);
-    assert!(found_node.capabilities.contains(&"event".to_string()));
+    // Check that the capabilities include both the request capability and event capability
+    assert_eq!(found_node.capabilities.len(), 1);
+    assert_eq!(found_node.capabilities[0].actions.len(), 1);
+    assert_eq!(found_node.capabilities[0].events.len(), 1);
     assert!(found_node.last_seen > now);
     
     // Shutdown
@@ -106,7 +175,8 @@ async fn test_memory_discovery_update_node() -> Result<()> {
 #[tokio::test]
 async fn test_memory_discovery_cleanup() -> Result<()> {
     // Create a discovery instance
-    let discovery = MemoryDiscovery::new();
+    let logger = Logger::new_root(Component::NetworkDiscovery, "test_memory_discovery");
+    let discovery = MemoryDiscovery::new(logger);
     
     // Initialize with custom options for quicker testing
     let options = DiscoveryOptions {
@@ -128,7 +198,24 @@ async fn test_memory_discovery_cleanup() -> Result<()> {
         peer_id: PeerId::new("fresh-node".to_string()),
         network_ids: vec!["test-network".to_string()],
         address: "localhost:8080".to_string(),
-        capabilities: vec!["request".to_string()],
+        capabilities: vec![
+            ServiceCapability {
+                network_id: "test-network".to_string(),
+                service_path: "test/service".to_string(),
+                name: "Test Service".to_string(),
+                version: "1.0.0".to_string(),
+                description: "Test service for unit tests".to_string(),
+                actions: vec![
+                    ActionCapability {
+                        name: "request".to_string(),
+                        description: "Test request".to_string(),
+                        params_schema: None,
+                        result_schema: None,
+                    }
+                ],
+                events: vec![],
+            }
+        ],
         last_seen: now,
     };
     
@@ -138,7 +225,24 @@ async fn test_memory_discovery_cleanup() -> Result<()> {
         peer_id: PeerId::new("stale-node".to_string()),
         network_ids: vec!["test-network".to_string()],
         address: "localhost:8081".to_string(),
-        capabilities: vec!["request".to_string()],
+        capabilities: vec![
+            ServiceCapability {
+                network_id: "test-network".to_string(),
+                service_path: "test/service".to_string(),
+                name: "Test Service".to_string(),
+                version: "1.0.0".to_string(),
+                description: "Test service for unit tests".to_string(),
+                actions: vec![
+                    ActionCapability {
+                        name: "request".to_string(),
+                        description: "Test request".to_string(),
+                        params_schema: None,
+                        result_schema: None,
+                    }
+                ],
+                events: vec![],
+            }
+        ],
         last_seen: now, // Same timestamp, but we'll simulate cleanup differently
     };
     
@@ -161,7 +265,24 @@ async fn test_memory_discovery_cleanup() -> Result<()> {
         peer_id: PeerId::new("fresh-node".to_string()),
         network_ids: vec!["test-network".to_string()],
         address: "localhost:8080".to_string(),
-        capabilities: vec!["request".to_string()],
+        capabilities: vec![
+            ServiceCapability {
+                network_id: "test-network".to_string(),
+                service_path: "test/service".to_string(),
+                name: "Test Service".to_string(),
+                version: "1.0.0".to_string(),
+                description: "Test service for unit tests".to_string(),
+                actions: vec![
+                    ActionCapability {
+                        name: "request".to_string(),
+                        description: "Test request".to_string(),
+                        params_schema: None,
+                        result_schema: None,
+                    }
+                ],
+                events: vec![],
+            }
+        ],
         last_seen: SystemTime::now(),  // Current timestamp
     };
     discovery.update_node(updated_fresh_node.clone()).await?;
@@ -195,7 +316,8 @@ async fn test_memory_discovery_cleanup() -> Result<()> {
 #[tokio::test]
 async fn test_memory_discovery_max_nodes() -> Result<()> {
     // Create a discovery instance
-    let discovery = MemoryDiscovery::new();
+    let logger = Logger::new_root(Component::NetworkDiscovery, "test_memory_discovery");
+    let discovery = MemoryDiscovery::new(logger);
     
     // Note: In the current API, MemoryDiscovery doesn't enforce a maximum node limit
     // This test needs to be adapted or skipped
@@ -209,7 +331,24 @@ async fn test_memory_discovery_max_nodes() -> Result<()> {
             peer_id: PeerId::new(format!("node-{}", i)),
             network_ids: vec!["test-network".to_string()],
             address: format!("localhost:808{}", i),
-            capabilities: vec!["request".to_string()],
+            capabilities: vec![
+                ServiceCapability {
+                    network_id: "test-network".to_string(),
+                    service_path: "test/service".to_string(),
+                    name: "Test Service".to_string(),
+                    version: "1.0.0".to_string(),
+                    description: "Test service for unit tests".to_string(),
+                    actions: vec![
+                        ActionCapability {
+                            name: "request".to_string(),
+                            description: "Test request".to_string(),
+                            params_schema: None,
+                            result_schema: None,
+                        }
+                    ],
+                    events: vec![],
+                }
+            ],
             last_seen: SystemTime::now(),
         };
         
@@ -230,7 +369,8 @@ async fn test_memory_discovery_max_nodes() -> Result<()> {
 #[tokio::test]
 async fn test_memory_discovery_multiple_networks() -> Result<()> {
     // Create a discovery instance
-    let discovery = MemoryDiscovery::new();
+    let logger = Logger::new_root(Component::NetworkDiscovery, "test_memory_discovery");
+    let discovery = MemoryDiscovery::new(logger);
     
     // Initialize with default options
     discovery.init(DiscoveryOptions::default()).await?;
@@ -240,7 +380,24 @@ async fn test_memory_discovery_multiple_networks() -> Result<()> {
         peer_id: PeerId::new("node-1".to_string()),
         network_ids: vec!["network-1".to_string()],
         address: "localhost:8080".to_string(),
-        capabilities: vec!["request".to_string()],
+        capabilities: vec![
+            ServiceCapability {
+                network_id: "network-1".to_string(),
+                service_path: "test/service".to_string(),
+                name: "Test Service".to_string(),
+                version: "1.0.0".to_string(),
+                description: "Test service for unit tests".to_string(),
+                actions: vec![
+                    ActionCapability {
+                        name: "request".to_string(),
+                        description: "Test request".to_string(),
+                        params_schema: None,
+                        result_schema: None,
+                    }
+                ],
+                events: vec![],
+            }
+        ],
         last_seen: SystemTime::now(),
     };
     
@@ -248,7 +405,24 @@ async fn test_memory_discovery_multiple_networks() -> Result<()> {
         peer_id: PeerId::new("node-2".to_string()),
         network_ids: vec!["network-2".to_string()],
         address: "localhost:8081".to_string(),
-        capabilities: vec!["request".to_string()],
+        capabilities: vec![
+            ServiceCapability {
+                network_id: "network-2".to_string(),
+                service_path: "test/service".to_string(),
+                name: "Test Service".to_string(),
+                version: "1.0.0".to_string(),
+                description: "Test service for unit tests".to_string(),
+                actions: vec![
+                    ActionCapability {
+                        name: "request".to_string(),
+                        description: "Test request".to_string(),
+                        params_schema: None,
+                        result_schema: None,
+                    }
+                ],
+                events: vec![],
+            }
+        ],
         last_seen: SystemTime::now(),
     };
     

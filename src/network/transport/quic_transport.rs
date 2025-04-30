@@ -1046,7 +1046,7 @@ impl NetworkTransport for QuicTransport {
 
         // Attempt connection
         self.logger.debug(format!("Establishing QUIC connection to {} at {}", target_peer_id, target_addr));
-        let connection = endpoint.connect_with(client_config, target_addr, &self.get_local_node_id().public_key)  
+        let connection = endpoint.connect_with(client_config, target_addr, "runar-node")  
             .map_err(|e| NetworkError::ConnectionError(format!("Failed to initiate connection: {}", e)))?
             .await // Await the connection attempt
             .map_err(|e| NetworkError::ConnectionError(format!("QUIC connection failed for {}: {}", target_peer_id, e)))?;

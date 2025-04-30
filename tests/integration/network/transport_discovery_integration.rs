@@ -114,7 +114,7 @@ impl TestNode {
             last_seen: SystemTime::now(),
         };
         
-        self.discovery.start_announcing(node_info).await?;
+        self.discovery.start_announcing().await?;
         Ok(())
     }
     
@@ -786,7 +786,7 @@ async fn test_multicast_discovery() -> Result<()> {
     
     println!("Starting node1 announcements");
     // Start announcing node1 directly
-    discovery1.start_announcing(node1_info.clone()).await?;
+    discovery1.start_announcing( ).await?;
     
     // Allow time for multicast messages to propagate
     println!("Waiting for multicast messages to propagate");
@@ -839,7 +839,7 @@ async fn test_multicast_discovery() -> Result<()> {
     
     println!("Starting node2 announcements");
     // Now start announcing node2 directly
-    discovery2.start_announcing(node2_info.clone()).await?;
+    discovery2.start_announcing( ).await?;
     
     // Allow more time for discovery
     println!("Waiting for more discovery");

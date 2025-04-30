@@ -78,7 +78,7 @@ mod remote_action_tests {
         add_params_map.insert("b".to_string(), ValueType::Number(3.0.into()));
         let add_params = ValueType::Map(add_params_map);
         
-        let response = node2.request("math/service1/add".to_string(), add_params).await?;
+        let response = node2.request("math1/add", add_params).await?;
         if let Some(ValueType::Number(result)) = response.data {
             assert_eq!(result, 8.0);
             logger.info(format!("Add operation succeeded: 5 + 3 = {}", result));
@@ -93,8 +93,9 @@ mod remote_action_tests {
         multiply_params_map.insert("b".to_string(), ValueType::Number(7.0.into()));
         let multiply_params = ValueType::Map(multiply_params_map);
         
-        let response = node1.request("math/service2/multiply".to_string(), multiply_params).await?;
+        let response = node1.request("math2/multiply", multiply_params).await?;
         if let Some(ValueType::Number(result)) = response.data {
+            assert_eq!(result, 28.0);
             logger.info(format!("Multiply operation succeeded: 4 * 7 = {}", result));
         } else {
             return Err(anyhow::anyhow!("Unexpected response type: {:?}", response.data));

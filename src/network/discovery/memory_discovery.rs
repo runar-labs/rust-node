@@ -4,7 +4,7 @@
 // for development and testing. This implementation maintains a list of nodes 
 // in memory and doesn't use actual network protocols for discovery.
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock, Mutex};
@@ -14,9 +14,9 @@ use tokio::time;
 
 use super::{NodeDiscovery, NodeInfo, DiscoveryOptions, DiscoveryListener};
 use crate::network::transport::PeerId;
+use runar_common::logging::{Logger, Component};
 
 /// In-memory node discovery for development and testing
-#[derive(Default)]
 pub struct MemoryDiscovery {
     /// Nodes registered with this discovery mechanism, keyed by network_id
     nodes: Arc<RwLock<HashMap<String, NodeInfo>>>,
@@ -30,11 +30,13 @@ pub struct MemoryDiscovery {
     announce_task: Mutex<Option<JoinHandle<()>>>,
     /// Listeners for discovery events
     listeners: Arc<RwLock<Vec<DiscoveryListener>>>,
+    /// Logger instance
+    logger: Logger,
 }
 
 impl MemoryDiscovery {
     /// Create a new in-memory discovery mechanism
-    pub fn new() -> Self {
+    pub fn new(logger: Logger) -> Self {
         Self {
             nodes: Arc::new(RwLock::new(HashMap::new())),
             local_node: Arc::new(RwLock::new(None)),
@@ -42,20 +44,27 @@ impl MemoryDiscovery {
             cleanup_task: Mutex::new(None),
             announce_task: Mutex::new(None),
             listeners: Arc::new(RwLock::new(Vec::new())),
+            logger,
         }
+    }
+
+    /// Set the local node information for this discovery instance
+    pub fn set_local_node(&self, node_info: NodeInfo) {
+        *self.local_node.write().unwrap() = Some(node_info);
     }
 
     /// Start a background task to periodically clean up stale nodes
     fn start_cleanup_task(&self, options: DiscoveryOptions) -> JoinHandle<()> {
         let nodes = Arc::clone(&self.nodes);
         let ttl = options.node_ttl;
+        let logger = self.logger.clone();
 
         tokio::spawn(async move {
             let mut interval = time::interval(Duration::from_secs(60));
 
             loop {
                 interval.tick().await;
-                Self::cleanup_stale_nodes(&nodes, ttl);
+                Self::cleanup_stale_nodes(&nodes, ttl, &logger);
             }
         })
     }
@@ -66,6 +75,7 @@ impl MemoryDiscovery {
         let interval = options.announce_interval;
         let node_info = info.clone();
         let listeners = Arc::clone(&self.listeners);
+        let logger = self.logger.clone();
 
         tokio::spawn(async move {
             let mut ticker = time::interval(interval);
@@ -84,6 +94,8 @@ impl MemoryDiscovery {
                     nodes_map.insert(node_key.clone(), updated_info.clone());
                 }
                 
+                logger.debug(format!("Announcing local node: {}", node_key));
+                
                 // Notify listeners (simulating network discovery update)
                 {
                     let listeners_guard = listeners.read().unwrap();
@@ -96,7 +108,7 @@ impl MemoryDiscovery {
     }
 
     /// Remove nodes that haven't been seen for a while
-    fn cleanup_stale_nodes(nodes: &RwLock<HashMap<String, NodeInfo>>, ttl: Duration) {
+    fn cleanup_stale_nodes(nodes: &RwLock<HashMap<String, NodeInfo>>, ttl: Duration, logger: &Logger) {
         let now = SystemTime::now();
         let mut nodes_map = nodes.write().unwrap();
         
@@ -112,6 +124,7 @@ impl MemoryDiscovery {
             
         // Remove stale nodes
         for key in stale_keys {
+            logger.debug(format!("Removing stale node: {}", key));
             nodes_map.remove(&key);
         }
     }
@@ -121,8 +134,11 @@ impl MemoryDiscovery {
         let node_key = node_info.peer_id.to_string(); 
         {
             let mut nodes = self.nodes.write().unwrap();
-            nodes.insert(node_key, node_info.clone());
+            nodes.insert(node_key.clone(), node_info.clone());
         }
+        
+        self.logger.debug(format!("Added node to registry: {}", node_key));
+        
         // Notify listeners
         let listeners = self.listeners.read().unwrap();
         for listener in listeners.iter() {
@@ -134,6 +150,8 @@ impl MemoryDiscovery {
 #[async_trait]
 impl NodeDiscovery for MemoryDiscovery {
     async fn init(&self, options: DiscoveryOptions) -> Result<()> {
+        self.logger.info(format!("Initializing MemoryDiscovery with options: {:?}", options));
+        
         *self.options.write().unwrap() = Some(options.clone());
         
         // Start the cleanup task
@@ -143,14 +161,25 @@ impl NodeDiscovery for MemoryDiscovery {
         Ok(())
     }
     
-    async fn start_announcing(&self, info: NodeInfo) -> Result<()> {
-        // Store the local node info
-        *self.local_node.write().unwrap() = Some(info.clone());
+    async fn start_announcing(&self) -> Result<()> {
+        // Get the local node info from the stored value
+        let info = match &*self.local_node.read().unwrap() {
+            Some(info) => info.clone(),
+            None => {
+                let err: anyhow::Error = anyhow!("No local node information available");
+                return Err(err);
+            }
+        };
+        
+        self.logger.info(format!("Starting to announce node: {}", info.peer_id));
         
         // Get the options
-        let options = match *self.options.read().unwrap() {
-            Some(ref opts) => opts.clone(),
-            None => return Err(anyhow::anyhow!("Discovery not initialized")),
+        let options = match &*self.options.read().unwrap() {
+            Some(opts) => opts.clone(),
+            None => {
+                let err: anyhow::Error = anyhow!("Discovery not initialized");
+                return Err(err);
+            }
         };
         
         // Add our node to the registry
@@ -164,6 +193,8 @@ impl NodeDiscovery for MemoryDiscovery {
     }
     
     async fn stop_announcing(&self) -> Result<()> {
+        self.logger.info("Stopping node announcements".to_string());
+        
         // Stop the announcement task if it exists
         if let Some(task) = self.announce_task.lock().unwrap().take() {
             task.abort();
@@ -173,45 +204,64 @@ impl NodeDiscovery for MemoryDiscovery {
         if let Some(info) = &*self.local_node.read().unwrap() {
             let mut nodes_map = self.nodes.write().unwrap();
             nodes_map.remove(&info.peer_id.to_string());
+            self.logger.debug(format!("Removed local node {} from registry", info.peer_id));
         }
         
         Ok(())
     }
     
     async fn register_node(&self, node_info: NodeInfo) -> Result<()> {
+        self.logger.info(format!("Manually registering node: {}", node_info.peer_id));
         self.add_node_internal(node_info).await;
         Ok(())
     }
 
     async fn update_node(&self, node_info: NodeInfo) -> Result<()> {
+        self.logger.info(format!("Updating node: {}", node_info.peer_id));
         // Same as register for in-memory
         self.add_node_internal(node_info).await;
         Ok(())
     }
 
     async fn discover_nodes(&self, network_id: Option<&str>) -> Result<Vec<NodeInfo>> {
+        let target_network = network_id.unwrap_or("default");
+        self.logger.info(format!("Discovering nodes for network: {}", target_network));
+        
         let nodes_map = self.nodes.read().unwrap();
-        let result = nodes_map
+        let result: Vec<NodeInfo> = nodes_map
             .values()
             // Filter based on whether the node's network_ids list contains the requested network_id
             .filter(|info| network_id.map_or(true, |net_id| info.network_ids.contains(&net_id.to_string())))
             .cloned()
             .collect();
+            
+        self.logger.info(format!("Discovered {} nodes", result.len()));
         Ok(result)
     }
 
     async fn find_node(&self, network_id: &str, node_id: &str) -> Result<Option<NodeInfo>> {
         let nodes = self.nodes.read().unwrap();
         let key = PeerId::new(node_id.to_string()).to_string();
-        Ok(nodes.get(&key).cloned())
+        let node = nodes.get(&key).cloned();
+        
+        if let Some(ref node_info) = node {
+            self.logger.debug(format!("Found node {}/{} in local registry", network_id, node_id));
+        } else {
+            self.logger.debug(format!("Node {}/{} not found in local registry", network_id, node_id));
+        }
+        
+        Ok(node)
     }
 
     async fn set_discovery_listener(&self, listener: DiscoveryListener) -> Result<()> {
+        self.logger.debug("Adding discovery listener".to_string());
         self.listeners.write().unwrap().push(listener);
         Ok(())
     }
     
     async fn shutdown(&self) -> Result<()> {
+        self.logger.info("Shutting down MemoryDiscovery".to_string());
+        
         // Stop the cleanup task
         if let Some(task) = self.cleanup_task.lock().unwrap().take() {
             task.abort();
@@ -241,10 +291,25 @@ mod tests {
 
     #[tokio::test]
     async fn test_find_node() {
-        // Setup discovery instance
-        let discovery = MemoryDiscovery::new();
+        // Setup discovery instance with a test logger
+        let logger = Logger::new_root(Component::Network, "test_node");
+        let discovery = MemoryDiscovery::new(logger);
         
-        // Create NodeInfo (corrected type, add network_ids)
+        // Set options
+        let options = DiscoveryOptions::default();
+        discovery.init(options).await.unwrap();
+        
+        // Set up local node
+        let local_node = NodeInfo {
+            peer_id: PeerId::new("test_node".to_string()),
+            network_ids: vec!["net1".to_string()],
+            address: "127.0.0.1:8000".to_string(),
+            capabilities: vec![],
+            last_seen: SystemTime::now(),
+        };
+        discovery.set_local_node(local_node);
+        
+        // Create NodeInfo for test
         let node_info_1 = NodeInfo {
             peer_id: PeerId::new("node1".to_string()),
             network_ids: vec!["net1".to_string()], // Added network_ids

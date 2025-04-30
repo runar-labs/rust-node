@@ -10,6 +10,7 @@ use std::time::Duration;
 use serde::{Serialize, Deserialize};
 
 use crate::network::transport::PeerId;
+use crate::network::capabilities::ServiceCapability;
 
 pub mod memory_discovery;
 pub mod multicast_discovery;
@@ -65,11 +66,8 @@ pub struct NodeInfo {
     pub network_ids: Vec<String>,
     /// The node's primary network address (e.g., "IP:PORT")
     pub address: String,
-    //FIX lets expand this.. capabiliteis shuold be a Vec<Capability> and Capability should be anstriuct with type action, 
-    // subscription path action_input_schema and action_output_schema for actions  and event_schema for subscriptions
-    /// Node capabilities (e.g., list of services, features) represented as strings.
-    /// The format and content of these strings need further definition.
-    pub capabilities: Vec<String>,
+    /// Node capabilities representing the services provided by this node
+    pub capabilities: Vec<ServiceCapability>,
     /// Timestamp when this node information was last confirmed or updated.
     pub last_seen: std::time::SystemTime,
 }
@@ -84,7 +82,7 @@ pub trait NodeDiscovery: Send + Sync {
     async fn init(&self, options: DiscoveryOptions) -> Result<()>;
     
     /// Start announcing this node's presence on the network
-    async fn start_announcing(&self, info: NodeInfo) -> Result<()>;
+    async fn start_announcing(&self) -> Result<()>;
     
     /// Stop announcing this node's presence
     async fn stop_announcing(&self) -> Result<()>;

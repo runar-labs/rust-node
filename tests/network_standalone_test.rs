@@ -17,6 +17,7 @@ use runar_node::network::discovery::{NodeDiscovery, NodeInfo, DiscoveryOptions, 
 use runar_common::types::ValueType;
 use runar_common::Logger;
 use runar_node::network::transport::peer_registry::PeerRegistry;
+use runar_node::network::capabilities::{ServiceCapability, ActionCapability, EventCapability};
 
 // Mock implementation of NetworkTransport for testing
 struct MockTransport {
@@ -206,7 +207,7 @@ impl NodeDiscovery for MockDiscovery {
         Ok(())
     }
     
-    async fn start_announcing(&self, _node_info: NodeInfo) -> Result<()> {
+    async fn start_announcing(&self) -> Result<()> {
         Ok(())
     }
     
@@ -299,7 +300,30 @@ async fn test_discovery_register_node() -> Result<()> {
         peer_id: PeerId::new("node-1".to_string()),
         network_ids: vec!["test-network".to_string()],
         address: "localhost:8080".to_string(),
-        capabilities: vec!["request".to_string(), "event".to_string()],
+        capabilities: vec![
+            ServiceCapability {
+                network_id: "test-network".to_string(),
+                service_path: "test/service".to_string(),
+                name: "Test Service".to_string(),
+                version: "1.0.0".to_string(),
+                description: "Test service for unit tests".to_string(),
+                actions: vec![
+                    ActionCapability {
+                        name: "request".to_string(),
+                        description: "Test request".to_string(),
+                        params_schema: None,
+                        result_schema: None,
+                    }
+                ],
+                events: vec![
+                    EventCapability {
+                        topic: "event".to_string(),
+                        description: "Test event".to_string(),
+                        data_schema: None,
+                    }
+                ],
+            }
+        ],
         last_seen: SystemTime::now(),
     };
     

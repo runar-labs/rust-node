@@ -127,7 +127,7 @@ impl NodeDiscovery for MockDiscovery {
         Ok(())
     }
     
-    async fn start_announcing(&self, _info: NodeInfo) -> Result<()> {
+    async fn start_announcing(&self) -> Result<()> {
         Ok(())
     }
     

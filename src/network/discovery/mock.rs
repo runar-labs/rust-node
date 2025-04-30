@@ -54,8 +54,8 @@ impl NodeDiscovery for MockNodeDiscovery {
         Ok(())
     }
     
-    async fn start_announcing(&self, info: NodeInfo) -> Result<()> {
-        self.add_mock_node(info.clone()).await;
+    async fn start_announcing(&self ) -> Result<()> {
+         
         Ok(())
     }
     

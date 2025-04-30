@@ -4,18 +4,14 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use anyhow::Result;
 use tokio::sync::mpsc;
-use tokio::sync::RwLock;
-
-use runar_node::network::discovery::{NodeDiscovery, NodeInfo, DiscoveryOptions, DiscoveryListener};
-use runar_node::network::discovery::multicast_discovery::MulticastDiscovery;
+use runar_node::network::discovery::{MulticastDiscovery, NodeDiscovery, NodeInfo, DiscoveryOptions};
 use runar_node::network::discovery::DEFAULT_MULTICAST_ADDR;
 use runar_node::network::transport::PeerId;
-use runar_common::Logger;
-use runar_common::Component;
+use runar_node::network::capabilities::{ServiceCapability, ActionCapability, EventCapability};
+use runar_common::logging::{Logger, Component};
+use anyhow::Result;
 
-#[cfg(test)]
 mod tests {
     use super::*;
     use std::time::SystemTime;
@@ -28,8 +24,43 @@ mod tests {
         options.multicast_group = format!("{}:45678", DEFAULT_MULTICAST_ADDR);
         options.announce_interval = Duration::from_secs(1); // Use shorter interval for tests
         
-        let discovery = MulticastDiscovery::new(options).await?;
-        // Initialize is called internally in new() so no need to call it again
+        // Create a logger for testing
+        let logger = Logger::new_root(Component::NetworkDiscovery, "test_multicast_discovery");
+        
+        // Create a test node info
+        let node_info = NodeInfo {
+            peer_id: PeerId::new(format!("test-node-{}", network_id)),
+            network_ids: vec![network_id.to_string()],
+            address: "127.0.0.1:8000".to_string(),
+            capabilities: vec![
+                ServiceCapability {
+                    network_id: network_id.to_string(),
+                    service_path: "test/service".to_string(),
+                    name: "Test Service".to_string(),
+                    version: "1.0.0".to_string(),
+                    description: "Test service for unit tests".to_string(),
+                    actions: vec![
+                        ActionCapability {
+                            name: "request".to_string(),
+                            description: "Test request".to_string(),
+                            params_schema: None,
+                            result_schema: None,
+                        }
+                    ],
+                    events: vec![
+                        EventCapability {
+                            topic: "event".to_string(),
+                            description: "Test event".to_string(),
+                            data_schema: None,
+                        }
+                    ],
+                }
+            ],
+            last_seen: SystemTime::now(),
+        };
+        
+        // Create the discovery instance with proper parameters
+        let discovery = MulticastDiscovery::new(node_info, options, logger).await?;
         
         Ok(discovery)
     }
@@ -69,13 +100,36 @@ mod tests {
             peer_id: PeerId::new("node1".to_string()),
             network_ids: vec!["test-network".to_string()],
             address: "127.0.0.1:8080".to_string(),
-            capabilities: vec!["request".to_string(), "event".to_string()],
+            capabilities: vec![
+                ServiceCapability {
+                    network_id: "test-network".to_string(),
+                    service_path: "test/service".to_string(),
+                    name: "Test Service".to_string(),
+                    version: "1.0.0".to_string(),
+                    description: "Test service for unit tests".to_string(),
+                    actions: vec![
+                        ActionCapability {
+                            name: "request".to_string(),
+                            description: "Test request".to_string(),
+                            params_schema: None,
+                            result_schema: None,
+                        }
+                    ],
+                    events: vec![
+                        EventCapability {
+                            topic: "event".to_string(),
+                            description: "Test event".to_string(),
+                            data_schema: None,
+                        }
+                    ],
+                }
+            ],
             last_seen: SystemTime::now(),
         };
         
         // Register node and start announcing
         discovery.register_node(node_info.clone()).await?;
-        discovery.start_announcing(node_info.clone()).await?;
+        discovery.start_announcing().await?;
         
         // Wait a bit for the announcement to circulate
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -122,7 +176,30 @@ mod tests {
             peer_id: PeerId::new("node1".to_string()),
             network_ids: vec!["test-network".to_string()],
             address: "127.0.0.1:8080".to_string(),
-            capabilities: vec!["request".to_string(), "event".to_string()],
+            capabilities: vec![
+                ServiceCapability {
+                    network_id: "test-network".to_string(),
+                    service_path: "test/service".to_string(),
+                    name: "Test Service".to_string(),
+                    version: "1.0.0".to_string(),
+                    description: "Test service for unit tests".to_string(),
+                    actions: vec![
+                        ActionCapability {
+                            name: "request".to_string(),
+                            description: "Test request".to_string(),
+                            params_schema: None,
+                            result_schema: None,
+                        }
+                    ],
+                    events: vec![
+                        EventCapability {
+                            topic: "event".to_string(),
+                            description: "Test event".to_string(),
+                            data_schema: None,
+                        }
+                    ],
+                }
+            ],
             last_seen: SystemTime::now(),
         };
         
@@ -131,19 +208,42 @@ mod tests {
             peer_id: PeerId::new("node2".to_string()),
             network_ids: vec!["test-network".to_string()],
             address: "127.0.0.1:8081".to_string(),
-            capabilities: vec!["request".to_string(), "event".to_string()],
+            capabilities: vec![
+                ServiceCapability {
+                    network_id: "test-network".to_string(),
+                    service_path: "test/service".to_string(),
+                    name: "Test Service".to_string(),
+                    version: "1.0.0".to_string(),
+                    description: "Test service for unit tests".to_string(),
+                    actions: vec![
+                        ActionCapability {
+                            name: "request".to_string(),
+                            description: "Test request".to_string(),
+                            params_schema: None,
+                            result_schema: None,
+                        }
+                    ],
+                    events: vec![
+                        EventCapability {
+                            topic: "event".to_string(),
+                            description: "Test event".to_string(),
+                            data_schema: None,
+                        }
+                    ],
+                }
+            ],
             last_seen: SystemTime::now(),
         };
         
         // Register and start announcing for both nodes
         discovery1.register_node(node_info1.clone()).await?;
-        discovery1.start_announcing(node_info1.clone()).await?;
+        discovery1.start_announcing().await?;
         
         // Wait a short time for propagation
         tokio::time::sleep(Duration::from_millis(100)).await;
         
         discovery2.register_node(node_info2.clone()).await?;
-        discovery2.start_announcing(node_info2.clone()).await?;
+        discovery2.start_announcing().await?;
         
         // Wait a bit for propagation and discovery
         tokio::time::sleep(Duration::from_millis(1000)).await;
