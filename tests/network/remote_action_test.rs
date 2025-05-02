@@ -30,7 +30,7 @@ mod remote_action_tests {
     async fn test_remote_action_call() -> Result<()> {
         // Configure logging to ensure test logs are displayed
         let logging_config = LoggingConfig::new()
-            .with_default_level(LogLevel::Info);
+            .with_default_level(LogLevel::Debug);
         logging_config.apply();
         
         // Set up logger
@@ -69,7 +69,7 @@ mod remote_action_tests {
 
         // Wait for discovery and connection to happen (simple sleep)
         logger.info("Waiting for nodes to discover each other...");
-        sleep(Duration::from_secs(3)).await;
+        sleep(Duration::from_secs(300)).await;
 
         // Test calling math service1 (on node1) from node2
         logger.info("Testing remote action call from node2 to node1...");

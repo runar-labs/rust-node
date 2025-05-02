@@ -135,7 +135,7 @@ impl NetworkTransport for MockTransport {
         Ok(())
     }
 
-    async fn register_discovered_node(&self, _node_info: NodeInfo) -> Result<(), NetworkError> {
+    async fn connect_node(&self, _node_info: NodeInfo) -> Result<(), NetworkError> {
         self.logger.debug("MockTransport: register_discovered_node called");
         Ok(())
     }
@@ -299,7 +299,7 @@ async fn test_discovery_register_node() -> Result<()> {
     let node_info = NodeInfo {
         peer_id: PeerId::new("node-1".to_string()),
         network_ids: vec!["test-network".to_string()],
-        address: "localhost:8080".to_string(),
+        addresses: "localhost:8080".to_string(),
         capabilities: vec![
             ServiceCapability {
                 network_id: "test-network".to_string(),
@@ -333,7 +333,7 @@ async fn test_discovery_register_node() -> Result<()> {
     // Check if listener was notified
     if let Some(received_node_info) = rx.recv().await {
         assert_eq!(received_node_info.peer_id.public_key, "node-1");
-        assert_eq!(received_node_info.address, "localhost:8080");
+        assert_eq!(received_node_info.addresses, "localhost:8080");
     } else {
         return Err(anyhow!("Discovery listener was not notified"));
     }

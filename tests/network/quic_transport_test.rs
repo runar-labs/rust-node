@@ -17,6 +17,8 @@ use runar_common::types::ValueType;
 use runar_common::Logger;
 use runar_common::Component;
 use uuid::Uuid;
+use runar_node::network::discovery::NodeInfo;
+use runar_node::network::discovery::multicast_discovery::PeerInfo;
 
 #[cfg(test)]
 mod tests {
@@ -159,7 +161,25 @@ mod tests {
             "Attempting to connect from {} ({}) to {} ({})",
             addr1, node_id1, addr2, node_id2
         );
-        transport1.connect(node_id2.clone(), addr2).await?;
+        
+        // Create a local node info to pass to connect_node
+        let local_node_info = NodeInfo {
+            peer_id: node_id1.clone(),
+            network_ids: vec!["test-network".to_string()],
+            addresses: vec![addr1.to_string()],
+            capabilities: vec![],
+            last_seen: std::time::SystemTime::now(),
+        };
+        
+        // Create the PeerInfo for the remote node
+        let peer_info = PeerInfo {
+            public_key: node_id2.public_key.clone(),
+            addresses: vec![addr2.to_string()],
+        };
+        
+        // Create a test connection - add a sleep to allow for connection processing
+        transport1.connect_node(peer_info, local_node_info).await?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
         println!("Connection initiated.");
 
         // Allow time for connection and handshake
@@ -235,6 +255,105 @@ mod tests {
         // Shutdown both transports
         transport1.stop().await?;
         transport2.stop().await?;
+        
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handshake_serialization() -> Result<()> {
+        // This test specifically aims to debug the handshake serialization issue with ValueType
+        
+        // Create a NodeInfo similar to what would be sent in a handshake
+        let local_node_info = NodeInfo {
+            peer_id: PeerId::new(format!("test-node-{}", Uuid::new_v4())),
+            network_ids: vec!["test-network".to_string()],
+            addresses: vec!["127.0.0.1:12345".to_string()],
+            capabilities: vec![],
+            last_seen: std::time::SystemTime::now(),
+        };
+        
+        // Step 1: Create a ValueType from the NodeInfo
+        println!("Step 1: Creating ValueType from NodeInfo");
+        let value_type = ValueType::from_struct(local_node_info.clone());
+        
+        // Convert ValueType to binary
+        println!("Step 2: Converting ValueType to binary");
+        let binary_data = bincode::serialize(&local_node_info).expect("Failed to serialize NodeInfo");
+        
+        // Step 3: Create a NetworkMessage with the binary payload
+        println!("Step 3: Creating NetworkMessage with binary payload");
+        let source_id = PeerId::new(format!("test-node-{}", Uuid::new_v4()));
+        let dest_id = PeerId::new(format!("test-node-{}", Uuid::new_v4()));
+        
+        let handshake_msg = NetworkMessage {
+            source: source_id.clone(),
+            destination: dest_id.clone(),
+            message_type: "Handshake".to_string(),
+            payloads: vec![("".to_string(), binary_data, "".to_string())],
+        };
+        
+        // Step 4: Serialize the NetworkMessage with bincode
+        println!("Step 4: Serializing NetworkMessage with bincode");
+        
+        let serialized_data = match bincode::serialize(&handshake_msg) {
+            Ok(data) => data,
+            Err(e) => {
+                println!("Serialization failed: {}", e);
+                return Err(anyhow!("Serialization error: {}", e));
+            }
+        };
+        println!("Serialized message size: {} bytes", serialized_data.len());
+        
+        // Debug: Print the serialized data as hex dump to analyze it
+        println!("Serialized data hex dump (first 100 bytes):");
+        for (i, chunk) in serialized_data.chunks(16).enumerate().take(6) {
+            let hex = chunk.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+            println!("{:04x}: {}", i * 16, hex);
+        }
+        
+        // Step 5: Attempt to deserialize back to NetworkMessage
+        println!("Step 5: Deserializing back to NetworkMessage");
+        let deserialized_msg = match bincode::deserialize::<NetworkMessage>(&serialized_data) {
+            Ok(msg) => {
+                println!("Successfully deserialized NetworkMessage");
+                msg
+            },
+            Err(e) => {
+                println!("Failed to deserialize: {}", e);
+                
+                // Try to deserialize in steps to isolate the problem
+                println!("\nAttempting to deserialize message fields individually:");
+                
+                // Create a slice with the first 100 bytes for debugging
+                let sample = &serialized_data[..std::cmp::min(100, serialized_data.len())];
+                println!("First 100 bytes: {:?}", sample);
+                
+                return Err(anyhow!("Deserialization error: {}", e));
+            }
+        };
+        
+        // Step 6: Try to extract the NodeInfo from the payload
+        println!("Step 6: Extracting NodeInfo from binary payload");
+        if let Some((_, payload_bytes, _)) = deserialized_msg.payloads.get(0) {
+            // Deserialize the binary data back to NodeInfo
+            let node_info: NodeInfo = match bincode::deserialize(payload_bytes) {
+                Ok(info) => {
+                    println!("Successfully deserialized NodeInfo from binary payload");
+                    info
+                },
+                Err(e) => {
+                    println!("Failed to deserialize NodeInfo from binary payload: {}", e);
+                    return Err(anyhow!("NodeInfo deserialization error: {}", e));
+                }
+            };
+            
+            println!("Successfully extracted NodeInfo: {:?}", node_info);
+            assert_eq!(node_info.peer_id, local_node_info.peer_id);
+            assert_eq!(node_info.network_ids, local_node_info.network_ids);
+            assert_eq!(node_info.addresses, local_node_info.addresses);
+        } else {
+            return Err(anyhow!("No payload found in deserialized message"));
+        }
         
         Ok(())
     }

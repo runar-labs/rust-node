@@ -31,7 +31,7 @@ mod tests {
         let node_info = NodeInfo {
             peer_id: PeerId::new(format!("test-node-{}", network_id)),
             network_ids: vec![network_id.to_string()],
-            address: "127.0.0.1:8000".to_string(),
+            addresses: "127.0.0.1:8000".to_string(),
             capabilities: vec![
                 ServiceCapability {
                     network_id: network_id.to_string(),
@@ -99,7 +99,7 @@ mod tests {
         let node_info = NodeInfo {
             peer_id: PeerId::new("node1".to_string()),
             network_ids: vec!["test-network".to_string()],
-            address: "127.0.0.1:8080".to_string(),
+            addresses: "127.0.0.1:8080".to_string(),
             capabilities: vec![
                 ServiceCapability {
                     network_id: "test-network".to_string(),
@@ -175,7 +175,7 @@ mod tests {
         let node_info1 = NodeInfo {
             peer_id: PeerId::new("node1".to_string()),
             network_ids: vec!["test-network".to_string()],
-            address: "127.0.0.1:8080".to_string(),
+            addresses: "127.0.0.1:8080".to_string(),
             capabilities: vec![
                 ServiceCapability {
                     network_id: "test-network".to_string(),
@@ -207,7 +207,7 @@ mod tests {
         let node_info2 = NodeInfo {
             peer_id: PeerId::new("node2".to_string()),
             network_ids: vec!["test-network".to_string()],
-            address: "127.0.0.1:8081".to_string(),
+            addresses: "127.0.0.1:8081".to_string(),
             capabilities: vec![
                 ServiceCapability {
                     network_id: "test-network".to_string(),

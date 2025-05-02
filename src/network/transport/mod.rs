@@ -7,7 +7,7 @@ use std::fmt;
 use std::time::Duration;
 use std::ops::Range;
 use std::net::{SocketAddr, IpAddr, Ipv4Addr, TcpListener};
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use serde::{Serialize, Deserialize};
 use runar_common::types::ValueType;
@@ -19,6 +19,9 @@ use std::future::Future;
 use std::pin::Pin;
 use thiserror::Error;
 use rand;
+use serde::ser::{Serializer, SerializeStruct};
+use serde::de::{Deserializer, MapAccess, SeqAccess, Visitor, Error as DeError};
+use bincode;
 
 // Internal module declarations
 pub mod quic_transport;
@@ -30,6 +33,7 @@ pub use peer_registry::{PeerRegistry, PeerStatus, PeerEntry, PeerRegistryOptions
 pub use quic_transport::{QuicTransport, QuicTransportOptions};
 // Don't re-export pick_free_port since it's defined in this module
 
+use super::discovery::multicast_discovery::PeerInfo;
 // Import NodeInfo from the discovery module
 use super::discovery::{NodeInfo, NodeDiscovery};
 use crate::services::ServiceResponse;
@@ -37,7 +41,6 @@ use crate::services::ServiceResponse;
 /// Type alias for async-returning function
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-//THIS shuold be a publickey.. not netwoprk ir and node id
 /// Unique identifier for a node in the network
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PeerId {
@@ -135,6 +138,85 @@ pub enum NetworkMessageType {
     Heartbeat,
 }
 
+/// Represents a payload item in a network message
+///
+/// IMPORTANT: This is implemented as a struct with fields, but for backward compatibility
+/// it can be used like a tuple (path, value, correlation_id).
+/// New code should use the named fields directly.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct NetworkMessagePayloadItem {
+    /// The path/topic associated with this payload (first tuple element)
+    pub path: String,
+    
+    /// The value/payload data (second tuple element)
+    pub value_bytes: Vec<u8>,
+    
+    /// Correlation ID for request/response tracking (third tuple element)
+    pub correlation_id: String,
+}
+
+impl NetworkMessagePayloadItem {
+    /// Create a new NetworkMessagePayloadItem
+    pub fn new(path: String, value_bytes: Vec<u8>, correlation_id: String) -> Self {
+        Self {
+            path,
+            value_bytes,
+            correlation_id,
+        }
+    }
+    
+    /// Create a new NetworkMessagePayloadItem with a struct value that gets 
+    /// automatically serialized using bincode
+    pub fn with_struct<T>(path: String, value: T, correlation_id: String) -> Result<Self>
+    where 
+        T: std::fmt::Debug + serde::Serialize + Clone + Send + Sync + 'static
+    {
+        // Use the new create_struct method
+        let value_type = ValueType::create_struct(value)?;
+        
+        Ok(Self::new(path, value_type.to_bytes(), correlation_id))
+    }
+    
+    /// Create a new NetworkMessagePayloadItem with a map value
+    pub fn with_map<V>(path: String, map: HashMap<String, V>, correlation_id: String) -> Result<Self>
+    where 
+        V: std::fmt::Debug + serde::Serialize + Clone + Send + Sync + 'static
+    {
+        // Use the new create_map method
+        let value_type = ValueType::create_map(map)?;
+        
+        Ok(Self::new(path, value_type.to_bytes(), correlation_id))
+    }
+    
+    /// Create a new NetworkMessagePayloadItem with an array value
+    pub fn with_array<T>(path: String, array: Vec<T>, correlation_id: String) -> Result<Self>
+    where 
+        T: std::fmt::Debug + serde::Serialize + Clone + Send + Sync + 'static
+    {
+        // Use the new create_array method
+        let value_type = ValueType::create_array<T>(array)?;
+        
+        Ok(Self::new(path, value_type.to_bytes(), correlation_id))
+    }
+      
+}
+
+// // For backward compatibility of code that treats NetworkMessagePayloadItem as a tuple
+// // IMPORTANT: KEEP THIS - many places in the code are written assuming it's a tuple
+// impl<'a> From<&'a NetworkMessagePayloadItem> for (&'a String, &'a ValueType, &'a String) {
+//     fn from(item: &'a NetworkMessagePayloadItem) -> Self {
+//         (&item.path, ValueType::from_bytes(&item.value_bytes).unwrap(), &item.correlation_id)
+//     }
+// }
+
+// // Allow creation from a tuple 
+// impl From<(String, ValueType, String)> for NetworkMessagePayloadItem {
+//     fn from(tuple: (String, ValueType, String)) -> Self {
+//         let (path, value, correlation_id) = tuple;
+//         Self::new(path, value.to_bytes(), correlation_id)
+//     }
+// }
+
 /// Represents a message exchanged between nodes
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct NetworkMessage {
@@ -147,9 +229,8 @@ pub struct NetworkMessage {
     /// Message type (Request, Response, Event, etc.)
     pub message_type: String,
     
-    /// List of  payloads 
-    /// Each entry contains (topic, payload, correlation_id)
-    pub payloads: Vec<(String, ValueType, String)>,
+    /// List of payloads  
+    pub payloads: Vec<NetworkMessagePayloadItem>,
 }
 
 /// Handler function type for incoming network messages
@@ -159,7 +240,7 @@ pub type MessageHandler = Box<dyn Fn(NetworkMessage) -> Result<()> + Send + Sync
 pub type MessageCallback = Arc<dyn Fn(NetworkMessage) -> BoxFuture<'static, Result<()>> + Send + Sync>;
 
 /// Callback type for connection status changes
-pub type ConnectionCallback = Arc<dyn Fn(PeerId, bool) -> BoxFuture<'static, Result<()>> + Send + Sync>;
+pub type ConnectionCallback = Arc<dyn Fn(PeerId, bool, Option<NodeInfo>) -> BoxFuture<'static, Result<()>> + Send + Sync>;
 
 /// Network transport interface
 #[async_trait]
@@ -180,9 +261,6 @@ pub trait NetworkTransport: Send + Sync {
     /// Get the local node identifier
     fn get_local_node_id(&self) -> PeerId;
     
-    /// Connect to a remote node using its identifier and network address
-    async fn connect(&self, node_id: PeerId, address: SocketAddr) -> Result<(), NetworkError>;
-    
     /// Disconnect from a remote node
     async fn disconnect(&self, node_id: PeerId) -> Result<(), NetworkError>;
     
@@ -198,9 +276,6 @@ pub trait NetworkTransport: Send + Sync {
     /// Set a callback for connection status changes
     fn set_connection_callback(&self, callback: ConnectionCallback) -> Result<()>;
     
-    /// Get a list of currently connected nodes
-    fn get_connected_nodes(&self) -> Vec<PeerId>;
-    
     /// Send a service request to a remote node
     async fn send_request(&self, message: NetworkMessage) -> Result<NetworkMessage, NetworkError>;
     
@@ -214,7 +289,7 @@ pub trait NetworkTransport: Send + Sync {
     async fn stop_discovery(&self) -> Result<(), NetworkError>;
     
     /// Register a discovered node
-    async fn register_discovered_node(&self, node_info: NodeInfo) -> Result<(), NetworkError>;
+    async fn connect_node(&self, discovery_msg: PeerInfo, local_node:NodeInfo) -> Result<(), NetworkError>;
     
     /// Get all discovered nodes
     fn get_discovered_nodes(&self) -> Vec<PeerId>;
@@ -246,7 +321,7 @@ pub struct BaseNetworkTransport {
     pub node_discovery: Arc<RwLock<Option<Box<dyn NodeDiscovery>>>>,
     
     /// Registry of discovered nodes
-    pub discovered_nodes: Arc<RwLock<HashMap<String, NodeInfo>>>,
+    pub discovered_nodes: Arc<RwLock<HashMap<String, PeerInfo>>>,
     
     /// Pending network requests waiting for responses
     pub pending_requests: Arc<RwLock<HashMap<String, oneshot::Sender<Result<ServiceResponse>>>>>,
@@ -291,14 +366,14 @@ impl BaseNetworkTransport {
     }
     
     /// Register a discovered node
-    pub async fn register_discovered_node(&self, node_info: NodeInfo) -> Result<()> {
+    pub async fn discovered_node(&self, discovery_msg: PeerInfo) -> Result<()> {
         let mut discovered_nodes = self.discovered_nodes.write().await;
-        discovered_nodes.insert(node_info.peer_id.to_string(), node_info);
+        discovered_nodes.insert(discovery_msg.public_key.clone(), discovery_msg);
         Ok(())
     }
     
     /// Get all discovered nodes
-    pub async fn get_discovered_nodes(&self) -> Vec<NodeInfo> {
+    pub async fn get_discovered_nodes(&self) -> Vec<PeerInfo> {
         let discovered_nodes = self.discovered_nodes.read().await;
         discovered_nodes.values().cloned().collect()
     }
@@ -364,11 +439,6 @@ impl NetworkTransport for BaseNetworkTransport {
         self.local_node_id.clone()
     }
     
-    /// Connect to a remote node using its identifier and network address
-    async fn connect(&self, node_id: PeerId, address: SocketAddr) -> Result<(), NetworkError> {
-        Ok(())
-    }
-    
     /// Disconnect from a remote node
     async fn disconnect(&self, node_id: PeerId) -> Result<(), NetworkError> {
         Ok(())
@@ -404,11 +474,7 @@ impl NetworkTransport for BaseNetworkTransport {
         *connection_callback = Some(callback);
         Ok(())
     }
-    
-    /// Get a list of currently connected nodes
-    fn get_connected_nodes(&self) -> Vec<PeerId> {
-        Vec::new()
-    }
+     
     
     /// Send a service request to a remote node
     async fn send_request(&self, message: NetworkMessage) -> Result<NetworkMessage, NetworkError> {
@@ -433,7 +499,7 @@ impl NetworkTransport for BaseNetworkTransport {
     }
     
     /// Register a discovered node
-    async fn register_discovered_node(&self, node_info: NodeInfo) -> Result<(), NetworkError> {
+    async fn connect_node(&self, peer_info: PeerInfo, local_node:NodeInfo) -> Result<(), NetworkError> {
         Ok(())
     }
     

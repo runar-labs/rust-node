@@ -24,7 +24,9 @@ use rcgen;
 use rustls;
 use rustls::{Certificate, PrivateKey};
 use std::net::SocketAddr;
+use socket2;
 
+use crate::network::discovery::multicast_discovery::PeerInfo;
 use crate::network::{
     discovery::{MulticastDiscovery, NodeDiscovery, NodeInfo, DiscoveryOptions, DEFAULT_MULTICAST_ADDR},
     ServiceCapability, ActionCapability
@@ -877,9 +879,7 @@ impl Node {
             if network_config.discovery_providers.is_empty() {
                 return Err(anyhow!("No discovery providers configured"));
             }
-
-            let local_info = self.get_local_node_info().await?;
-            
+ 
             // Iterate through all discovery providers and initialize each one
             for provider_config in &network_config.discovery_providers {
                 // Create a discovery provider instance
@@ -894,12 +894,12 @@ impl Node {
                         let node_clone = self.clone();
                         let provider_type_clone = provider_type.clone();
                         
-                        discovery.set_discovery_listener(Box::new(move |node_info| {
+                        discovery.set_discovery_listener(Box::new(move |peer_info| {
                             let node = node_clone.clone();
                             let provider_type_clone = provider_type_clone.clone();
                             
                             tokio::spawn(async move {
-                                if let Err(e) = node.handle_discovered_node(node_info).await {
+                                if let Err(e) = node.handle_discovered_node(peer_info).await {
                                     node.logger.error(format!("Failed to handle node discovered by {} provider: {}", 
                                         provider_type_clone, e));
                                 }
@@ -977,50 +977,54 @@ impl Node {
     }
 
     /// Handle discovery of a new node
-    pub async fn handle_discovered_node(&self, node_info: NodeInfo) -> Result<()> {
+    pub async fn handle_discovered_node(&self, peer_info: PeerInfo) -> Result<()> {
         // Skip if networking is not enabled
         if !self.supports_networking {
             self.logger.warn("Received node discovery event but networking is disabled");
             return Ok(());
         }
 
-        let peer_id = node_info.peer_id.clone();
+        let local_node_info = self.get_local_node_info().await?;
+
+        let peer_public_key = peer_info.public_key.clone(); 
         
-        self.logger.info(format!("Discovery listener found node: {}", peer_id));
+        self.logger.info(format!("Discovery listener found node: {}", peer_public_key));
         
         let transport = self.network_transport.read().await;
         if let Some(transport) = transport.as_ref() {
-            let address = node_info.address.clone();
+             
             // Store the discovered node using the transport
-            if let Ok(_) = transport.register_discovered_node(node_info.clone()).await {
-                self.logger.info(format!("Added node to registry: {}", peer_id));
+            if let Ok(_) = transport.connect_node(peer_info.clone(), local_node_info).await {
+                self.logger.info(format!("connected to node: {} - will", peer_public_key));
                 
-                // Always connect to the peer for now
-                let should_connect = true; // In future: perform public/private key checks
+
+
+                // // Always connect to the peer for now
+                // let should_connect = true; // In future: perform public/private key checks
                 
-                if should_connect {
+                // if should_connect {
                      
-                    // Try to connect to the peer
-                    if let Ok(addr) = address.parse::<SocketAddr>() {
-                        match transport.connect(peer_id.clone(), addr).await {
-                            Ok(_) => {
-                                self.logger.info(format!("Connected to peer: {}", peer_id));
+                //     // Try to connect to the peer
+                //     if let Ok(addr) = address.parse::<SocketAddr>() {
+                //         match transport.connect(peer_id.clone(), addr).await {
+                //             Ok(_) => {
+                //                 self.logger.info(format!("Connected to peer: {}", peer_id));
                                 
-                                // Process capabilities AFTER successful connection
-                                let _ = self.process_remote_capabilities(
-                                    node_info.clone()
-                                ).await;
-                            },
-                            Err(e) => self.logger.warn(format!("Failed to connect to peer: {} - Error: {}", 
-                                peer_id, e))
-                        }
-                    } else {
-                        self.logger.warn(format!("Invalid address format for peer: {} - {}", 
-                            peer_id, address));
-                    }
-                }
+                //                 // Process capabilities AFTER successful connection
+                //                 let _ = self.process_remote_capabilities(
+                //                     node_info.clone()
+                //                 ).await;
+                //             },
+                //             Err(e) => self.logger.warn(format!("Failed to connect to peer: {} - Error: {}", 
+                //                 peer_id, e))
+                //         }
+                //     } else {
+                //         self.logger.warn(format!("Invalid address format for peer: {} - {}", 
+                //             peer_id, address));
+                //     }
+                // }
             } else {
-                self.logger.warn(format!("Failed to add node to registry: {}", peer_id));
+                self.logger.warn(format!("Failed to add node to registry: {}", peer_public_key));
             }
         } else {
             self.logger.warn("No transport available to handle discovered node");
@@ -1667,15 +1671,54 @@ impl Node {
     /// INTENTION: Create a complete NodeInfo structure for this node,
     /// including its network IDs, address, and capabilities.
     pub async fn get_local_node_info(&self) -> Result<NodeInfo> {
+        let mut address = self.get_node_address().await?;
+        
+        // Check if address starts with 0.0.0.0 and replace with a usable IP address
+        if address.starts_with("0.0.0.0") {
+            // Try to get a real network interface IP address
+            if let Ok(ip) = self.get_non_loopback_ip() {
+                address = address.replace("0.0.0.0", &ip);
+                self.logger.debug(format!("Replaced 0.0.0.0 with network interface IP: {}", ip));
+            } else {
+                // Fall back to localhost if we can't get a real IP
+                address = address.replace("0.0.0.0", "127.0.0.1");
+                self.logger.debug("Replaced 0.0.0.0 with localhost (127.0.0.1)");
+            }
+        }
+        
         let node_info = NodeInfo {
             peer_id: self.peer_id.clone(),
             network_ids: self.network_ids.clone(),
-            address: self.get_node_address().await?,
+            addresses: vec![address],
             capabilities: self.collect_local_service_capabilities().await?,
             last_seen: std::time::SystemTime::now(),
         };
         
         Ok(node_info)
+    }
+
+    /// Get a non-loopback IP address from the local network interfaces
+    fn get_non_loopback_ip(&self) -> Result<String> {
+        use std::net::{IpAddr, SocketAddr};
+        use socket2::{Socket, Domain, Type};
+        
+        // Create a UDP socket
+        let socket = Socket::new(Domain::IPV4, Type::DGRAM, None)?;
+        
+        // "Connect" to a public IP (doesn't actually send anything)
+        // This forces the OS to choose the correct network interface
+        let addr: SocketAddr = "8.8.8.8:80".parse()?;
+        socket.connect(&addr.into())?;
+        
+        // Get the local address associated with the socket
+        let local_addr = socket.local_addr()?;
+        let ip = match local_addr.as_socket_ipv4() {
+            Some(addr) => addr.ip().to_string(),
+            None => return Err(anyhow!("Failed to get IPv4 address")),
+        };
+        
+        self.logger.debug(format!("Discovered local network interface IP: {}", ip));
+        Ok(ip)
     }
 
     /// Shutdown the network components
@@ -1905,12 +1948,12 @@ impl NodeDiscoveryListener {
         Self { logger, transport }
     }
     
-    async fn handle_discovered_node(&self, node_info: NodeInfo) -> Result<()> {
-        self.logger.info(format!("Discovery listener found node: {}", node_info.peer_id));
+    async fn handle_discovered_node(&self, discovery_msg: PeerInfo) -> Result<()> {
+        self.logger.info(format!("Discovery listener found node: {}", discovery_msg.public_key));
         
         // For now, just log discovery events
         // The actual connection logic will be handled by the Node
-        self.logger.info(format!("Node discovery event for: {}", node_info.peer_id));
+        self.logger.info(format!("Node discovery event for: {}", discovery_msg.public_key));
         
         // We'll implement proper connection logic elsewhere to avoid the
         // linter errors related to mutability and type mismatches

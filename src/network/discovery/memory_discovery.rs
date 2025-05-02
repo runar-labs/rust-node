@@ -4,17 +4,21 @@
 // for development and testing. This implementation maintains a list of nodes 
 // in memory and doesn't use actual network protocols for discovery.
 
-use anyhow::{Result, anyhow};
-use async_trait::async_trait;
+// Standard library imports
+use std::time::{Duration, SystemTime};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock, Mutex};
-use std::time::{Duration, SystemTime};
 use tokio::task::JoinHandle;
-use tokio::time;
+use anyhow::{Result, anyhow};
 
-use super::{NodeDiscovery, NodeInfo, DiscoveryOptions, DiscoveryListener};
+// Internal imports
 use crate::network::transport::PeerId;
+use crate::network::capabilities::ServiceCapability;
+use super::{NodeDiscovery, NodeInfo, DiscoveryOptions, DiscoveryListener};
+use super::multicast_discovery::PeerInfo;
 use runar_common::logging::{Logger, Component};
+use async_trait::async_trait;
+use tokio::time;
 
 /// In-memory node discovery for development and testing
 pub struct MemoryDiscovery {
@@ -100,7 +104,13 @@ impl MemoryDiscovery {
                 {
                     let listeners_guard = listeners.read().unwrap();
                     for listener in listeners_guard.iter() {
-                        listener(updated_info.clone());
+                        // Convert NodeInfo to PeerInfo for listener
+                        let peer_info = PeerInfo {
+                            public_key: updated_info.peer_id.public_key.clone(),
+                            addresses: updated_info.addresses.clone(),
+                            // Add any other fields needed for PeerInfo
+                        };
+                        listener(peer_info);
                     }
                 }
             }
@@ -142,7 +152,13 @@ impl MemoryDiscovery {
         // Notify listeners
         let listeners = self.listeners.read().unwrap();
         for listener in listeners.iter() {
-            listener(node_info.clone());
+            // Convert NodeInfo to PeerInfo for listener
+            let peer_info = PeerInfo {
+                public_key: node_info.peer_id.public_key.clone(),
+                addresses: node_info.addresses.clone(),
+                // Add any other fields needed for PeerInfo
+            };
+            listener(peer_info);
         }
     }
 }
@@ -303,7 +319,7 @@ mod tests {
         let local_node = NodeInfo {
             peer_id: PeerId::new("test_node".to_string()),
             network_ids: vec!["net1".to_string()],
-            address: "127.0.0.1:8000".to_string(),
+            addresses: vec!["127.0.0.1:8000".to_string()],
             capabilities: vec![],
             last_seen: SystemTime::now(),
         };
@@ -313,7 +329,7 @@ mod tests {
         let node_info_1 = NodeInfo {
             peer_id: PeerId::new("node1".to_string()),
             network_ids: vec!["net1".to_string()], // Added network_ids
-            address: "addr1".to_string(),
+            addresses: vec!["addr1".to_string()],
             capabilities: vec![],
             last_seen: SystemTime::now(),
         };

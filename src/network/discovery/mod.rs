@@ -6,6 +6,7 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use multicast_discovery::PeerInfo;
 use std::time::Duration;
 use serde::{Serialize, Deserialize};
 
@@ -64,8 +65,8 @@ pub struct NodeInfo {
     /// The list of network IDs this node participates in and handles traffic for.
     /// A node can be part of multiple networks simultaneously.
     pub network_ids: Vec<String>,
-    /// The node's primary network address (e.g., "IP:PORT")
-    pub address: String,
+    /// The node's  network addressess (e.g., "IP:PORT") - ordered by preference
+    pub addresses: Vec<String>,
     /// Node capabilities representing the services provided by this node
     pub capabilities: Vec<ServiceCapability>,
     /// Timestamp when this node information was last confirmed or updated.
@@ -73,7 +74,7 @@ pub struct NodeInfo {
 }
 
 /// Callback function type for discovery events
-pub type DiscoveryListener = Box<dyn Fn(NodeInfo) + Send + Sync>;
+pub type DiscoveryListener = Box<dyn Fn(PeerInfo) + Send + Sync>;
 
 /// Interface for node discovery mechanisms
 #[async_trait]
@@ -86,20 +87,7 @@ pub trait NodeDiscovery: Send + Sync {
     
     /// Stop announcing this node's presence
     async fn stop_announcing(&self) -> Result<()>;
-    
-    /// Register a node manually (e.g., from static config)
-    async fn register_node(&self, node_info: NodeInfo) -> Result<()>;
-
-    /// Update information for an existing node
-    async fn update_node(&self, node_info: NodeInfo) -> Result<()>;
-
-    /// Discover nodes in the network
-    /// If network_id is None, discover nodes across all known networks.
-    async fn discover_nodes(&self, network_id: Option<&str>) -> Result<Vec<NodeInfo>>;
-
-    /// Find a specific node by its identifier
-    async fn find_node(&self, network_id: &str, node_id: &str) -> Result<Option<NodeInfo>>;
-    
+     
     /// Set a listener to be called when nodes are discovered or updated
     async fn set_discovery_listener(&self, listener: DiscoveryListener) -> Result<()>;
     

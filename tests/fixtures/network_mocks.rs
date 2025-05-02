@@ -3,21 +3,25 @@ use async_trait::async_trait;
 use runar_common::Logger;
 use runar_node::network::transport::{NetworkTransport, NetworkMessage, PeerId, TransportFactory, MessageHandler, PeerRegistry, NetworkError, ConnectionCallback};
 use runar_node::network::discovery::{NodeDiscovery, NodeInfo, DiscoveryOptions, DiscoveryListener};
+use runar_node::network::discovery::multicast_discovery::PeerInfo;
 use std::sync::Arc;
 use std::net::SocketAddr;
+use runar_common::logging::Component;
 
 /// A minimal mock transport that does nothing
 pub struct MockTransport {
     peer_registry: PeerRegistry,
     node_id: PeerId,
+    logger: Logger,
 }
 
 impl MockTransport {
     /// Create a new mock transport
-    pub fn new(node_id: PeerId) -> Self {
+    pub fn new(node_id: PeerId, logger: Logger) -> Self {
         Self {
             peer_registry: PeerRegistry::new(),
             node_id,
+            logger,
         }
     }
 }
@@ -45,19 +49,17 @@ impl NetworkTransport for MockTransport {
         self.node_id.clone()
     }
     
-    async fn connect(&self, _node_id: PeerId, _address: SocketAddr) -> Result<(), NetworkError> {
-        Ok(())
-    }
-    
     async fn disconnect(&self, _node_id: PeerId) -> Result<(), NetworkError> {
+        self.logger.debug("MockTransport: disconnect called");
         Ok(())
     }
     
     fn is_connected(&self, _node_id: PeerId) -> bool {
-        false
+        false // Mock doesn't track connections
     }
     
-    async fn send_message(&self, _message: NetworkMessage) -> Result<(), NetworkError> {
+    async fn send_message(&self, message: NetworkMessage) -> Result<(), NetworkError> {
+        self.logger.debug(format!("MockTransport: send_message called: {:?}", message));
         Ok(())
     }
     
@@ -67,10 +69,6 @@ impl NetworkTransport for MockTransport {
     
     fn set_connection_callback(&self, _callback: ConnectionCallback) -> Result<()> {
         Ok(())
-    }
-    
-    fn get_connected_nodes(&self) -> Vec<PeerId> {
-        Vec::new()
     }
     
     async fn send_request(&self, _message: NetworkMessage) -> Result<NetworkMessage, NetworkError> {
@@ -89,7 +87,8 @@ impl NetworkTransport for MockTransport {
         Ok(())
     }
     
-    async fn register_discovered_node(&self, _node_info: NodeInfo) -> Result<(), NetworkError> {
+    async fn connect_node(&self, peer_info: PeerInfo, local_node: NodeInfo) -> Result<(), NetworkError> {
+        self.logger.debug(format!("MockTransport: connect_node called with peer: {:?}", peer_info));
         Ok(())
     }
     
@@ -113,8 +112,8 @@ pub struct MockTransportFactory;
 impl TransportFactory for MockTransportFactory {
     type Transport = MockTransport;
     
-    async fn create_transport(&self, node_id: PeerId, _logger: Logger) -> Result<Self::Transport> {
-        Ok(MockTransport::new(node_id))
+    async fn create_transport(&self, node_id: PeerId, logger: Logger) -> Result<Self::Transport> {
+        Ok(MockTransport::new(node_id, logger))
     }
 }
 

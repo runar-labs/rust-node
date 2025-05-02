@@ -24,7 +24,7 @@ async fn test_memory_discovery_register_and_find() -> Result<()> {
     let node_info = NodeInfo {
         peer_id: PeerId::new("node-1".to_string()),
         network_ids: vec!["test-network".to_string()],
-        address: "localhost:8080".to_string(),
+        addresses: vec!["localhost:8080".to_string()],
         capabilities: vec![
             ServiceCapability {
                 network_id: "test-network".to_string(),
@@ -59,7 +59,7 @@ async fn test_memory_discovery_register_and_find() -> Result<()> {
     let nodes = discovery.discover_nodes(Some("test-network")).await?;
     assert_eq!(nodes.len(), 1);
     assert_eq!(nodes[0].peer_id.public_key, "node-1");
-    assert_eq!(nodes[0].address, "localhost:8080");
+    assert_eq!(nodes[0].addresses, "localhost:8080");
     
     // Find by ID
     let found = discovery.find_node("test-network", "node-1").await?;
@@ -93,7 +93,7 @@ async fn test_memory_discovery_update_node() -> Result<()> {
     let node_info = NodeInfo {
         peer_id: PeerId::new("node-1".to_string()),
         network_ids: vec!["test-network".to_string()],
-        address: "localhost:8080".to_string(),
+        addresses: "localhost:8080".to_string(),
         capabilities: vec![
             ServiceCapability {
                 network_id: "test-network".to_string(),
@@ -126,7 +126,7 @@ async fn test_memory_discovery_update_node() -> Result<()> {
     let updated_node = NodeInfo {
         peer_id: PeerId::new("node-1".to_string()),
         network_ids: vec!["test-network".to_string()],
-        address: "localhost:8080".to_string(),
+        addresses: "localhost:8080".to_string(),
         capabilities: vec![
             ServiceCapability {
                 network_id: "test-network".to_string(),
@@ -197,7 +197,7 @@ async fn test_memory_discovery_cleanup() -> Result<()> {
     let fresh_node = NodeInfo {
         peer_id: PeerId::new("fresh-node".to_string()),
         network_ids: vec!["test-network".to_string()],
-        address: "localhost:8080".to_string(),
+        addresses: "localhost:8080".to_string(),
         capabilities: vec![
             ServiceCapability {
                 network_id: "test-network".to_string(),
@@ -224,7 +224,7 @@ async fn test_memory_discovery_cleanup() -> Result<()> {
     let stale_node = NodeInfo {
         peer_id: PeerId::new("stale-node".to_string()),
         network_ids: vec!["test-network".to_string()],
-        address: "localhost:8081".to_string(),
+        addresses: "localhost:8081".to_string(),
         capabilities: vec![
             ServiceCapability {
                 network_id: "test-network".to_string(),
@@ -264,7 +264,7 @@ async fn test_memory_discovery_cleanup() -> Result<()> {
     let updated_fresh_node = NodeInfo {
         peer_id: PeerId::new("fresh-node".to_string()),
         network_ids: vec!["test-network".to_string()],
-        address: "localhost:8080".to_string(),
+        addresses: "localhost:8080".to_string(),
         capabilities: vec![
             ServiceCapability {
                 network_id: "test-network".to_string(),
@@ -330,7 +330,7 @@ async fn test_memory_discovery_max_nodes() -> Result<()> {
         let node = NodeInfo {
             peer_id: PeerId::new(format!("node-{}", i)),
             network_ids: vec!["test-network".to_string()],
-            address: format!("localhost:808{}", i),
+            addresses: format!("localhost:808{}", i),
             capabilities: vec![
                 ServiceCapability {
                     network_id: "test-network".to_string(),
@@ -379,7 +379,7 @@ async fn test_memory_discovery_multiple_networks() -> Result<()> {
     let node1 = NodeInfo {
         peer_id: PeerId::new("node-1".to_string()),
         network_ids: vec!["network-1".to_string()],
-        address: "localhost:8080".to_string(),
+        addresses: "localhost:8080".to_string(),
         capabilities: vec![
             ServiceCapability {
                 network_id: "network-1".to_string(),
@@ -404,7 +404,7 @@ async fn test_memory_discovery_multiple_networks() -> Result<()> {
     let node2 = NodeInfo {
         peer_id: PeerId::new("node-2".to_string()),
         network_ids: vec!["network-2".to_string()],
-        address: "localhost:8081".to_string(),
+        addresses: "localhost:8081".to_string(),
         capabilities: vec![
             ServiceCapability {
                 network_id: "network-2".to_string(),
