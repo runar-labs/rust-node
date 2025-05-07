@@ -1,23 +1,23 @@
 // Memory-based Node Discovery
 //
 // INTENTION: Provide a simple in-memory implementation of node discovery
-// for development and testing. This implementation maintains a list of nodes 
+// for development and testing. This implementation maintains a list of nodes
 // in memory and doesn't use actual network protocols for discovery.
 
 // Standard library imports
-use std::time::{Duration, SystemTime};
+use anyhow::{anyhow, Result};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, SystemTime};
 use tokio::task::JoinHandle;
-use anyhow::{Result, anyhow};
 
 // Internal imports
-use crate::network::transport::PeerId;
-use crate::network::capabilities::ServiceCapability;
-use super::{NodeDiscovery, NodeInfo, DiscoveryOptions, DiscoveryListener};
 use super::multicast_discovery::PeerInfo;
-use runar_common::logging::{Logger, Component};
+use super::{DiscoveryListener, DiscoveryOptions, NodeDiscovery, NodeInfo};
+use crate::network::capabilities::ServiceCapability;
+use crate::network::transport::PeerId;
 use async_trait::async_trait;
+use runar_common::logging::{Component, Logger};
 use tokio::time;
 
 /// In-memory node discovery for development and testing
@@ -86,20 +86,20 @@ impl MemoryDiscovery {
 
             loop {
                 ticker.tick().await;
-                
+
                 // Update the node's last_seen timestamp
                 let mut updated_info = node_info.clone();
                 updated_info.last_seen = SystemTime::now();
-                
+
                 // "Announce" by updating our entry in the registry
                 let node_key = updated_info.peer_id.to_string();
                 {
                     let mut nodes_map = nodes.write().unwrap();
                     nodes_map.insert(node_key.clone(), updated_info.clone());
                 }
-                
+
                 logger.debug(format!("Announcing local node: {}", node_key));
-                
+
                 // Notify listeners (simulating network discovery update)
                 {
                     let listeners_guard = listeners.read().unwrap();
@@ -118,20 +118,26 @@ impl MemoryDiscovery {
     }
 
     /// Remove nodes that haven't been seen for a while
-    fn cleanup_stale_nodes(nodes: &RwLock<HashMap<String, NodeInfo>>, ttl: Duration, logger: &Logger) {
+    fn cleanup_stale_nodes(
+        nodes: &RwLock<HashMap<String, NodeInfo>>,
+        ttl: Duration,
+        logger: &Logger,
+    ) {
         let now = SystemTime::now();
         let mut nodes_map = nodes.write().unwrap();
-        
+
         // Collect keys of stale nodes first to avoid borrowing issues
-        let stale_keys: Vec<String> = nodes_map.iter()
+        let stale_keys: Vec<String> = nodes_map
+            .iter()
             .filter_map(|(key, info)| {
-                info.last_seen.elapsed()
+                info.last_seen
+                    .elapsed()
                     .ok()
                     .filter(|elapsed| *elapsed > ttl)
                     .map(|_| key.clone())
             })
             .collect();
-            
+
         // Remove stale nodes
         for key in stale_keys {
             logger.debug(format!("Removing stale node: {}", key));
@@ -141,14 +147,15 @@ impl MemoryDiscovery {
 
     /// Adds a node to the discovery registry.
     async fn add_node_internal(&self, node_info: NodeInfo) {
-        let node_key = node_info.peer_id.to_string(); 
+        let node_key = node_info.peer_id.to_string();
         {
             let mut nodes = self.nodes.write().unwrap();
             nodes.insert(node_key.clone(), node_info.clone());
         }
-        
-        self.logger.debug(format!("Added node to registry: {}", node_key));
-        
+
+        self.logger
+            .debug(format!("Added node to registry: {}", node_key));
+
         // Notify listeners
         let listeners = self.listeners.read().unwrap();
         for listener in listeners.iter() {
@@ -166,17 +173,20 @@ impl MemoryDiscovery {
 #[async_trait]
 impl NodeDiscovery for MemoryDiscovery {
     async fn init(&self, options: DiscoveryOptions) -> Result<()> {
-        self.logger.info(format!("Initializing MemoryDiscovery with options: {:?}", options));
-        
+        self.logger.info(format!(
+            "Initializing MemoryDiscovery with options: {:?}",
+            options
+        ));
+
         *self.options.write().unwrap() = Some(options.clone());
-        
+
         // Start the cleanup task
         let task = self.start_cleanup_task(options);
         *self.cleanup_task.lock().unwrap() = Some(task);
-        
+
         Ok(())
     }
-    
+
     async fn start_announcing(&self) -> Result<()> {
         // Get the local node info from the stored value
         let info = match &*self.local_node.read().unwrap() {
@@ -186,9 +196,10 @@ impl NodeDiscovery for MemoryDiscovery {
                 return Err(err);
             }
         };
-        
-        self.logger.info(format!("Starting to announce node: {}", info.peer_id));
-        
+
+        self.logger
+            .info(format!("Starting to announce node: {}", info.peer_id));
+
         // Get the options
         let options = match &*self.options.read().unwrap() {
             Some(opts) => opts.clone(),
@@ -197,43 +208,46 @@ impl NodeDiscovery for MemoryDiscovery {
                 return Err(err);
             }
         };
-        
+
         // Add our node to the registry
         self.add_node_internal(info.clone()).await;
-        
+
         // Start the announcement task
         let task = self.start_announce_task(info, options);
         *self.announce_task.lock().unwrap() = Some(task);
-        
+
         Ok(())
     }
-    
+
     async fn stop_announcing(&self) -> Result<()> {
         self.logger.info("Stopping node announcements".to_string());
-        
+
         // Stop the announcement task if it exists
         if let Some(task) = self.announce_task.lock().unwrap().take() {
             task.abort();
         }
-        
+
         // Remove our node from the registry
         if let Some(info) = &*self.local_node.read().unwrap() {
             let mut nodes_map = self.nodes.write().unwrap();
             nodes_map.remove(&info.peer_id.to_string());
-            self.logger.debug(format!("Removed local node {} from registry", info.peer_id));
+            self.logger
+                .debug(format!("Removed local node {} from registry", info.peer_id));
         }
-        
+
         Ok(())
     }
-    
+
     async fn register_node(&self, node_info: NodeInfo) -> Result<()> {
-        self.logger.info(format!("Manually registering node: {}", node_info.peer_id));
+        self.logger
+            .info(format!("Manually registering node: {}", node_info.peer_id));
         self.add_node_internal(node_info).await;
         Ok(())
     }
 
     async fn update_node(&self, node_info: NodeInfo) -> Result<()> {
-        self.logger.info(format!("Updating node: {}", node_info.peer_id));
+        self.logger
+            .info(format!("Updating node: {}", node_info.peer_id));
         // Same as register for in-memory
         self.add_node_internal(node_info).await;
         Ok(())
@@ -241,17 +255,23 @@ impl NodeDiscovery for MemoryDiscovery {
 
     async fn discover_nodes(&self, network_id: Option<&str>) -> Result<Vec<NodeInfo>> {
         let target_network = network_id.unwrap_or("default");
-        self.logger.info(format!("Discovering nodes for network: {}", target_network));
-        
+        self.logger
+            .info(format!("Discovering nodes for network: {}", target_network));
+
         let nodes_map = self.nodes.read().unwrap();
         let result: Vec<NodeInfo> = nodes_map
             .values()
             // Filter based on whether the node's network_ids list contains the requested network_id
-            .filter(|info| network_id.map_or(true, |net_id| info.network_ids.contains(&net_id.to_string())))
+            .filter(|info| {
+                network_id.map_or(true, |net_id| {
+                    info.network_ids.contains(&net_id.to_string())
+                })
+            })
             .cloned()
             .collect();
-            
-        self.logger.info(format!("Discovered {} nodes", result.len()));
+
+        self.logger
+            .info(format!("Discovered {} nodes", result.len()));
         Ok(result)
     }
 
@@ -259,13 +279,19 @@ impl NodeDiscovery for MemoryDiscovery {
         let nodes = self.nodes.read().unwrap();
         let key = PeerId::new(node_id.to_string()).to_string();
         let node = nodes.get(&key).cloned();
-        
+
         if let Some(ref node_info) = node {
-            self.logger.debug(format!("Found node {}/{} in local registry", network_id, node_id));
+            self.logger.debug(format!(
+                "Found node {}/{} in local registry",
+                network_id, node_id
+            ));
         } else {
-            self.logger.debug(format!("Node {}/{} not found in local registry", network_id, node_id));
+            self.logger.debug(format!(
+                "Node {}/{} not found in local registry",
+                network_id, node_id
+            ));
         }
-        
+
         Ok(node)
     }
 
@@ -274,23 +300,24 @@ impl NodeDiscovery for MemoryDiscovery {
         self.listeners.write().unwrap().push(listener);
         Ok(())
     }
-    
+
     async fn shutdown(&self) -> Result<()> {
-        self.logger.info("Shutting down MemoryDiscovery".to_string());
-        
+        self.logger
+            .info("Shutting down MemoryDiscovery".to_string());
+
         // Stop the cleanup task
         if let Some(task) = self.cleanup_task.lock().unwrap().take() {
             task.abort();
         }
-        
+
         // Stop the announcement task
         if let Some(task) = self.announce_task.lock().unwrap().take() {
             task.abort();
         }
-        
+
         // Clear all nodes
         self.nodes.write().unwrap().clear();
-        
+
         Ok(())
     }
 }
@@ -298,10 +325,9 @@ impl NodeDiscovery for MemoryDiscovery {
 #[cfg(test)]
 mod tests {
     // Add necessary imports for testing
-    use super::*; 
+    use super::*;
     use crate::network::transport::PeerId;
     use std::time::SystemTime;
-    
 
     // ... other test helper functions ...
 
@@ -310,11 +336,11 @@ mod tests {
         // Setup discovery instance with a test logger
         let logger = Logger::new_root(Component::Network, "test_node");
         let discovery = MemoryDiscovery::new(logger);
-        
+
         // Set options
         let options = DiscoveryOptions::default();
         discovery.init(options).await.unwrap();
-        
+
         // Set up local node
         let local_node = NodeInfo {
             peer_id: PeerId::new("test_node".to_string()),
@@ -324,7 +350,7 @@ mod tests {
             last_seen: SystemTime::now(),
         };
         discovery.set_local_node(local_node);
-        
+
         // Create NodeInfo for test
         let node_info_1 = NodeInfo {
             peer_id: PeerId::new("node1".to_string()),
@@ -334,7 +360,7 @@ mod tests {
             last_seen: SystemTime::now(),
         };
         discovery.register_node(node_info_1).await.unwrap();
-        
+
         // Find the node
         let found_node = discovery.find_node("net1", "node1").await.unwrap();
         assert!(found_node.is_some());
@@ -345,4 +371,4 @@ mod tests {
         assert!(not_found_node.is_none());
     }
     // TODO: Add tests for register, update, discover, cleanup, listener
-} 
+}

@@ -1,25 +1,25 @@
 // Node Discovery Interface
 //
 // INTENTION: Define interfaces for node discovery mechanisms. Discovery is responsible
-// for finding and announcing node presence on the network, but NOT maintaining 
+// for finding and announcing node presence on the network, but NOT maintaining
 // a registry of nodes or managing connections.
 
 use anyhow::Result;
 use async_trait::async_trait;
 use multicast_discovery::PeerInfo;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use serde::{Serialize, Deserialize};
 
-use crate::network::transport::PeerId;
 use crate::network::capabilities::ServiceCapability;
+use crate::network::transport::PeerId;
 
 pub mod memory_discovery;
-pub mod multicast_discovery;
 pub mod mock;
+pub mod multicast_discovery;
 
 pub use memory_discovery::MemoryDiscovery;
-pub use multicast_discovery::MulticastDiscovery;
 pub use mock::MockNodeDiscovery;
+pub use multicast_discovery::MulticastDiscovery;
 
 /// Configuration options for node discovery
 #[derive(Clone, Debug)]
@@ -81,16 +81,16 @@ pub type DiscoveryListener = Box<dyn Fn(PeerInfo) + Send + Sync>;
 pub trait NodeDiscovery: Send + Sync {
     /// Initialize the discovery mechanism with the given options
     async fn init(&self, options: DiscoveryOptions) -> Result<()>;
-    
+
     /// Start announcing this node's presence on the network
     async fn start_announcing(&self) -> Result<()>;
-    
+
     /// Stop announcing this node's presence
     async fn stop_announcing(&self) -> Result<()>;
-     
+
     /// Set a listener to be called when nodes are discovered or updated
     async fn set_discovery_listener(&self, listener: DiscoveryListener) -> Result<()>;
-    
+
     /// Shutdown the discovery mechanism
     async fn shutdown(&self) -> Result<()>;
-} 
+}

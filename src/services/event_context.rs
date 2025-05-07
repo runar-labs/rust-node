@@ -10,14 +10,14 @@
 // the necessary information and functionality to process the event,
 // while maintaining proper isolation between events.
 
-use std::fmt;
-use std::sync::Arc;
-use anyhow::{Result, anyhow};
 use crate::routing::TopicPath;
 use crate::services::NodeDelegate;
-use runar_common::logging::{Logger, LoggingContext, Component};
+use crate::services::{PublishOptions, ServiceResponse};
+use anyhow::{anyhow, Result};
+use runar_common::logging::{Component, Logger, LoggingContext};
 use runar_common::types::ValueType;
-use crate::services::{ServiceResponse, PublishOptions};
+use std::fmt;
+use std::sync::Arc;
 
 /// Context for handling events
 ///
@@ -26,19 +26,19 @@ use crate::services::{ServiceResponse, PublishOptions};
 /// publishing other events or making service requests.
 ///
 /// ARCHITECTURAL PRINCIPLE:
-/// Event handlers should have access to necessary context for performing 
+/// Event handlers should have access to necessary context for performing
 /// their operations, but with appropriate isolation and scope control.
 /// The EventContext provides a controlled interface to the node's capabilities.
 pub struct EventContext {
     /// Complete topic path for this event
     pub topic_path: TopicPath,
-    
+
     /// Logger instance specific to this context
     pub logger: Logger,
-    
+
     /// Node delegate for making requests or publishing events
     pub(crate) node_delegate: Option<Arc<dyn NodeDelegate + Send + Sync>>,
-    
+
     /// Delivery options used when publishing this event
     pub delivery_options: Option<PublishOptions>,
 }
@@ -69,7 +69,7 @@ impl Default for EventContext {
 }
 
 /// Constructors follow the builder pattern principle:
-/// - Prefer a single primary constructor with required parameters 
+/// - Prefer a single primary constructor with required parameters
 /// - Use builder methods for optional parameters
 /// - Avoid creating specialized constructors for every parameter combination
 impl EventContext {
@@ -85,7 +85,7 @@ impl EventContext {
         } else {
             logger
         };
-        
+
         Self {
             topic_path: topic_path.clone(),
             logger: event_logger,
@@ -93,7 +93,7 @@ impl EventContext {
             delivery_options: None,
         }
     }
-    
+
     /// Add node delegate to an EventContext
     ///
     /// Used to make service requests from within an event handler.
@@ -101,7 +101,7 @@ impl EventContext {
         self.node_delegate = Some(delegate);
         self
     }
-    
+
     /// Add delivery options to an EventContext
     ///
     /// Used to specify how this event was delivered.
@@ -109,7 +109,7 @@ impl EventContext {
         self.delivery_options = Some(options);
         self
     }
-    
+
     /// Helper method to log debug level message
     pub fn debug(&self, message: impl Into<String>) {
         self.logger.debug(message);
@@ -129,7 +129,7 @@ impl EventContext {
     pub fn error(&self, message: impl Into<String>) {
         self.logger.error(message);
     }
-    
+
     /// Publish an event
     ///
     /// INTENTION: Allow event handlers to publish their own events.
@@ -143,7 +143,7 @@ impl EventContext {
     pub async fn publish(&self, topic: impl Into<String>, data: ValueType) -> Result<()> {
         if let Some(delegate) = &self.node_delegate {
             let topic_string = topic.into();
-            
+
             // Process the topic based on its format
             let full_topic = if topic_string.contains(':') {
                 // Already has network ID, use as is
@@ -153,20 +153,22 @@ impl EventContext {
                 format!("{}:{}", self.topic_path.network_id(), topic_string)
             } else {
                 // Simple topic name - add service path and network ID
-                format!("{}:{}/{}", 
-                    self.topic_path.network_id(), 
-                    self.topic_path.service_path(), 
+                format!(
+                    "{}:{}/{}",
+                    self.topic_path.network_id(),
+                    self.topic_path.service_path(),
                     topic_string
                 )
             };
-            
-            self.logger.debug(format!("Publishing to processed topic: {}", full_topic));
+
+            self.logger
+                .debug(format!("Publishing to processed topic: {}", full_topic));
             delegate.publish(full_topic, data).await
         } else {
             Err(anyhow!("No node delegate available in this context"))
         }
     }
-    
+
     /// Make a service request
     ///
     /// INTENTION: Allow event handlers to make requests to other services.
@@ -177,10 +179,14 @@ impl EventContext {
     /// - Full path with network ID: "network:service/action" (used as is)
     /// - Path with service: "service/action" (network ID added)
     /// - Simple action: "action" (both service path and network ID added - calls own service)
-    pub async fn request(&self, path: impl Into<String>, params: ValueType) -> Result<ServiceResponse> {
+    pub async fn request(
+        &self,
+        path: impl Into<String>,
+        params: ValueType,
+    ) -> Result<ServiceResponse> {
         if let Some(delegate) = &self.node_delegate {
             let path_string = path.into();
-            
+
             // Process the path based on its format
             let full_path = if path_string.contains(':') {
                 // Already has network ID, use as is
@@ -190,14 +196,16 @@ impl EventContext {
                 format!("{}:{}", self.topic_path.network_id(), path_string)
             } else {
                 // Simple action name - add both service path and network ID
-                format!("{}:{}/{}", 
-                    self.topic_path.network_id(), 
-                    self.topic_path.service_path(), 
+                format!(
+                    "{}:{}/{}",
+                    self.topic_path.network_id(),
+                    self.topic_path.service_path(),
                     path_string
                 )
             };
-            
-            self.logger.debug(format!("Making request to processed path: {}", full_path));
+
+            self.logger
+                .debug(format!("Making request to processed path: {}", full_path));
             delegate.request(full_path, params).await
         } else {
             Err(anyhow!("No node delegate available in this context"))
@@ -209,19 +217,19 @@ impl LoggingContext for EventContext {
     fn component(&self) -> Component {
         Component::Service
     }
-    
+
     fn service_path(&self) -> Option<&str> {
         // Convert the owned String to a string slice that lives as long as self
         let path = self.topic_path.service_path();
         Some(Box::leak(path.into_boxed_str()))
     }
-    
+
     fn event_path(&self) -> Option<&str> {
         // Get from logger's event_path
         self.logger.event_path()
     }
-    
+
     fn logger(&self) -> &Logger {
         &self.logger
     }
-} 
+}

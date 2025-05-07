@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use super::{NodeDiscovery, NodeInfo, DiscoveryOptions, DiscoveryListener};
+use super::{DiscoveryListener, DiscoveryOptions, NodeDiscovery, NodeInfo};
 use crate::network::transport::PeerId;
 
 /// A mock implementation of NodeDiscovery that stores nodes in memory
@@ -29,7 +29,10 @@ impl MockNodeDiscovery {
 
     /// Add a test node to the discovery service
     pub fn add_test_node(&self, info: NodeInfo) {
-        self.nodes.write().unwrap().insert(info.peer_id.public_key.clone(), info);
+        self.nodes
+            .write()
+            .unwrap()
+            .insert(info.peer_id.public_key.clone(), info);
     }
 
     /// Clear all nodes
@@ -53,29 +56,33 @@ impl NodeDiscovery for MockNodeDiscovery {
     async fn init(&self, _options: DiscoveryOptions) -> Result<()> {
         Ok(())
     }
-    
-    async fn start_announcing(&self ) -> Result<()> {
-         
+
+    async fn start_announcing(&self) -> Result<()> {
         Ok(())
     }
-    
+
     async fn stop_announcing(&self) -> Result<()> {
         Ok(())
     }
-    
+
     async fn discover_nodes(&self, network_id: Option<&str>) -> Result<Vec<NodeInfo>> {
         let nodes_map = self.nodes.read().unwrap();
-        Ok(nodes_map.values()
-            .filter(|info| network_id.map_or(true, |net_id| info.network_ids.contains(&net_id.to_string())))
+        Ok(nodes_map
+            .values()
+            .filter(|info| {
+                network_id.map_or(true, |net_id| {
+                    info.network_ids.contains(&net_id.to_string())
+                })
+            })
             .cloned()
             .collect())
     }
-    
+
     async fn set_discovery_listener(&self, listener: DiscoveryListener) -> Result<()> {
         self.listeners.write().unwrap().push(listener);
         Ok(())
     }
-    
+
     async fn shutdown(&self) -> Result<()> {
         self.nodes.write().unwrap().clear();
         Ok(())
@@ -96,4 +103,4 @@ impl NodeDiscovery for MockNodeDiscovery {
         let key = PeerId::new(node_id.to_string()).to_string();
         Ok(nodes.get(&key).cloned())
     }
-} 
+}

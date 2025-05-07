@@ -3,32 +3,31 @@
 // This module defines the network transport interfaces and implementations.
 
 // Standard library imports
-use std::time::Duration;
-use std::sync::{Arc, RwLock as StdRwLock};
-use std::net::SocketAddr;
 use std::collections::HashMap;
-use std::time::Instant;
 use std::collections::VecDeque;
+use std::net::SocketAddr;
+use std::sync::{Arc, RwLock as StdRwLock};
+use std::time::Duration;
+use std::time::Instant;
 
 // External crate imports
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use quinn::{Endpoint, ServerConfig, ClientConfig, ConnectionError, TransportConfig};
-use runar_common::types::ValueType;
-use rustls::{ServerName, Certificate, PrivateKey};
-use tokio::sync::{RwLock as TokioRwLock, Mutex as TokioMutex, mpsc};
+use quinn::{ClientConfig, ConnectionError, Endpoint, ServerConfig, TransportConfig};
+use runar_common::types::{ArcValueType, SerializerRegistry};
+use rustls::{Certificate, PrivateKey, ServerName};
+use tokio::sync::oneshot;
+use tokio::sync::{mpsc, Mutex as TokioMutex, RwLock as TokioRwLock};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
-use tokio::sync::oneshot;
 use uuid;
 
 // Internal module imports
+use super::peer_registry::{PeerEntry, PeerRegistry, PeerStatus};
 use super::{
-    NetworkTransport, NetworkMessage, NetworkMessageType, NetworkError, 
-    NetworkMessagePayloadItem, PeerId, TransportOptions,
-    MessageHandler, MessageCallback, ConnectionCallback
+    ConnectionCallback, MessageCallback, MessageHandler, NetworkError, NetworkMessage,
+    NetworkMessagePayloadItem, NetworkMessageType, NetworkTransport, PeerId, TransportOptions,
 };
-use super::peer_registry::{PeerRegistry, PeerStatus, PeerEntry};
 use crate::network::discovery::multicast_discovery::PeerInfo;
 use crate::network::discovery::{NodeDiscovery, NodeInfo};
 use crate::node::NetworkConfig;
@@ -94,7 +93,6 @@ pub struct QuicTransportOptions {
 impl QuicTransportOptions {
     /// Create a new instance with default settings and a randomly selected port
     pub fn new() -> Self {
-       
         Self {
             certificates: None,
             private_key: None,
@@ -108,74 +106,74 @@ impl QuicTransportOptions {
             max_idle_streams_per_peer: 10,
         }
     }
-       
+
     /// Set TLS certificate chain directly
     pub fn with_certificates(mut self, certs: Vec<Certificate>) -> Self {
         self.certificates = Some(certs);
         self
     }
-    
+
     /// Set TLS private key directly
     pub fn with_private_key(mut self, key: PrivateKey) -> Self {
         self.private_key = Some(key);
         self
     }
-    
+
     /// Set TLS certificate path
     pub fn with_cert_path(mut self, path: String) -> Self {
         self.cert_path = Some(path);
         self
     }
-    
+
     /// Set TLS private key path
     pub fn with_key_path(mut self, path: String) -> Self {
         self.key_path = Some(path);
         self
     }
-    
+
     /// Set whether to verify certificates
     pub fn with_verify_certificates(mut self, verify: bool) -> Self {
         self.verify_certificates = verify;
         self
     }
-    
+
     /// Set keep-alive interval
     pub fn with_keep_alive_interval(mut self, interval_ms: u64) -> Self {
         self.keep_alive_interval_ms = interval_ms;
         self
     }
-    
+
     /// Set maximum number of concurrent bi-directional streams
     pub fn with_max_concurrent_bidi_streams(mut self, max: u32) -> Self {
         self.max_concurrent_bidi_streams = max;
         self
     }
-    
+
     /// Set connection idle timeout
     pub fn with_connection_idle_timeout(mut self, timeout_ms: u64) -> Self {
         self.connection_idle_timeout_ms = timeout_ms;
         self
     }
-    
+
     /// Set stream idle timeout
     pub fn with_stream_idle_timeout(mut self, timeout_ms: u64) -> Self {
         self.stream_idle_timeout_ms = timeout_ms;
         self
     }
-    
+
     /// Set maximum number of idle streams per peer
     pub fn with_max_idle_streams_per_peer(mut self, max: usize) -> Self {
         self.max_idle_streams_per_peer = max;
         self
     }
-    
+
     /// Get certificates and key from configuration
     fn get_certificates_and_key(&self, logger: &Logger) -> Result<(Vec<Certificate>, PrivateKey)> {
         // First check if certificates are provided directly in memory
         if let (Some(certs), Some(key)) = (&self.certificates, &self.private_key) {
             return Ok((certs.clone(), key.clone()));
         }
-        
+
         // Otherwise try to load from files
         if let (Some(cert_path), Some(key_path)) = (&self.cert_path, &self.key_path) {
             // Read certificate file
@@ -184,105 +182,113 @@ impl QuicTransportOptions {
                 .into_iter()
                 .map(Certificate)
                 .collect::<Vec<_>>();
-                
+
             // Read private key file
             let key_file = std::fs::read(key_path)?;
             let mut keys = rustls_pemfile::pkcs8_private_keys(&mut key_file.as_slice())?;
-            
+
             if cert_chain.is_empty() {
                 return Err(anyhow!("No certificates found in certificate file"));
             }
-            
+
             if keys.is_empty() {
                 return Err(anyhow!("No private keys found in key file"));
             }
-            
+
             let key = PrivateKey(keys.remove(0));
             return Ok((cert_chain, key));
         }
-        
+
         // If we get here, no certificates were provided
         logger.error("No TLS certificates provided. QUIC requires TLS certificates.");
         Err(anyhow!("No TLS certificates provided"))
     }
-    
+
     /// Create server configuration for QUIC
     pub fn create_server_config(&self, logger: &Logger) -> Result<ServerConfig> {
         // Create transport config based on our options, not defaults
         let mut transport_config = TransportConfig::default();
-        
+
         // Apply all settings from our transport options
-        transport_config.keep_alive_interval(Some(Duration::from_millis(
-            self.keep_alive_interval_ms
-        )));
-        
-        transport_config.max_concurrent_bidi_streams(
-            self.max_concurrent_bidi_streams.into()
-        );
-        
+        transport_config
+            .keep_alive_interval(Some(Duration::from_millis(self.keep_alive_interval_ms)));
+
+        transport_config.max_concurrent_bidi_streams(self.max_concurrent_bidi_streams.into());
+
         // Set connection timeout based on our options
-        transport_config.max_idle_timeout(Some(Duration::from_millis(
-            self.connection_idle_timeout_ms
-        ).try_into().unwrap_or_else(|_| {
-            logger.warn(format!("Connection idle timeout {} ms is too large, using maximum allowed", 
-                self.connection_idle_timeout_ms));
-            // Use a very large timeout instead of MAX which doesn't exist
-            std::time::Duration::from_secs(u64::MAX / 1000).try_into().unwrap_or_default()
-        })));
-        
+        transport_config.max_idle_timeout(Some(
+            Duration::from_millis(self.connection_idle_timeout_ms)
+                .try_into()
+                .unwrap_or_else(|_| {
+                    logger.warn(format!(
+                        "Connection idle timeout {} ms is too large, using maximum allowed",
+                        self.connection_idle_timeout_ms
+                    ));
+                    // Use a very large timeout instead of MAX which doesn't exist
+                    std::time::Duration::from_secs(u64::MAX / 1000)
+                        .try_into()
+                        .unwrap_or_default()
+                }),
+        ));
+
         // Load certificates from memory or file
         let (certs, key) = self.get_certificates_and_key(logger)?;
-        
+
         // Create server configuration (will fail if no valid certificates are provided)
         let mut server_config = ServerConfig::with_single_cert(certs, key)?;
         server_config.transport = Arc::new(transport_config);
-        
+
         Ok(server_config)
     }
-    
+
     /// Create client configuration for QUIC
     pub fn create_client_config(&self, logger: &Logger) -> Result<ClientConfig> {
         // Create transport config based on our options, not defaults
         let mut transport_config = TransportConfig::default();
-        
+
         // Apply all settings from our transport options
-        transport_config.keep_alive_interval(Some(Duration::from_millis(
-            self.keep_alive_interval_ms
-        )));
-        
-        transport_config.max_concurrent_bidi_streams(
-            self.max_concurrent_bidi_streams.into()
-        );
-        
+        transport_config
+            .keep_alive_interval(Some(Duration::from_millis(self.keep_alive_interval_ms)));
+
+        transport_config.max_concurrent_bidi_streams(self.max_concurrent_bidi_streams.into());
+
         // Set connection timeout based on our options
-        transport_config.max_idle_timeout(Some(Duration::from_millis(
-            self.connection_idle_timeout_ms
-        ).try_into().unwrap_or_else(|_| {
-            logger.warn(format!("Connection idle timeout {} ms is too large, using maximum allowed", 
-                self.connection_idle_timeout_ms));
-            // Use a very large timeout instead of MAX which doesn't exist
-            std::time::Duration::from_secs(u64::MAX / 1000).try_into().unwrap_or_default()
-        })));
-        
+        transport_config.max_idle_timeout(Some(
+            Duration::from_millis(self.connection_idle_timeout_ms)
+                .try_into()
+                .unwrap_or_else(|_| {
+                    logger.warn(format!(
+                        "Connection idle timeout {} ms is too large, using maximum allowed",
+                        self.connection_idle_timeout_ms
+                    ));
+                    // Use a very large timeout instead of MAX which doesn't exist
+                    std::time::Duration::from_secs(u64::MAX / 1000)
+                        .try_into()
+                        .unwrap_or_default()
+                }),
+        ));
+
         let shared_transport_config = Arc::new(transport_config);
-        
+
         // Create client configuration - using ClientConfig builder
         let mut crypto_config = rustls::ClientConfig::builder()
             .with_safe_defaults()
             .with_root_certificates(rustls::RootCertStore::empty())
             .with_no_client_auth();
-            
+
         // Disable certificate verification if needed
         // IMPORTANT: This should ONLY be used for development/testing and NEVER in production
         if !self.verify_certificates {
             logger.warn("SECURITY WARNING: Certificate verification is disabled. This configuration is NOT secure for production use!");
-            crypto_config.dangerous().set_certificate_verifier(Arc::new(NoVerification {}));
+            crypto_config
+                .dangerous()
+                .set_certificate_verifier(Arc::new(NoVerification {}));
         }
-        
+
         // Apply transport config using the builder
         let mut client_config = ClientConfig::new(Arc::new(crypto_config));
         client_config.transport_config(shared_transport_config);
-        
+
         Ok(client_config)
     }
 }
@@ -326,7 +332,7 @@ impl QuicTransport {
     pub fn new(node_id: PeerId, network_config: NetworkConfig, logger: Logger) -> Self {
         // Create peer registry with default options
         let peer_registry = Arc::new(PeerRegistry::new());
-        
+
         Self {
             node_id,
             network_config,
@@ -342,33 +348,47 @@ impl QuicTransport {
             logger,
         }
     }
-    
+
     /// Setup the QUIC endpoint
     async fn setup_endpoint(&self) -> Result<Endpoint> {
         let bind_addr = self.network_config.transport_options.bind_address;
-        
+
         // Log the bind address details
-        self.logger.info(format!("Setting up QUIC endpoint with bind address: {}", bind_addr));
-        self.logger.debug(format!("QUIC endpoint port: {} (from port range 50000..51000)", bind_addr.port()));
-        
+        self.logger.info(format!(
+            "Setting up QUIC endpoint with bind address: {}",
+            bind_addr
+        ));
+        self.logger.debug(format!(
+            "QUIC endpoint port: {} (from port range 50000..51000)",
+            bind_addr.port()
+        ));
+
         // Create server config
         let server_config = self.create_server_config()?;
-        
+
         // Create the endpoint
         let endpoint = Endpoint::server(server_config, bind_addr)
             .map_err(|e| anyhow::anyhow!("Failed to setup endpoint: {}", e))?;
-            
-        self.logger.info(format!("QUIC endpoint successfully bound to {}", endpoint.local_addr().unwrap_or_else(|_| String::from("unknown").parse().unwrap())));
-        
+
+        self.logger.info(format!(
+            "QUIC endpoint successfully bound to {}",
+            endpoint
+                .local_addr()
+                .unwrap_or_else(|_| String::from("unknown").parse().unwrap())
+        ));
+
         Ok(endpoint)
     }
-    
+
     /// Create server configuration for QUIC
     fn create_server_config(&self) -> Result<ServerConfig> {
         // Check if we have QUIC options configured
-        let quic_options = self.network_config.quic_options.as_ref()
+        let quic_options = self
+            .network_config
+            .quic_options
+            .as_ref()
             .ok_or_else(|| anyhow!("No QUIC options provided in network config"))?;
-        
+
         // Pass the logger to the options method
         quic_options.create_server_config(&self.logger)
     }
@@ -376,90 +396,52 @@ impl QuicTransport {
     /// Create client configuration for QUIC
     fn create_client_config(&self) -> Result<ClientConfig> {
         // Check if we have QUIC options configured
-        let quic_options = self.network_config.quic_options.as_ref()
+        let quic_options = self
+            .network_config
+            .quic_options
+            .as_ref()
             .ok_or_else(|| anyhow!("No QUIC options provided in network config"))?;
-        
+
         // Pass the logger to the options method
         quic_options.create_client_config(&self.logger)
     }
-    
-    /// Start the server task to accept incoming connections
-    async fn start_server_task(&self, endpoint: Endpoint) -> Result<JoinHandle<()>> {
-        let logger = self.logger.clone();
-        let handlers_arc: Arc<StdRwLock<Vec<MessageHandler>>> = Arc::clone(&self.handlers);
-        let connections_arc: Arc<TokioRwLock<HashMap<String, Arc<TokioMutex<PeerState>>>>> = Arc::clone(&self.connections);
-        let callback_arc: Arc<TokioRwLock<Option<ConnectionCallback>>> = Arc::clone(&self.connection_callback);
-        let max_idle_streams = self.network_config.quic_options.as_ref()
-            .map(|opts| opts.max_idle_streams_per_peer)
-            .unwrap_or(10); // Default if not specified
 
-        let task = tokio::spawn(async move {
-            logger.info(format!("QUIC server listening on {}", endpoint.local_addr().unwrap()));
-
-            while let Some(conn_attempt) = endpoint.accept().await {
-                let conn_logger = logger.clone(); // Clone logger for this connection attempt
-                match conn_attempt.await {
-                    Ok(conn) => {
-                        let remote_addr = conn.remote_address();
-                        conn_logger.info(format!("Accepted QUIC connection from {}", remote_addr));
-
-                        // Spawn a task to handle the handshake and subsequent messages for this connection
-                        let conn_handlers = handlers_arc.clone();
-                        let conn_connections = connections_arc.clone();
-                        let conn_callback = callback_arc.clone();
-                        tokio::spawn(async move {
-                            match Self::handle_incoming_connection(
-                                conn, 
-                                conn_logger.clone(), 
-                                conn_handlers, 
-                                conn_connections, 
-                                conn_callback, 
-                                max_idle_streams
-                            ).await {
-                                Ok(_) => conn_logger.info(format!("Finished handling connection from {}", remote_addr)),
-                                Err(e) => conn_logger.error(format!("Error handling connection from {}: {}", remote_addr, e)),
-                            }
-                        });
-                    },
-                    Err(e) => {
-                        conn_logger.error(format!("Error accepting QUIC connection: {}", e));
-                    }
-                }
-            }
-            logger.info("QUIC server task stopped accepting connections.");
-        });
-
-        Ok(task)
-    }
-    
     /// Handles the lifecycle of a single accepted incoming connection
     async fn handle_incoming_connection(
         conn: quinn::Connection,
         logger: Logger,
         handlers: Arc<StdRwLock<Vec<MessageHandler>>>,
-        connections: Arc<TokioRwLock<HashMap<String, Arc<TokioMutex<PeerState>>>>>, 
+        connections: Arc<TokioRwLock<HashMap<String, Arc<TokioMutex<PeerState>>>>>,
         connection_callback: Arc<TokioRwLock<Option<ConnectionCallback>>>,
-        max_idle_streams: usize
+        max_idle_streams: usize,
     ) -> Result<()> {
         logger.debug("Waiting for handshake message...");
 
         // 1. Accept the first stream for handshake
-        let (mut handshake_send, mut handshake_recv) = match timeout(Duration::from_secs(10), conn.accept_bi()).await {
-            Ok(Ok(streams)) => streams,
-            Ok(Err(e)) => {
-                logger.error(format!("Error accepting handshake stream: {}", e));
-                conn.close(1u32.into(), b"handshake stream error");
-                return Err(anyhow!("Handshake stream error: {}", e));
-            }
-            Err(_) => { // Timeout
-                logger.error("Timeout waiting for handshake stream.");
-                conn.close(2u32.into(), b"handshakeconnections timeout");
-                return Err(anyhow!("Handshake timeout"));
-            }
-        };
-        
+        let (mut handshake_send, mut handshake_recv) =
+            match timeout(Duration::from_secs(10), conn.accept_bi()).await {
+                Ok(Ok(streams)) => streams,
+                Ok(Err(e)) => {
+                    logger.error(format!("Error accepting handshake stream: {}", e));
+                    conn.close(1u32.into(), b"handshake stream error");
+                    return Err(anyhow!("Handshake stream error: {}", e));
+                }
+                Err(_) => {
+                    // Timeout
+                    logger.error("Timeout waiting for handshake stream.");
+                    conn.close(2u32.into(), b"handshakeconnections timeout");
+                    return Err(anyhow!("Handshake timeout"));
+                }
+            };
+
         // 2. Read and process the handshake message
-        let remote_peer_id = match timeout(Duration::from_secs(5), handshake_recv.read_to_end(1024 * 10)).await { // Limit handshake size
+        let remote_peer_id = match timeout(
+            Duration::from_secs(5),
+            handshake_recv.read_to_end(1024 * 10),
+        )
+        .await
+        {
+            // Limit handshake size
             Ok(Ok(data)) => {
                 logger.debug(format!("Received {} bytes for handshake", data.len()));
                 match bincode::deserialize::<NetworkMessage>(&data) {
@@ -468,43 +450,57 @@ impl QuicTransport {
                         logger.info(format!("Received valid handshake from peer {}", peer_id));
                         // Send ACK for handshake
                         if let Err(e) = handshake_send.write_all(b"ACK").await {
-                             logger.error(format!("Failed to send handshake ACK to {}: {}", peer_id, e));
-                             // Don't necessarily close connection, maybe just log
+                            logger.error(format!(
+                                "Failed to send handshake ACK to {}: {}",
+                                peer_id, e
+                            ));
+                            // Don't necessarily close connection, maybe just log
                         }
                         if let Err(e) = handshake_send.finish().await {
-                            logger.warn(format!("Failed to finish handshake ACK stream for {}: {}", peer_id, e));
+                            logger.warn(format!(
+                                "Failed to finish handshake ACK stream for {}: {}",
+                                peer_id, e
+                            ));
                         }
 
-                        // Check if the payload is a binary ValueType::Bytes
+                        // Check if the payload contains NodeInfo
                         if let Some(payload_item) = message.payloads.get(0) {
-                            // Extract and process the NodeInfo from the ValueType payload
-                            
-                            // Check if the payload is a binary ValueType::Bytes
-                            if let ValueType::Bytes(binary_data) = &payload_item.value {
-                                // Deserialize the binary data to NodeInfo
-                                match bincode::deserialize::<NodeInfo>(binary_data) {
-                                    Ok(node_info) => {
-                                        self.logger.debug(format!("Successfully deserialized NodeInfo from handshake: {}", node_info.peer_id));
-                                        // Store the node's info in our peer registry
-                                        Self::trigger_connection_callback(connection_callback.clone(), peer_id.clone(), true, Some(node_info)).await;
-                                        return Ok(node_info);
-                                    },
-                                    Err(e) => {
-                                        self.logger.warn(format!("Failed to deserialize NodeInfo from handshake: {}", e));
-                                        return Err(NetworkError::TransportError(format!("Failed to deserialize NodeInfo: {}", e)));
-                                    }
+                            // Extract and deserialize the NodeInfo directly from the binary data
+                            match bincode::deserialize::<NodeInfo>(&payload_item.value_bytes) {
+                                Ok(node_info) => {
+                                    logger.debug(format!(
+                                        "Successfully deserialized NodeInfo from handshake: {}",
+                                        node_info.peer_id
+                                    ));
+                                    // Trigger connection callback with node info
+                                    Self::trigger_connection_callback(
+                                        connection_callback.clone(),
+                                        peer_id.clone(),
+                                        true,
+                                        Some(node_info),
+                                    )
+                                    .await;
+
+                                    peer_id
                                 }
-                            } else {
-                                self.logger.warn(format!("Handshake payload is not a binary ValueType::Bytes: {:?}", payload_item.value));
-                                return Err(NetworkError::TransportError("Handshake payload is not binary data".to_string()));
+                                Err(e) => {
+                                    logger.warn(format!(
+                                        "Failed to deserialize NodeInfo from handshake: {}",
+                                        e
+                                    ));
+                                    peer_id
+                                }
                             }
                         } else {
-                            self.logger.warn("Handshake message contains no payloads");
-                            return Err(NetworkError::TransportError("Handshake message contains no payloads".to_string()));
+                            logger.warn("Handshake message contains no payloads");
+                            peer_id
                         }
                     }
                     Ok(message) => {
-                        logger.error(format!("Received invalid message type during handshake: {}", message.message_type));
+                        logger.error(format!(
+                            "Received invalid message type during handshake: {}",
+                            message.message_type
+                        ));
                         conn.close(3u32.into(), b"invalid handshake message type");
                         return Err(anyhow!("Invalid handshake message type"));
                     }
@@ -515,24 +511,29 @@ impl QuicTransport {
                     }
                 }
             }
-            Ok(Err(e)) => { // Stream read error
-                 logger.error(format!("Error reading handshake message: {}", e));
-                 conn.close(5u32.into(), b"handshake read error");
-                 return Err(anyhow!("Handshake read error: {}", e));
+            Ok(Err(e)) => {
+                // Stream read error
+                logger.error(format!("Error reading handshake message: {}", e));
+                conn.close(5u32.into(), b"handshake read error");
+                return Err(anyhow!("Handshake read error: {}", e));
             }
-            Err(_) => { // Timeout reading handshake
-                 logger.error("Timeout reading handshake message.");
-                 conn.close(6u32.into(), b"handshake read timeout");
-                 return Err(anyhow!("Handshake read timeout"));
+            Err(_) => {
+                // Timeout reading handshake
+                logger.error("Timeout reading handshake message.");
+                conn.close(6u32.into(), b"handshake read timeout");
+                return Err(anyhow!("Handshake read timeout"));
             }
         };
 
         // Capture peer_id before moving connection into state
-        let identified_peer_id = remote_peer_id.clone(); 
+        let identified_peer_id = remote_peer_id.clone();
 
         let remote_addr = conn.remote_address();
         // 3. Store PeerState (Initialize idle_streams pool)
-        logger.debug(format!("Storing connection state for incoming peer {}", remote_peer_id));
+        logger.debug(format!(
+            "Storing connection state for incoming peer {}",
+            remote_peer_id
+        ));
         let peer_state = PeerState {
             peer_id: remote_peer_id.clone(),
             address: remote_addr.to_string(),
@@ -542,18 +543,29 @@ impl QuicTransport {
         };
         {
             let mut connections_write = connections.write().await;
-             // What if already connected? Maybe close the old one or reject new?
-             // For now, let's overwrite, assuming the new one is valid.
-            let replaced_existing = connections_write.insert(remote_peer_id.public_key.clone(), Arc::new(TokioMutex::new(peer_state))).is_some();
-             // ... close old connection if replaced ...
-             if replaced_existing {
-                logger.warn(format!("Replaced existing connection state for peer {}", remote_peer_id.public_key));
+            // What if already connected? Maybe close the old one or reject new?
+            // For now, let's overwrite, assuming the new one is valid.
+            let replaced_existing = connections_write
+                .insert(
+                    remote_peer_id.public_key.clone(),
+                    Arc::new(TokioMutex::new(peer_state)),
+                )
+                .is_some();
+            // ... close old connection if replaced ...
+            if replaced_existing {
+                logger.warn(format!(
+                    "Replaced existing connection state for peer {}",
+                    remote_peer_id.public_key
+                ));
                 // The connection callback for disconnect will be called if needed when the old connection is closed
-             }
+            }
         }
 
         // 4. Loop accepting regular message streams
-        logger.debug(format!("Starting to accept regular message streams from {}", remote_peer_id));
+        logger.debug(format!(
+            "Starting to accept regular message streams from {}",
+            remote_peer_id
+        ));
         loop {
             match conn.accept_bi().await {
                 Ok((mut send_stream, mut recv_stream)) => {
@@ -568,24 +580,35 @@ impl QuicTransport {
                                 // Deserialize and process message
                                 match bincode::deserialize::<NetworkMessage>(&data) {
                                     Ok(message) => {
-                                        stream_logger.debug(format!("Received message: type={}, source={}", message.message_type, message.source));
+                                        stream_logger.debug(format!(
+                                            "Received message: type={}, source={}",
+                                            message.message_type, message.source
+                                        ));
                                         // Call handlers (Note: Handlers are Fn, might block)
-                                         if let Ok(handlers_guard) = stream_handlers.read() {
-                                             for handler in handlers_guard.iter() {
-                                                 if let Err(e) = handler(message.clone()) {
-                                                     stream_logger.error(format!("Error in message handler: {}", e));
-                                                 }
-                                             }
-                                         }
+                                        if let Ok(handlers_guard) = stream_handlers.read() {
+                                            for handler in handlers_guard.iter() {
+                                                if let Err(e) = handler(message.clone()) {
+                                                    stream_logger.error(format!(
+                                                        "Error in message handler: {}",
+                                                        e
+                                                    ));
+                                                }
+                                            }
+                                        }
                                         // Send ACK
                                         if let Err(e) = send_stream.write_all(b"ACK").await {
-                                            stream_logger.error(format!("Failed to send ACK: {}", e));
+                                            stream_logger
+                                                .error(format!("Failed to send ACK: {}", e));
                                         }
-                                         if let Err(e) = send_stream.finish().await {
-                                            stream_logger.warn(format!("Failed to finish ACK stream: {}", e));
+                                        if let Err(e) = send_stream.finish().await {
+                                            stream_logger.warn(format!(
+                                                "Failed to finish ACK stream: {}",
+                                                e
+                                            ));
                                         }
                                     }
-                                    Err(e) => stream_logger.error(format!("Failed to deserialize message: {}", e)),
+                                    Err(e) => stream_logger
+                                        .error(format!("Failed to deserialize message: {}", e)),
                                 }
                             }
                             Err(e) => stream_logger.error(format!("Error reading stream: {}", e)),
@@ -593,57 +616,87 @@ impl QuicTransport {
                     });
                 }
                 // Handle connection closing errors
-                Err(ConnectionError::ApplicationClosed { .. } ) => {
-                     logger.info(format!("Connection closed by application (peer: {})", remote_peer_id));
-                     break;
+                Err(ConnectionError::ApplicationClosed { .. }) => {
+                    logger.info(format!(
+                        "Connection closed by application (peer: {})",
+                        remote_peer_id
+                    ));
+                    break;
                 }
                 Err(ConnectionError::LocallyClosed) => {
-                     logger.info(format!("Connection closed locally (peer: {})", remote_peer_id));
-                     break;
+                    logger.info(format!(
+                        "Connection closed locally (peer: {})",
+                        remote_peer_id
+                    ));
+                    break;
                 }
                 Err(ConnectionError::TimedOut) => {
-                     logger.warn(format!("Connection timed out (peer: {})", remote_peer_id));
-                     break;
+                    logger.warn(format!("Connection timed out (peer: {})", remote_peer_id));
+                    break;
                 }
                 Err(e) => {
-                    logger.error(format!("Error accepting stream from {}: {}", remote_peer_id, e));
+                    logger.error(format!(
+                        "Error accepting stream from {}: {}",
+                        remote_peer_id, e
+                    ));
                     break;
                 }
             }
         }
 
         // Cleanup after loop breaks (connection closed)
-        logger.info(format!("Connection handling loop finished for peer {}", remote_peer_id));
+        logger.info(format!(
+            "Connection handling loop finished for peer {}",
+            remote_peer_id
+        ));
         // Remove PeerState from map
         let existed = {
-             let mut connections_write = connections.write().await;
-             connections_write.remove(&identified_peer_id.public_key).is_some()
+            let mut connections_write = connections.write().await;
+            connections_write
+                .remove(&identified_peer_id.public_key)
+                .is_some()
         };
         if existed {
-             logger.debug(format!("Removed connection state for disconnected peer {}", identified_peer_id));
-              // Trigger callback for disconnect
-             Self::trigger_connection_callback(connection_callback.clone(), identified_peer_id.clone(), false, None).await; 
-         } else {
-            logger.warn(format!("Attempted to remove state for peer {}, but it was already gone.", identified_peer_id));
-         }
+            logger.debug(format!(
+                "Removed connection state for disconnected peer {}",
+                identified_peer_id
+            ));
+            // Trigger callback for disconnect
+            Self::trigger_connection_callback(
+                connection_callback.clone(),
+                identified_peer_id.clone(),
+                false,
+                None,
+            )
+            .await;
+        } else {
+            logger.warn(format!(
+                "Attempted to remove state for peer {}, but it was already gone.",
+                identified_peer_id
+            ));
+        }
 
         Ok(())
     }
-    
+
     /// Start the message sending task
     async fn start_message_sender(&self) -> Result<mpsc::Sender<(NetworkMessage, PeerId)>> {
         let (tx, mut rx) = mpsc::channel::<(NetworkMessage, PeerId)>(100);
-        let connections_arc: Arc<TokioRwLock<HashMap<String, Arc<TokioMutex<PeerState>>>>> = Arc::clone(&self.connections);
+        let connections_arc: Arc<TokioRwLock<HashMap<String, Arc<TokioMutex<PeerState>>>>> =
+            Arc::clone(&self.connections);
         let logger = self.logger.clone();
-        let max_idle_streams = self.network_config.quic_options.as_ref()
+        let max_idle_streams = self
+            .network_config
+            .quic_options
+            .as_ref()
             .map(|opts| opts.max_idle_streams_per_peer)
             .unwrap_or(10); // Default if not specified
 
         tokio::spawn(async move {
             while let Some((message, target_id)) = rx.recv().await {
                 logger.debug(format!("Sender task received message for {}", target_id));
-                
-                let peer_state_mutex = { 
+
+                let peer_state_mutex = {
                     let connections_read = connections_arc.read().await;
                     connections_read.get(&target_id.public_key).cloned()
                 };
@@ -654,23 +707,24 @@ impl QuicTransport {
                     state.last_used = Instant::now();
                     let mut idle_streams_guard = state.idle_streams.lock().await;
 
-                    let stream_result = if let Some((send, recv, _idle_since)) = idle_streams_guard.pop_front() {
-                         logger.debug(format!("Reusing idle stream for {}", target_id));
-                         drop(idle_streams_guard);
-                         Ok((send, recv))
-                    } else {
-                         logger.debug(format!("Opening new stream for {}", target_id));
-                         drop(idle_streams_guard);
-                         drop(state);
-                         
-                         match conn.open_bi().await {
-                            Ok(streams) => Ok(streams),
-                            Err(e) => Err(e),
-                         }
-                    };
-                    
+                    let stream_result =
+                        if let Some((send, recv, _idle_since)) = idle_streams_guard.pop_front() {
+                            logger.debug(format!("Reusing idle stream for {}", target_id));
+                            drop(idle_streams_guard);
+                            Ok((send, recv))
+                        } else {
+                            logger.debug(format!("Opening new stream for {}", target_id));
+                            drop(idle_streams_guard);
+                            drop(state);
+
+                            match conn.open_bi().await {
+                                Ok(streams) => Ok(streams),
+                                Err(e) => Err(e),
+                            }
+                        };
+
                     // Drop state lock if held (already dropped if new stream opened)
-                    // The variable `state` might or might not be valid here, 
+                    // The variable `state` might or might not be valid here,
                     // depending on which branch was taken. We rely on prior drops.
 
                     match stream_result {
@@ -678,25 +732,48 @@ impl QuicTransport {
                             match bincode::serialize(&message) {
                                 Ok(data) => {
                                     if let Err(e) = send_stream.write_all(&data).await {
-                                        logger.error(format!("Error writing to QUIC stream for {}: {}", target_id, e));
+                                        logger.error(format!(
+                                            "Error writing to QUIC stream for {}: {}",
+                                            target_id, e
+                                        ));
                                         continue;
                                     }
                                     if let Err(e) = send_stream.finish().await {
-                                        logger.warn(format!("Error finishing QUIC send stream for {}: {}", target_id, e));
+                                        logger.warn(format!(
+                                            "Error finishing QUIC send stream for {}: {}",
+                                            target_id, e
+                                        ));
                                         continue;
                                     }
-                                    logger.debug(format!("Message sent to {}, awaiting ACK...", target_id));
+                                    logger.debug(format!(
+                                        "Message sent to {}, awaiting ACK...",
+                                        target_id
+                                    ));
 
-                                    let ack_result = timeout(Duration::from_secs(5), recv_stream.read_to_end(64)).await;
-                                    
+                                    let ack_result = timeout(
+                                        Duration::from_secs(5),
+                                        recv_stream.read_to_end(64),
+                                    )
+                                    .await;
+
                                     let mut pool_full = false;
                                     let state = state_mutex.lock().await;
                                     let mut idle_streams_guard = state.idle_streams.lock().await;
                                     if idle_streams_guard.len() < max_idle_streams {
-                                        logger.debug(format!("Returning stream to pool for {}", target_id));
-                                        idle_streams_guard.push_back((send_stream, recv_stream, Instant::now()));
+                                        logger.debug(format!(
+                                            "Returning stream to pool for {}",
+                                            target_id
+                                        ));
+                                        idle_streams_guard.push_back((
+                                            send_stream,
+                                            recv_stream,
+                                            Instant::now(),
+                                        ));
                                     } else {
-                                        logger.debug(format!("Stream pool full for {}, closing stream.", target_id));
+                                        logger.debug(format!(
+                                            "Stream pool full for {}, closing stream.",
+                                            target_id
+                                        ));
                                         pool_full = true;
                                     }
                                     drop(idle_streams_guard);
@@ -709,46 +786,68 @@ impl QuicTransport {
                                     match ack_result {
                                         Ok(Ok(ack_data)) => {
                                             if ack_data != b"ACK" {
-                                                logger.warn(format!("Received invalid ACK from {}: {:?}", target_id, ack_data));
+                                                logger.warn(format!(
+                                                    "Received invalid ACK from {}: {:?}",
+                                                    target_id, ack_data
+                                                ));
                                             }
                                         }
-                                        Ok(Err(e)) => logger.error(format!("Error reading ACK from {}: {}", target_id, e)),
-                                        Err(_) => logger.warn(format!("Timeout waiting for ACK from {}", target_id)),
+                                        Ok(Err(e)) => logger.error(format!(
+                                            "Error reading ACK from {}: {}",
+                                            target_id, e
+                                        )),
+                                        Err(_) => logger.warn(format!(
+                                            "Timeout waiting for ACK from {}",
+                                            target_id
+                                        )),
                                     }
                                 }
                                 Err(e) => {
-                                    logger.error(format!("Failed to serialize message for {}: {}", target_id, e));
+                                    logger.error(format!(
+                                        "Failed to serialize message for {}: {}",
+                                        target_id, e
+                                    ));
                                 }
                             }
                         }
                         Err(e) => {
-                            logger.error(format!("Failed to get/open stream for {}: {}", target_id, e));
+                            logger.error(format!(
+                                "Failed to get/open stream for {}: {}",
+                                target_id, e
+                            ));
                         }
                     }
                 } else {
-                    logger.warn(format!("Sender task: No active connection found for peer {}, dropping message.", target_id));
+                    logger.warn(format!(
+                        "Sender task: No active connection found for peer {}, dropping message.",
+                        target_id
+                    ));
                 }
             }
             logger.info("QUIC message sender task finished.");
         });
         Ok(tx)
     }
-    
+
     /// Start the background task to clean up idle connections ONLY
     async fn start_cleanup_task(&self) -> Result<JoinHandle<()>> {
-        let connections_arc: Arc<TokioRwLock<HashMap<String, Arc<TokioMutex<PeerState>>>>> = Arc::clone(&self.connections);
-        let callback_arc: Arc<TokioRwLock<Option<ConnectionCallback>>> = Arc::clone(&self.connection_callback);
+        let connections_arc: Arc<TokioRwLock<HashMap<String, Arc<TokioMutex<PeerState>>>>> =
+            Arc::clone(&self.connections);
+        let callback_arc: Arc<TokioRwLock<Option<ConnectionCallback>>> =
+            Arc::clone(&self.connection_callback);
         let logger = self.logger.clone();
-        let connection_idle_timeout = self.network_config.quic_options.as_ref()
+        let connection_idle_timeout = self
+            .network_config
+            .quic_options
+            .as_ref()
             .map(|opts| Duration::from_millis(opts.connection_idle_timeout_ms))
             .unwrap_or(Duration::from_secs(60)); // Default 60 seconds if not specified
-        // Revert: No stream timeout needed here anymore
+                                                 // Revert: No stream timeout needed here anymore
         let check_interval = Duration::max(Duration::from_secs(5), connection_idle_timeout / 4);
 
         logger.info(format!(
             "Starting cleanup task: Conn Idle Timeout: {:?}, Check Interval: {:?}", // Simplified log
-            connection_idle_timeout,
-            check_interval
+            connection_idle_timeout, check_interval
         ));
 
         let task = tokio::spawn(async move {
@@ -763,7 +862,8 @@ impl QuicTransport {
                     let connections_read = connections_arc.read().await;
                     for (peer_id, state_mutex) in connections_read.iter() {
                         // Only check connection last_used time
-                        if let Ok(state) = state_mutex.try_lock() { // read lock is sufficient
+                        if let Ok(state) = state_mutex.try_lock() {
+                            // read lock is sufficient
                             if now.duration_since(state.last_used) > connection_idle_timeout {
                                 logger.info(format!(
                                     "Peer {} connection idle ({:?}), scheduling removal.",
@@ -773,7 +873,10 @@ impl QuicTransport {
                                 peers_to_remove.push(peer_id.clone());
                             }
                         } else {
-                            logger.warn(format!("Cleanup task could not lock state for peer {}, skipping check.", peer_id));
+                            logger.warn(format!(
+                                "Cleanup task could not lock state for peer {}, skipping check.",
+                                peer_id
+                            ));
                         }
                     }
                 } // connections_read lock released here
@@ -786,8 +889,14 @@ impl QuicTransport {
                     let mut connections_write = connections_arc.write().await;
                     for peer_id in peers_to_remove {
                         if let Some(state_mutex) = connections_write.remove(&peer_id) {
-                           // ... close connection ...
-                            Self::trigger_connection_callback(loop_callback_arc_remove.clone(), PeerId::new(peer_id.clone()), false, None).await;
+                            // ... close connection ...
+                            Self::trigger_connection_callback(
+                                loop_callback_arc_remove.clone(),
+                                PeerId::new(peer_id.clone()),
+                                false,
+                                None,
+                            )
+                            .await;
                         } else {
                             // ... log warning ...
                         }
@@ -806,7 +915,7 @@ impl QuicTransport {
         callback_arc: Arc<TokioRwLock<Option<ConnectionCallback>>>,
         peer_id: PeerId,
         is_connected: bool,
-        node_info: Option<NodeInfo>
+        node_info: Option<NodeInfo>,
     ) {
         let callback_opt = callback_arc.read().await;
         if let Some(callback) = callback_opt.as_ref() {
@@ -818,29 +927,33 @@ impl QuicTransport {
             if let Err(e) = cb(peer_id.clone(), is_connected, node_info).await {
                 // TODO: How to handle callback errors? Log for now.
                 // Need access to logger here, maybe pass it in?
-                eprintln!("Error executing connection callback for peer {}: {}", peer_id, e); 
+                eprintln!(
+                    "Error executing connection callback for peer {}: {}",
+                    peer_id, e
+                );
             }
         }
     }
 
     /// Register a peer in the registry
     pub fn register_peer(&self, discovery_msg: PeerInfo) -> Result<()> {
-        self.logger.debug(format!("Registering peer {} ", discovery_msg.public_key));
+        self.logger
+            .debug(format!("Registering peer {} ", discovery_msg.public_key));
         self.peer_registry.add_peer(discovery_msg)
     }
 
-    
     /// Update peer status
     pub fn update_peer_status(&self, peer_id: &PeerId, status: PeerStatus) -> Result<()> {
-        self.logger.debug(format!("Updating peer {} status to {:?}", peer_id, status));
+        self.logger
+            .debug(format!("Updating peer {} status to {:?}", peer_id, status));
         self.peer_registry.update_peer_status(peer_id, status)
     }
-    
+
     /// Find a peer by its ID
     pub fn find_peer(&self, peer_id: &PeerId) -> Option<PeerEntry> {
         self.peer_registry.find_peer(peer_id.public_key.clone())
     }
-     
+
     /// Get peer registry
     pub fn peer_registry(&self) -> Arc<PeerRegistry> {
         self.peer_registry.clone()
@@ -848,10 +961,84 @@ impl QuicTransport {
 
     /// Add notify_peer_connected method to QuicTransport impl
     pub async fn notify_peer_connected(&self, peer_id: PeerId, node_info: NodeInfo) {
-        self.logger.debug(format!("Node connected notification for peer {} with capabilities: {:?}", peer_id, node_info.capabilities));
+        self.logger.debug(format!(
+            "Node connected notification for peer {} with capabilities: {:?}",
+            peer_id, node_info.capabilities
+        ));
 
         // Trigger the connection callback with node_info
-        Self::trigger_connection_callback(self.connection_callback.clone(), peer_id.clone(), true, Some(node_info)).await;
+        Self::trigger_connection_callback(
+            self.connection_callback.clone(),
+            peer_id.clone(),
+            true,
+            Some(node_info),
+        )
+        .await;
+    }
+
+    /// Start the server task to accept incoming connections
+    async fn start_server_task(&self, endpoint: Endpoint) -> Result<JoinHandle<()>> {
+        let logger = self.logger.clone();
+        let handlers_arc: Arc<StdRwLock<Vec<MessageHandler>>> = Arc::clone(&self.handlers);
+        let connections_arc: Arc<TokioRwLock<HashMap<String, Arc<TokioMutex<PeerState>>>>> =
+            Arc::clone(&self.connections);
+        let callback_arc: Arc<TokioRwLock<Option<ConnectionCallback>>> =
+            Arc::clone(&self.connection_callback);
+        let max_idle_streams = self
+            .network_config
+            .quic_options
+            .as_ref()
+            .map(|opts| opts.max_idle_streams_per_peer)
+            .unwrap_or(10); // Default if not specified
+
+        let task = tokio::spawn(async move {
+            logger.info(format!(
+                "QUIC server listening on {}",
+                endpoint.local_addr().unwrap()
+            ));
+
+            while let Some(conn_attempt) = endpoint.accept().await {
+                let conn_logger = logger.clone(); // Clone logger for this connection attempt
+                match conn_attempt.await {
+                    Ok(conn) => {
+                        let remote_addr = conn.remote_address();
+                        conn_logger.info(format!("Accepted QUIC connection from {}", remote_addr));
+
+                        // Spawn a task to handle the handshake and subsequent messages for this connection
+                        let conn_handlers = handlers_arc.clone();
+                        let conn_connections = connections_arc.clone();
+                        let conn_callback = callback_arc.clone();
+                        tokio::spawn(async move {
+                            match Self::handle_incoming_connection(
+                                conn,
+                                conn_logger.clone(),
+                                conn_handlers,
+                                conn_connections,
+                                conn_callback,
+                                max_idle_streams,
+                            )
+                            .await
+                            {
+                                Ok(_) => conn_logger.info(format!(
+                                    "Finished handling connection from {}",
+                                    remote_addr
+                                )),
+                                Err(e) => conn_logger.error(format!(
+                                    "Error handling connection from {}: {}",
+                                    remote_addr, e
+                                )),
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        conn_logger.error(format!("Error accepting QUIC connection: {}", e));
+                    }
+                }
+            }
+            logger.info("QUIC server task stopped accepting connections.");
+        });
+
+        Ok(task)
     }
 }
 
@@ -875,48 +1062,51 @@ impl rustls::client::ServerCertVerifier for NoVerification {
 
 #[async_trait]
 impl NetworkTransport for QuicTransport {
- 
     /// Start listening for incoming connections
     async fn start(&self) -> Result<(), NetworkError> {
         self.logger.info("Initializing QUIC transport...");
-        let endpoint = self.setup_endpoint().await
-            .map_err(|e| NetworkError::TransportError(format!("Failed to setup endpoint: {}", e)))?;
+        let endpoint = self.setup_endpoint().await.map_err(|e| {
+            NetworkError::TransportError(format!("Failed to setup endpoint: {}", e))
+        })?;
         let mut endpoint_guard = self.endpoint.lock().await;
         *endpoint_guard = Some(endpoint.clone());
 
         let mut server_task_guard = self.server_task.lock().await;
         if server_task_guard.is_none() {
-             self.logger.info("Starting QUIC server task...");
-             let server_task_handle = self.start_server_task(endpoint).await
-                .map_err(|e| NetworkError::TransportError(format!("Failed to start server task: {}", e)))?;
-             *server_task_guard = Some(server_task_handle);
-             self.logger.info("QUIC server task started.");
+            self.logger.info("Starting QUIC server task...");
+            let server_task_handle = self.start_server_task(endpoint).await.map_err(|e| {
+                NetworkError::TransportError(format!("Failed to start server task: {}", e))
+            })?;
+            *server_task_guard = Some(server_task_handle);
+            self.logger.info("QUIC server task started.");
         }
-         drop(server_task_guard);
+        drop(server_task_guard);
 
         let mut message_tx_guard = self.message_tx.lock().await;
         if message_tx_guard.is_none() {
             self.logger.info("Starting QUIC message sender task...");
-            let sender_tx = self.start_message_sender().await
-                .map_err(|e| NetworkError::TransportError(format!("Failed to start message sender task: {}", e)))?;
+            let sender_tx = self.start_message_sender().await.map_err(|e| {
+                NetworkError::TransportError(format!("Failed to start message sender task: {}", e))
+            })?;
             *message_tx_guard = Some(sender_tx);
             self.logger.info("QUIC message sender task started.");
         }
-         drop(message_tx_guard);
+        drop(message_tx_guard);
 
         let mut cleanup_task_guard = self.cleanup_task.lock().await;
         if cleanup_task_guard.is_none() {
-             self.logger.info("Starting QUIC connection cleanup task...");
-             let cleanup_handle = self.start_cleanup_task().await
-                .map_err(|e| NetworkError::TransportError(format!("Failed to start cleanup task: {}", e)))?;
-             *cleanup_task_guard = Some(cleanup_handle);
-             self.logger.info("QUIC connection cleanup task started.");
+            self.logger.info("Starting QUIC connection cleanup task...");
+            let cleanup_handle = self.start_cleanup_task().await.map_err(|e| {
+                NetworkError::TransportError(format!("Failed to start cleanup task: {}", e))
+            })?;
+            *cleanup_task_guard = Some(cleanup_handle);
+            self.logger.info("QUIC connection cleanup task started.");
         }
 
         self.logger.info("QUIC transport initialized successfully.");
         Ok(())
     }
- 
+
     /// Stop listening for incoming connections
     async fn stop(&self) -> Result<(), NetworkError> {
         self.logger.info("Stopping QUIC transport...");
@@ -929,7 +1119,9 @@ impl NetworkTransport for QuicTransport {
             match task.await {
                 Ok(_) => self.logger.info("QUIC cleanup task stopped."),
                 Err(e) if e.is_cancelled() => self.logger.info("QUIC cleanup task cancelled."),
-                Err(e) => self.logger.error(format!("Error stopping QUIC cleanup task: {}", e)),
+                Err(e) => self
+                    .logger
+                    .error(format!("Error stopping QUIC cleanup task: {}", e)),
             }
         }
         drop(cleanup_task_guard);
@@ -939,24 +1131,26 @@ impl NetworkTransport for QuicTransport {
         if let Some(task) = server_task_guard.take() {
             self.logger.debug("Stopping QUIC server task...");
             // Close the endpoint to stop accepting new connections
-             if let Some(endpoint) = self.endpoint.lock().await.as_ref() {
-                 endpoint.close(0u32.into(), b"shutting down");
-             }
+            if let Some(endpoint) = self.endpoint.lock().await.as_ref() {
+                endpoint.close(0u32.into(), b"shutting down");
+            }
             task.abort(); // Abort in case it's stuck
             match task.await {
                 Ok(_) => self.logger.info("QUIC server task stopped."),
-                 Err(e) if e.is_cancelled() => self.logger.info("QUIC server task cancelled."),
-                 Err(e) => self.logger.error(format!("Error stopping QUIC server task: {}", e)),
+                Err(e) if e.is_cancelled() => self.logger.info("QUIC server task cancelled."),
+                Err(e) => self
+                    .logger
+                    .error(format!("Error stopping QUIC server task: {}", e)),
             }
         }
-         drop(server_task_guard);
+        drop(server_task_guard);
 
         // Close all active connections
         self.logger.debug("Closing all active QUIC connections...");
         let mut connections_guard = self.connections.write().await; // write lock to clear
         for (_peer_id, state_mutex) in connections_guard.iter() {
-             let state = state_mutex.lock().await; // Lock each state to get connection
-             state.connection.close(0u32.into(), b"transport stopping");
+            let state = state_mutex.lock().await; // Lock each state to get connection
+            state.connection.close(0u32.into(), b"transport stopping");
         }
         connections_guard.clear(); // Clear the map
         drop(connections_guard);
@@ -971,7 +1165,7 @@ impl NetworkTransport for QuicTransport {
         self.logger.info("QUIC transport stopped.");
         Ok(())
     }
-    
+
     /// Check if the transport is running
     fn is_running(&self) -> bool {
         // Check if server_task is Some
@@ -979,148 +1173,230 @@ impl NetworkTransport for QuicTransport {
     }
 
     /// Register a discovered node
-    async fn connect_node(&self, peer_info: PeerInfo, local_node:NodeInfo) -> Result<(), NetworkError> {
+    async fn connect_node(
+        &self,
+        peer_info: PeerInfo,
+        local_node: NodeInfo,
+    ) -> Result<(), NetworkError> {
         let peer_public_key = peer_info.public_key.clone();
         // If we already have this node in the registry, just return success
         if let Some(_entry) = self.peer_registry.find_peer(peer_public_key.clone()) {
-            self.logger.debug(format!("Node {} already in registry", peer_public_key));
+            self.logger
+                .debug(format!("Node {} already in registry", peer_public_key));
             return Ok(());
         }
         // Add to registry using our helper method
         match self.register_peer(peer_info.clone()) {
             Ok(_) => {
-                self.logger.debug(format!("Added node {} to registry - will connect to it now", peer_public_key));
+                self.logger.debug(format!(
+                    "Added node {} to registry - will connect to it now",
+                    peer_public_key
+                ));
 
                 // Check if already connected
                 let connections_read = self.connections.read().await;
                 if connections_read.contains_key(&peer_public_key) {
-                    self.logger.debug(format!("Already connected to peer {}", peer_public_key));
+                    self.logger
+                        .debug(format!("Already connected to peer {}", peer_public_key));
                     return Ok(());
                 }
                 drop(connections_read);
 
                 //attempt to connect to the node using the list of addresses
                 for address_str in peer_info.addresses {
-                   match address_str.parse::<SocketAddr>() {
-                    Ok(target_addr) => {
-                        let peer_id = PeerId::new(peer_public_key.clone());
-                        // Validate the target address
-                        if target_addr.port() == 0 {
-                            let err_msg = format!("Cannot connect to {}: invalid port 0", target_addr);
-                            self.logger.error(&err_msg);
-                            return Err(NetworkError::ConnectionError(err_msg));
-                        }
+                    match address_str.parse::<SocketAddr>() {
+                        Ok(target_addr) => {
+                            let peer_id = PeerId::new(peer_public_key.clone());
+                            // Validate the target address
+                            if target_addr.port() == 0 {
+                                let err_msg =
+                                    format!("Cannot connect to {}: invalid port 0", target_addr);
+                                self.logger.error(&err_msg);
+                                return Err(NetworkError::ConnectionError(err_msg));
+                            }
 
-                        // Get endpoint
-                        let endpoint_guard = self.endpoint.lock().await;
-                        let endpoint = endpoint_guard.as_ref()
-                            .ok_or_else(|| NetworkError::TransportError("QUIC endpoint not initialized".to_string()))?;
+                            // Get endpoint
+                            let endpoint_guard = self.endpoint.lock().await;
+                            let endpoint = endpoint_guard.as_ref().ok_or_else(|| {
+                                NetworkError::TransportError(
+                                    "QUIC endpoint not initialized".to_string(),
+                                )
+                            })?;
 
-                        // Create client config
-                        let client_config = self.create_client_config()
-                            .map_err(|e| NetworkError::ConfigurationError(format!("Failed to create QUIC client config: {}", e)))?;
+                            // Create client config
+                            let client_config = self.create_client_config().map_err(|e| {
+                                NetworkError::ConfigurationError(format!(
+                                    "Failed to create QUIC client config: {}",
+                                    e
+                                ))
+                            })?;
 
-                        // Attempt connection
-                        self.logger.debug(format!("Establishing QUIC connection to {} at {}", peer_public_key, target_addr));
-                        let connection = endpoint.connect_with(client_config, target_addr, "runar-node")  
-                            .map_err(|e| NetworkError::ConnectionError(format!("Failed to initiate connection: {}", e)))?
-                            .await // Await the connection attempt
-                            .map_err(|e| NetworkError::ConnectionError(format!("QUIC connection failed for {}: {}", peer_public_key, e)))?;
+                            // Attempt connection
+                            self.logger.debug(format!(
+                                "Establishing QUIC connection to {} at {}",
+                                peer_public_key, target_addr
+                            ));
+                            let connection = endpoint
+                                .connect_with(client_config, target_addr, "runar-node")
+                                .map_err(|e| {
+                                    NetworkError::ConnectionError(format!(
+                                        "Failed to initiate connection: {}",
+                                        e
+                                    ))
+                                })?
+                                .await // Await the connection attempt
+                                .map_err(|e| {
+                                    NetworkError::ConnectionError(format!(
+                                        "QUIC connection failed for {}: {}",
+                                        peer_public_key, e
+                                    ))
+                                })?;
 
-                        self.logger.info(format!("Successfully established QUIC connection with {} ({})", peer_public_key, connection.remote_address()));
+                            self.logger.info(format!(
+                                "Successfully established QUIC connection with {} ({})",
+                                peer_public_key,
+                                connection.remote_address()
+                            ));
 
-                        // --- Send Handshake --- 
-                        self.logger.debug(format!("Sending handshake to peer {}", peer_public_key));
-                        match connection.open_bi().await {
-                            Ok((mut send_stream, _recv_stream)) => { // We don't need recv_stream for simple handshake send
-                                // Step 1: Directly serialize the NodeInfo to binary format
-                                let binary_data = match bincode::serialize(&local_node) {
-                                    Ok(data) => data,
-                                    Err(e) => {
-                                        self.logger.error(format!("Failed to serialize NodeInfo for handshake: {}", e));
-                                        return Err(NetworkError::TransportError(format!("Failed to serialize NodeInfo: {}", e)));
-                                    }
-                                };
-                                
-                                // Step 2: Create the handshake message, using ValueType::Bytes
-                                let handshake_msg = NetworkMessage {
-                                    source: self.get_local_node_id(),
-                                    destination: peer_id.clone(), // Destination is the peer we connected to
-                                    message_type: "Handshake".to_string(),
-                                    // Wrap binary data in ValueType::Bytes
-                                    payloads: vec![NetworkMessagePayloadItem::new(
-                                        "".to_string(),
-                                        ValueType::Bytes(binary_data),
-                                        "".to_string()
-                                    )], 
-                                };
+                            // --- Send Handshake ---
+                            self.logger
+                                .debug(format!("Sending handshake to peer {}", peer_public_key));
+                            match connection.open_bi().await {
+                                Ok((mut send_stream, _recv_stream)) => {
+                                    // We don't need recv_stream for simple handshake send
+                                    // Step 1: Directly serialize the NodeInfo to binary format
+                                    let binary_data = match bincode::serialize(&local_node) {
+                                        Ok(data) => data,
+                                        Err(e) => {
+                                            self.logger.error(format!(
+                                                "Failed to serialize NodeInfo for handshake: {}",
+                                                e
+                                            ));
+                                            return Err(NetworkError::TransportError(format!(
+                                                "Failed to serialize NodeInfo: {}",
+                                                e
+                                            )));
+                                        }
+                                    };
 
-                                match bincode::serialize(&handshake_msg) {
-                                    Ok(data) => {
-                                        let size = data.len();
-                                        self.logger.debug(format!("writting {} bytes for handshake",size));
-                                        if let Err(e) = send_stream.write_all(&data).await {
-                                            // Log error but don't necessarily fail the connection yet
-                                            self.logger.error(format!("Failed to write handshake message to {}: {}", peer_public_key, e));
-                                            // Close the stream potentially?
-                                            // let _ = send_stream.finish().await;
-                                        } else {
-                                            // Finish the stream after successful write
-                                            if let Err(e) = send_stream.finish().await {
-                                                self.logger.warn(format!("Failed to finish handshake send stream for {}: {}", peer_public_key, e));
+                                    // Step 2: Create the handshake message, using binary data directly
+                                    let handshake_msg = NetworkMessage {
+                                        source: self.get_local_node_id(),
+                                        destination: peer_id.clone(), // Destination is the peer we connected to
+                                        message_type: "Handshake".to_string(),
+                                        // Use binary data directly
+                                        payloads: vec![NetworkMessagePayloadItem::new(
+                                            "".to_string(),
+                                            binary_data,
+                                            "".to_string(),
+                                        )],
+                                    };
+
+                                    match bincode::serialize(&handshake_msg) {
+                                        Ok(data) => {
+                                            let size = data.len();
+                                            self.logger.debug(format!(
+                                                "writting {} bytes for handshake",
+                                                size
+                                            ));
+                                            if let Err(e) = send_stream.write_all(&data).await {
+                                                // Log error but don't necessarily fail the connection yet
+                                                self.logger.error(format!(
+                                                    "Failed to write handshake message to {}: {}",
+                                                    peer_public_key, e
+                                                ));
+                                                // Close the stream potentially?
+                                                // let _ = send_stream.finish().await;
                                             } else {
-                                                self.logger.debug(format!("Handshake message sent successfully to {}", peer_public_key));
+                                                // Finish the stream after successful write
+                                                if let Err(e) = send_stream.finish().await {
+                                                    self.logger.warn(format!("Failed to finish handshake send stream for {}: {}", peer_public_key, e));
+                                                } else {
+                                                    self.logger.debug(format!(
+                                                        "Handshake message sent successfully to {}",
+                                                        peer_public_key
+                                                    ));
+                                                }
                                             }
                                         }
-                                    }
-                                    Err(e) => {
-                                        self.logger.error(format!("Failed to serialize handshake message for {}: {}", peer_public_key, e));
+                                        Err(e) => {
+                                            self.logger.error(format!(
+                                                "Failed to serialize handshake message for {}: {}",
+                                                peer_public_key, e
+                                            ));
+                                        }
                                     }
                                 }
+                                Err(e) => {
+                                    // Log error but don't necessarily fail the connection yet
+                                    self.logger.error(format!(
+                                        "Failed to open stream for handshake to {}: {}",
+                                        peer_public_key, e
+                                    ));
+                                }
                             }
-                            Err(e) => {
-                                // Log error but don't necessarily fail the connection yet
-                                self.logger.error(format!("Failed to open stream for handshake to {}: {}", peer_public_key, e));
-                            }
+                            // --- End Handshake ---
+
+                            // Create PeerState (Initialize idle_streams pool)
+                            let peer_state = PeerState {
+                                peer_id: peer_id.clone(),
+                                address: address_str,
+                                connection,
+                                last_used: Instant::now(),
+                                idle_streams: TokioMutex::new(VecDeque::with_capacity(
+                                    self.network_config
+                                        .quic_options
+                                        .as_ref()
+                                        .map(|opts| opts.max_idle_streams_per_peer)
+                                        .unwrap_or(10), // Default if not specified
+                                )),
+                            };
+
+                            // Store PeerState
+                            let mut connections_write = self.connections.write().await;
+                            connections_write.insert(
+                                peer_public_key.clone(),
+                                Arc::new(TokioMutex::new(peer_state)),
+                            );
+                            drop(connections_write);
+
+                            self.logger.debug(format!(
+                                "Stored connection state for peer {}",
+                                peer_public_key
+                            ));
+
+                            // Trigger callback AFTER storing state
+                            Self::trigger_connection_callback(
+                                self.connection_callback.clone(),
+                                peer_id,
+                                true,
+                                Some(local_node.clone()),
+                            )
+                            .await;
+
+                            //when connected, break out of the loop - no need to try other addresses
+                            break;
                         }
-                        // --- End Handshake --- 
-
-                        // Create PeerState (Initialize idle_streams pool)
-                        let peer_state = PeerState {
-                            peer_id: peer_id.clone(),
-                            address: address_str,
-                            connection,
-                            last_used: Instant::now(),
-                            idle_streams: TokioMutex::new(VecDeque::with_capacity(self.network_config.quic_options.as_ref()
-                                .map(|opts| opts.max_idle_streams_per_peer)
-                                .unwrap_or(10) // Default if not specified
-                            )),
-                        };
-
-                        // Store PeerState
-                        let mut connections_write = self.connections.write().await;
-                        connections_write.insert(peer_public_key.clone(), Arc::new(TokioMutex::new(peer_state)));
-                        drop(connections_write);
-
-                        self.logger.debug(format!("Stored connection state for peer {}", peer_public_key));
-
-                        // Trigger callback AFTER storing state
-                        Self::trigger_connection_callback(self.connection_callback.clone(), peer_id, true, Some(local_node.clone())).await;
-
-                        //when connected, break out of the loop - no need to try other addresses
-                        break;
-                    },
-                    Err(e) => {
-                        self.logger.error(format!("Failed to parse peer address: {} - {}", address_str, e));
-                        continue;
-                    }
-                   };
+                        Err(e) => {
+                            self.logger.error(format!(
+                                "Failed to parse peer address: {} - {}",
+                                address_str, e
+                            ));
+                            continue;
+                        }
+                    };
                 }
                 Ok(())
-            },
+            }
             Err(e) => {
-                self.logger.error(format!("Failed to add node {} to registry: {}", peer_public_key, e));
-                Err(NetworkError::DiscoveryError(format!("Failed to register node: {}", e)))
+                self.logger.error(format!(
+                    "Failed to add node {} to registry: {}",
+                    peer_public_key, e
+                ));
+                Err(NetworkError::DiscoveryError(format!(
+                    "Failed to register node: {}",
+                    e
+                )))
             }
         }
     }
@@ -1136,40 +1412,52 @@ impl NetworkTransport for QuicTransport {
             }
         }
         // Fallback to the configured address if we can't get the actual one
-        self.network_config.transport_options.bind_address.to_string()
+        self.network_config
+            .transport_options
+            .bind_address
+            .to_string()
     }
-    
+
     /// Get the local node identifier
     fn get_local_node_id(&self) -> PeerId {
         self.node_id.clone()
     }
-    
+
     /// Disconnect from a remote node
     async fn disconnect(&self, target_peer_id: PeerId) -> Result<(), NetworkError> {
-        self.logger.info(format!("Disconnecting from peer {}", target_peer_id));
+        self.logger
+            .info(format!("Disconnecting from peer {}", target_peer_id));
         let callback_arc = self.connection_callback.clone();
         let mut connections_write = self.connections.write().await;
-        
+
         if let Some(state_mutex) = connections_write.remove(&target_peer_id.public_key) {
             drop(connections_write);
 
             let state = state_mutex.lock().await;
-            self.logger.debug(format!("Closing QUIC connection to {}", target_peer_id));
+            self.logger
+                .debug(format!("Closing QUIC connection to {}", target_peer_id));
             // Close the connection with a specific error code and reason
             state.connection.close(0u32.into(), b"disconnect requested");
             drop(state);
 
-            self.logger.info(format!("Successfully disconnected from peer {}", target_peer_id));
+            self.logger.info(format!(
+                "Successfully disconnected from peer {}",
+                target_peer_id
+            ));
             // Trigger callback AFTER removing state and closing connection
-            Self::trigger_connection_callback(callback_arc, target_peer_id.clone(), false, None).await;
+            Self::trigger_connection_callback(callback_arc, target_peer_id.clone(), false, None)
+                .await;
             Ok(())
         } else {
-            self.logger.warn(format!("Attempted to disconnect from non-connected peer {}", target_peer_id));
+            self.logger.warn(format!(
+                "Attempted to disconnect from non-connected peer {}",
+                target_peer_id
+            ));
             // Not an error if already disconnected
             Ok(())
         }
     }
-    
+
     /// Check if connected to a specific node
     fn is_connected(&self, peer_id: PeerId) -> bool {
         // Use try_read instead of block_on to avoid runtime panic
@@ -1177,12 +1465,15 @@ impl NetworkTransport for QuicTransport {
             Ok(guard) => guard.contains_key(&peer_id.public_key),
             Err(_) => {
                 // If we can't get the lock immediately, log a warning and return false
-                self.logger.warn(format!("Failed to acquire read lock when checking connection to {}", peer_id.public_key));
+                self.logger.warn(format!(
+                    "Failed to acquire read lock when checking connection to {}",
+                    peer_id.public_key
+                ));
                 false
             }
         }
     }
-    
+
     /// Register a message handler for incoming messages
     fn register_message_handler(&self, handler: MessageHandler) -> Result<()> {
         // Current implementation of register_handler
@@ -1190,155 +1481,179 @@ impl NetworkTransport for QuicTransport {
             Ok(mut handlers) => {
                 handlers.push(handler);
                 Ok(())
-            },
-            Err(_) => Err(anyhow::Error::msg("Failed to acquire write lock for message handlers").into()),
+            }
+            Err(_) => {
+                Err(anyhow::Error::msg("Failed to acquire write lock for message handlers").into())
+            }
         }
     }
-    
+
     /// Set a callback for connection status changes
     fn set_connection_callback(&self, callback: ConnectionCallback) -> Result<()> {
         let mut callback_guard = match self.connection_callback.try_write() {
-             Ok(guard) => guard,
-             // Using try_write to avoid blocking if called from async context inappropriately
-             Err(_) => return Err(anyhow!("Failed to acquire lock for connection callback").into()),
+            Ok(guard) => guard,
+            // Using try_write to avoid blocking if called from async context inappropriately
+            Err(_) => return Err(anyhow!("Failed to acquire lock for connection callback").into()),
         };
-         *callback_guard = Some(callback);
-         Ok(())
+        *callback_guard = Some(callback);
+        Ok(())
     }
-    
+
     /// Send a message to a remote node
     async fn send_message(&self, message: NetworkMessage) -> Result<(), NetworkError> {
         let tx_guard = self.message_tx.lock().await;
         if let Some(sender) = tx_guard.as_ref() {
             let target_id: PeerId = message.destination.clone();
-            sender.send((message, target_id)).await 
-                .map_err(|e| NetworkError::MessageError(format!("Failed to queue message for sending: {}", e)))
+            sender.send((message, target_id)).await.map_err(|e| {
+                NetworkError::MessageError(format!("Failed to queue message for sending: {}", e))
+            })
         } else {
-            Err(NetworkError::TransportError("Message sender task not initialized".to_string()))
+            Err(NetworkError::TransportError(
+                "Message sender task not initialized".to_string(),
+            ))
         }
     }
-    
+
     /// Send a service request to a remote node
     async fn send_request(&self, message: NetworkMessage) -> Result<NetworkMessage, NetworkError> {
         // Requests should typically have one payload, extract its correlation ID
         // If multiple payloads are possible for requests, this logic needs adjustment
         let correlation_id = message.payloads.get(0)
-            .map(|(_, _, corr_id)| corr_id.clone())
+            .map(|payload_item| payload_item.correlation_id.clone())
             .unwrap_or_else(|| {
                 // Generate a correlation ID if the first payload doesn't have one (or if no payloads)
                 // This might indicate an issue with how the request NetworkMessage was constructed
                 self.logger.warn("send_request called with NetworkMessage missing correlation_id in first payload, generating new one.");
                 uuid::Uuid::new_v4().to_string()
             });
-        
+
         // Create a channel for receiving the response
         let (tx, rx) = tokio::sync::oneshot::channel();
-        
+
         // Register the response channel with the correlation ID
         let mut pending_requests = self.pending_requests.write().await;
         pending_requests.insert(correlation_id.clone(), tx);
-        
+
         // Send the message. Ensure the message being sent has the correct correlation_id in its payload(s).
         // The original message already contains the payloads vec.
         self.send_message(message.clone()).await?;
-        
+
         // Wait for the response with a timeout
-        let timeout_duration = self.network_config.transport_options.timeout
+        let timeout_duration = self
+            .network_config
+            .transport_options
+            .timeout
             .unwrap_or_else(|| Duration::from_secs(30));
         match timeout(timeout_duration, rx).await {
-            Ok(response_result) => {
-                match response_result {
-                    Ok(response) => Ok(response),
-                    Err(_) => Err(NetworkError::MessageError("Response channel was closed".to_string())),
-                }
+            Ok(response_result) => match response_result {
+                Ok(response) => Ok(response),
+                Err(_) => Err(NetworkError::MessageError(
+                    "Response channel was closed".to_string(),
+                )),
             },
             Err(_) => {
                 // Clean up the pending request on timeout
                 let mut pending_requests = self.pending_requests.write().await;
                 pending_requests.remove(&correlation_id);
-                Err(NetworkError::MessageError(format!("Request timed out after {:?}", timeout_duration)))
+                Err(NetworkError::MessageError(format!(
+                    "Request timed out after {:?}",
+                    timeout_duration
+                )))
             }
         }
     }
-    
+
     /// Handle an incoming network message
     async fn handle_message(&self, message: NetworkMessage) -> Result<(), NetworkError> {
         // For response messages, complete the pending request for each payload
         if message.message_type == "Response" {
             let mut pending_requests = self.pending_requests.write().await;
-            for (_topic, _payload, correlation_id) in &message.payloads {
-                 if let Some(sender) = pending_requests.remove(correlation_id) {
+            for payload_item in &message.payloads {
+                if let Some(sender) = pending_requests.remove(&payload_item.correlation_id) {
                     // Clone the relevant parts of the message for this specific response payload
                     let single_payload_message = NetworkMessage {
                         source: message.source.clone(),
                         destination: message.destination.clone(), // Should be self
                         message_type: message.message_type.clone(),
-                        payloads: vec![(_topic.clone(), _payload.clone(), correlation_id.clone())]
+                        payloads: vec![payload_item.clone()],
                     };
                     // Send only the relevant payload back
                     if sender.send(single_payload_message).is_err() {
-                         self.logger.warn(format!("Response channel closed for correlation ID: {}", correlation_id));
+                        self.logger.warn(format!(
+                            "Response channel closed for correlation ID: {}",
+                            payload_item.correlation_id
+                        ));
                     }
+                } else {
+                    self.logger.warn(format!(
+                        "Received response for unknown correlation ID: {}",
+                        payload_item.correlation_id
+                    ));
                 }
-                 else {
-                     self.logger.warn(format!("Received response for unknown correlation ID: {}", correlation_id));
-                 }
             }
-             // Drop the lock before potentially calling handlers
-             drop(pending_requests);
+            // Drop the lock before potentially calling handlers
+            drop(pending_requests);
 
             // If it was a response, we assume it's handled, return Ok
-             // Or should responses also go to handlers? Check design.
-             return Ok(()); 
+            // Or should responses also go to handlers? Check design.
+            return Ok(());
         }
-        
+
         // For other messages, pass to registered handlers
         if let Ok(handlers) = self.handlers.read() {
             for handler in handlers.iter() {
                 if let Err(e) = handler(message.clone()) {
-                    self.logger.warn(&format!("Error in message handler: {}", e));
+                    self.logger
+                        .warn(&format!("Error in message handler: {}", e));
                     // Continue with other handlers
                 }
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Start node discovery process
     async fn start_discovery(&self) -> Result<(), NetworkError> {
-        self.logger.warn("start_discovery not implemented for QuicTransport");
+        self.logger
+            .warn("start_discovery not implemented for QuicTransport");
         Ok(())
     }
-    
+
     /// Stop node discovery process
     async fn stop_discovery(&self) -> Result<(), NetworkError> {
-        self.logger.warn("stop_discovery not implemented for QuicTransport");
+        self.logger
+            .warn("stop_discovery not implemented for QuicTransport");
         Ok(())
     }
-    
+
     /// Get all discovered nodes
     fn get_discovered_nodes(&self) -> Vec<PeerId> {
-        self.logger.warn("get_discovered_nodes not implemented for QuicTransport");
+        self.logger
+            .warn("get_discovered_nodes not implemented for QuicTransport");
         Vec::new()
     }
-    
+
     /// Set the node discovery mechanism
     fn set_node_discovery(&self, _discovery: Box<dyn NodeDiscovery>) -> Result<()> {
         Err(anyhow!("set_node_discovery not supported by QuicTransport").into())
     }
-    
+
     /// Complete a pending request
-    fn complete_pending_request(&self, correlation_id: String, response: NetworkMessage) -> Result<(), NetworkError> {
+    fn complete_pending_request(
+        &self,
+        correlation_id: String,
+        response: NetworkMessage,
+    ) -> Result<(), NetworkError> {
         let pending_requests = self.pending_requests.clone();
-        // Use spawn_blocking if the map operation could potentially block significantly, 
+        // Use spawn_blocking if the map operation could potentially block significantly,
         // but write().await is async anyway, so regular spawn is likely fine.
         tokio::spawn(async move {
             let mut requests = pending_requests.write().await;
             if let Some(sender) = requests.remove(&correlation_id) {
                 // It's okay if sending fails (receiver dropped)
                 let _ = sender.send(response);
-            } 
+            }
             // If sender not found, maybe log a warning? Already logged in handle_message.
         });
         Ok(())

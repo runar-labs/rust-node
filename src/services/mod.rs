@@ -17,40 +17,51 @@
 // how services are structured, discovered, and interacted with.
 
 // Module declarations
-pub mod service_registry;
 pub mod abstract_service;
-pub mod registry_info;
-pub mod request_context;
 pub mod event_context;
+pub mod registry_info;
 pub mod remote_service;
+pub mod request_context;
+pub mod service_registry;
 
 // Import necessary components
+use crate::routing::TopicPath;
+use anyhow::{anyhow, Result};
+use runar_common::logging::{Component, Logger, LoggingContext};
+use runar_common::types::ArcValueType;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use anyhow::{anyhow, Result};
-use crate::routing::TopicPath;
-use runar_common::logging::{Logger, Component, LoggingContext};
-use runar_common::types::ValueType;
 
 // Import types from submodules
-use crate::services::abstract_service::{ActionMetadata, EventMetadata, ServiceState, CompleteServiceMetadata};
+use crate::services::abstract_service::{
+    ActionMetadata, CompleteServiceMetadata, EventMetadata, ServiceState,
+};
 use crate::services::remote_service::RemoteService;
 
 // Re-export the context types from their dedicated modules
-pub use crate::services::request_context::RequestContext;
 pub use crate::services::event_context::EventContext;
+pub use crate::services::request_context::RequestContext;
 
 /// Handler for a service action
 ///
 /// INTENTION: Define the signature for a function that handles a service action.
 /// This provides a consistent interface for all action handlers and enables
 /// them to be stored, passed around, and invoked uniformly.
-pub type ActionHandler = Arc<dyn Fn(Option<ValueType>, RequestContext) -> ServiceFuture + Send + Sync>;
+pub type ActionHandler =
+    Arc<dyn Fn(Option<ArcValueType>, RequestContext) -> ServiceFuture + Send + Sync>;
 
 /// Type for action registration function
-pub type ActionRegistrar = Arc<dyn Fn(&TopicPath, ActionHandler, Option<ActionMetadata>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
+pub type ActionRegistrar = Arc<
+    dyn Fn(
+            &TopicPath,
+            ActionHandler,
+            Option<ActionMetadata>,
+        ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
+        + Send
+        + Sync,
+>;
 
 /// Context for service lifecycle management
 ///
@@ -63,7 +74,7 @@ pub struct LifecycleContext {
     /// Service path - identifies the service within the network
     pub service_path: String,
     /// Optional configuration data
-    pub config: Option<ValueType>,
+    pub config: Option<ArcValueType>,
     /// Logger instance with service context
     pub logger: Logger,
     /// Node delegate for node operations
@@ -83,15 +94,15 @@ impl LifecycleContext {
             node_delegate: None,
         }
     }
-    
+
     /// Add configuration to a LifecycleContext
     ///
     /// Use builder-style methods instead of specialized constructors.
-    pub fn with_config(mut self, config: ValueType) -> Self {
+    pub fn with_config(mut self, config: ArcValueType) -> Self {
         self.config = Some(config);
         self
     }
-    
+
     /// Add a NodeDelegate to a LifecycleContext
     ///
     /// INTENTION: Provide access to node operations during service lifecycle events,
@@ -136,7 +147,7 @@ impl LifecycleContext {
     /// async fn init_service(context: LifecycleContext) -> Result<()> {
     ///     // Register a handler for the "add" action
     ///     context.register_action(
-    ///         "add", 
+    ///         "add",
     ///         Arc::new(|params, ctx| {
     ///             Box::pin(async move {
     ///                 // Handler implementation
@@ -148,29 +159,39 @@ impl LifecycleContext {
     ///     Ok(())
     /// }
     /// ```
-    pub async fn register_action(&self, action_name: impl Into<String>, handler: ActionHandler) -> Result<()> {
+    pub async fn register_action(
+        &self,
+        action_name: impl Into<String>,
+        handler: ActionHandler,
+    ) -> Result<()> {
         // Get the node delegate
         let delegate = match &self.node_delegate {
             Some(d) => d,
             None => return Err(anyhow!("No node delegate available")),
         };
-        
+
         let action_name_string = action_name.into();
-        
+
         // Create a topic path for this action
         let action_path = format!("{}/{}", self.service_path, action_name_string);
-        
+
         // Debug logs for action registration
-        self.logger.debug(format!("register_action name={}, service_path={}, action_path={}", action_name_string, self.service_path, action_path));
-        
+        self.logger.debug(format!(
+            "register_action name={}, service_path={}, action_path={}",
+            action_name_string, self.service_path, action_path
+        ));
+
         let topic_path: TopicPath = TopicPath::new(&action_path, &self.network_id)
             .map_err(|e| anyhow!("Invalid action path: {}", e))?;
-        
+
         // More detailed debug after TopicPath creation
-        self.logger.debug(format!("register_action: created TopicPath {}", topic_path));
-        
+        self.logger
+            .debug(format!("register_action: created TopicPath {}", topic_path));
+
         // Call the delegate to register the action handler
-        delegate.register_action_handler(&topic_path, handler, None).await
+        delegate
+            .register_action_handler(action_path, handler, None)
+            .await
     }
 
     /// Register an action handler with metadata
@@ -196,7 +217,7 @@ impl LifecycleContext {
     ///     
     ///     // Register a handler with metadata
     ///     context.register_action_with_options(
-    ///         "add", 
+    ///         "add",
     ///         Arc::new(|params, ctx| {
     ///             Box::pin(async move {
     ///                 // Handler implementation
@@ -216,30 +237,32 @@ impl LifecycleContext {
         options: ActionRegistrationOptions,
     ) -> Result<()> {
         let action_name_string = action_name.into();
-        
+
         // Create action metadata from the options
         let metadata = ActionMetadata {
-            name: action_name_string.clone(),
+            path: action_name_string.clone(),
             description: options.description.unwrap_or_default(),
-            parameters_schema: options.params_schema.map(|v| v),
-            return_schema: options.return_schema.map(|v| v),
+            parameters_schema: options.params_schema.map(arc_value_to_field_schema),
+            return_schema: options.return_schema.map(arc_value_to_field_schema),
         };
-        
+
         // Get the node delegate
         let delegate = match &self.node_delegate {
             Some(d) => d,
             None => return Err(anyhow!("No node delegate available")),
         };
-        
+
         // Create a topic path for this action
         let action_path = format!("{}/{}", self.service_path, action_name_string);
         let topic_path = TopicPath::new(&action_path, &self.network_id)
             .map_err(|e| anyhow!("Invalid action path: {}", e))?;
-        
+
         // Register the action with the provided options
-        delegate.register_action_handler(&topic_path, handler, Some(metadata)).await
+        delegate
+            .register_action_handler(action_path, handler, Some(metadata))
+            .await
     }
-    
+
     /// Register an event with extra metadata
     ///
     /// INTENTION: This method allows registering an event with additional
@@ -251,14 +274,14 @@ impl LifecycleContext {
         options: EventRegistrationOptions,
     ) -> Result<()> {
         let event_name_string = event_name.into();
-        
+
         // Create event metadata
         let metadata = EventMetadata {
-            name: event_name_string.clone(),
+            path: event_name_string.clone(),
             description: options.description.unwrap_or_default(),
-            data_schema: options.data_schema.map(|v| v),
+            data_schema: options.data_schema.map(arc_value_to_field_schema),
         };
-        
+
         // Log event registration with metadata
         self.logger.debug(&format!(
             "Registered event '{}' with metadata: description='{}', has_schema={}",
@@ -266,26 +289,24 @@ impl LifecycleContext {
             metadata.description,
             metadata.data_schema.is_some()
         ));
-        
+
         // Note: The NodeDelegate trait doesn't currently support registering events with metadata.
         // This information is logged for documentation purposes but not stored in the registry.
         // When event publishing occurs, this metadata would ideally be accessible.
-        
+
         Ok(())
     }
-    
-
 }
 
 impl LoggingContext for LifecycleContext {
     fn component(&self) -> Component {
         Component::Service
     }
-    
+
     fn service_path(&self) -> Option<&str> {
         Some(&self.service_path)
     }
-    
+
     fn logger(&self) -> &Logger {
         &self.logger
     }
@@ -303,7 +324,7 @@ pub struct ServiceRequest {
     /// Topic path for the service and action
     pub topic_path: TopicPath,
     /// Data for the request
-    pub data: ValueType,
+    pub data: ArcValueType,
     /// Request context
     pub context: Arc<RequestContext>,
 }
@@ -333,18 +354,18 @@ impl ServiceRequest {
     pub fn new(
         service_path: impl Into<String>,
         action_or_event: impl Into<String>,
-        data: ValueType,
+        data: ArcValueType,
         context: Arc<RequestContext>,
     ) -> Self {
         // Create a path string combining service path and action
         let service_path_string = service_path.into();
         let action_or_event_string = action_or_event.into();
         let path_string = format!("{}/{}", service_path_string, action_or_event_string);
-        
+
         // Parse the path using the context's network_id method
-        let topic_path = TopicPath::new(&path_string, &context.network_id())
-            .expect("Invalid path format");
-            
+        let topic_path =
+            TopicPath::new(&path_string, &context.network_id()).expect("Invalid path format");
+
         Self {
             topic_path,
             data,
@@ -379,7 +400,7 @@ impl ServiceRequest {
     /// ```
     pub fn new_with_topic_path(
         topic_path: TopicPath,
-        data: ValueType,
+        data: ArcValueType,
         context: Arc<RequestContext>,
     ) -> Self {
         Self {
@@ -400,7 +421,7 @@ impl ServiceRequest {
     /// use runar_common::types::ValueType;
     /// use std::sync::Arc;
     ///
-    /// fn create_request(context: Arc<RequestContext>, data: Option<ValueType>) {
+    /// fn create_request(context: Arc<RequestContext>, data: Option<ArcValueType>) {
     ///     // Create a request with optional data
     ///     let request = ServiceRequest::new_with_optional(
     ///         "auth",
@@ -413,25 +434,25 @@ impl ServiceRequest {
     pub fn new_with_optional(
         service_path: impl Into<String>,
         action_or_event: impl Into<String>,
-        data: Option<ValueType>,
+        data: Option<ArcValueType>,
         context: Arc<RequestContext>,
     ) -> Self {
         // Create a TopicPath from the service path and action
         let service_path_string = service_path.into();
         let action_or_event_string = action_or_event.into();
         let path_string = format!("{}/{}", service_path_string, action_or_event_string);
-        
+
         // Parse the path using the context's network_id method
-        let topic_path = TopicPath::new(&path_string, &context.network_id())
-            .expect("Invalid path format");
-            
+        let topic_path =
+            TopicPath::new(&path_string, &context.network_id()).expect("Invalid path format");
+
         Self {
             topic_path,
-            data: data.unwrap_or(ValueType::Null),
+            data: data.unwrap_or_else(|| ArcValueType::null()),
             context,
         }
     }
-    
+
     /// Get the service path from the topic path
     ///
     /// INTENTION: Extract the service path component from the topic path.
@@ -439,7 +460,7 @@ impl ServiceRequest {
     pub fn path(&self) -> String {
         self.topic_path.service_path()
     }
-    
+
     /// Get the action or event name from the topic path
     ///
     /// INTENTION: Extract the action or event name from the topic path.
@@ -447,7 +468,7 @@ impl ServiceRequest {
     pub fn action_or_event(&self) -> String {
         // Get the action path and extract the last part which is the action name
         let action_path = self.topic_path.action_path();
-        
+
         // If action_path contains a slash, take the part after the last slash
         if let Some(idx) = action_path.rfind('/') {
             action_path[idx + 1..].to_string()
@@ -458,56 +479,20 @@ impl ServiceRequest {
     }
 }
 
-/// Status of a service response
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ResponseStatus {
-    /// The request was successful
-    Success,
-    /// The request failed
-    Error,
-}
-
-/// A response from a service
-///
-/// INTENTION: Provide a consistent structure for all service responses, 
-/// ensuring uniform error handling, result communication, and metadata
-/// exchange between services and clients.
-///
-/// ARCHITECTURAL PRINCIPLE:
-/// All service interactions should follow a consistent request-response pattern
-/// with a clearly defined response structure that includes status, result data,
-/// and possible error information.
+/// Response from a service handler
 #[derive(Debug, Clone)]
 pub struct ServiceResponse {
-    /// Status code - indicates success or error type
-    pub status: i32,
-    /// Response data (if successful)
-    pub data: Option<ValueType>,
-    /// Error details (if status indicates error)
+    /// HTTP-like status code
+    pub status: u32,
+    /// Response data if any (immutable)
+    pub data: Option<ArcValueType>,
+    /// Error message if any (immutable)
     pub error: Option<String>,
 }
 
 impl ServiceResponse {
-    /// Create a successful response with data
-    ///
-    /// INTENTION: Provide a convenient way to create a successful response
-    /// with optional result data.
-    ///
-    /// Example:
-    /// ```
-    /// use runar_node::services::ServiceResponse;
-    /// use runar_common::types::ValueType;
-    /// use serde_json::json;
-    ///
-    /// fn handle_get_user() -> ServiceResponse {
-    ///     // Successful response with data
-    ///     ServiceResponse::ok(ValueType::from(json!({
-    ///         "id": "123",
-    ///         "name": "John Doe"
-    ///     })))
-    /// }
-    /// ```
-    pub fn ok(data: ValueType) -> Self {
+    /// Create a new successful response with the given data
+    pub fn ok(data: ArcValueType) -> Self {
         Self {
             status: 200,
             data: Some(data),
@@ -515,10 +500,7 @@ impl ServiceResponse {
         }
     }
 
-    /// Create a successful response with no data
-    ///
-    /// INTENTION: Provide a convenient way to create a successful response
-    /// when no result data is needed (for acknowledgement-type responses).
+    /// Create a new successful response without data
     pub fn ok_empty() -> Self {
         Self {
             status: 200,
@@ -527,40 +509,41 @@ impl ServiceResponse {
         }
     }
 
-    /// Create an error response
-    ///
-    /// INTENTION: Provide a convenient way to create an error response
-    /// with an error message and appropriate status code.
-    ///
-    /// Example:
-    /// ```
-    /// use runar_node::services::ServiceResponse;
-    ///
-    /// fn handle_permission_check() -> ServiceResponse {
-    ///     // Error response - unauthorized
-    ///     ServiceResponse::error(403, "Insufficient permissions to access resource")
-    /// }
-    /// ```
+    /// Create a new error response with the given message
     pub fn error(status: i32, message: impl Into<String>) -> Self {
         Self {
-            status,
+            status: status as u32,
             data: None,
             error: Some(message.into()),
         }
     }
 
-    /// Check if the response indicates success
-    ///
-    /// INTENTION: Provide a convenient way to check if a response indicates
-    /// success (2xx status code).
+    /// Create a standard bad request error response
+    pub fn bad_request(message: impl Into<String>) -> Self {
+        Self::error(400, message)
+    }
+
+    /// Create a standard not found error response
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::error(404, message)
+    }
+
+    /// Create a standard internal server error response
+    pub fn internal_error(message: impl Into<String>) -> Self {
+        Self::error(500, message)
+    }
+
+    /// Create a standard method not allowed error response
+    pub fn method_not_allowed(message: impl Into<String>) -> Self {
+        Self::error(405, message)
+    }
+
+    /// Check if the response is successful
     pub fn is_success(&self) -> bool {
         self.status >= 200 && self.status < 300
     }
 
-    /// Check if the response indicates an error
-    ///
-    /// INTENTION: Provide a convenient way to check if a response indicates
-    /// an error (non-2xx status code).
+    /// Check if the response is an error
     pub fn is_error(&self) -> bool {
         !self.is_success()
     }
@@ -580,14 +563,14 @@ pub struct SubscriptionOptions {
 pub struct PublishOptions {
     /// Whether this event should be broadcast to all nodes in the network
     pub broadcast: bool,
-    
+
     /// Whether delivery should be guaranteed (at-least-once semantics)
     pub guaranteed_delivery: bool,
-    
+
     /// How long the event should be retained for late subscribers (in seconds)
     /// None means no retention, 0 means forever
     pub retention_seconds: Option<u64>,
-    
+
     /// Target a specific node or service instead of all subscribers
     pub target: Option<String>,
 }
@@ -612,9 +595,9 @@ pub struct ActionRegistrationOptions {
     /// Description of what the action does
     pub description: Option<String>,
     /// Parameter schema for validation and documentation
-    pub params_schema: Option<ValueType>,
+    pub params_schema: Option<ArcValueType>,
     /// Return value schema for documentation
-    pub return_schema: Option<ValueType>,
+    pub return_schema: Option<ArcValueType>,
 }
 
 impl Default for ActionRegistrationOptions {
@@ -636,7 +619,7 @@ pub struct EventRegistrationOptions {
     /// Description of what the event represents
     pub description: Option<String>,
     /// Schema of the event data
-    pub data_schema: Option<ValueType>,
+    pub data_schema: Option<ArcValueType>,
 }
 
 impl Default for EventRegistrationOptions {
@@ -661,20 +644,27 @@ impl Default for EventRegistrationOptions {
 /// separates the responsibility of request handling from service management.
 #[async_trait::async_trait]
 pub trait NodeRequestHandler: Send + Sync {
-    /// Process a service request 
-    async fn request(&self, path: String, params: ValueType) -> Result<ServiceResponse>;
+    /// Process a service request
+    async fn request(&self, path: String, params: ArcValueType) -> Result<ServiceResponse>;
 
     /// Publish an event to a topic
-    async fn publish(&self, topic: String, data: ValueType) -> Result<()>;
+    async fn publish(&self, topic: String, data: ArcValueType) -> Result<()>;
 
     /// Subscribe to a topic
     ///
-    /// INTENTION: Register a callback that will be invoked when events are published 
+    /// INTENTION: Register a callback that will be invoked when events are published
     /// to the specified topic. The callback receives both an EventContext and the event data.
     async fn subscribe(
         &self,
         topic: String,
-        callback: Box<dyn Fn(Arc<EventContext>, ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
+        callback: Box<
+            dyn Fn(
+                    Arc<EventContext>,
+                    ArcValueType,
+                ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
+                + Send
+                + Sync,
+        >,
     ) -> Result<String>;
 
     /// Subscribe to a topic with options
@@ -684,7 +674,14 @@ pub trait NodeRequestHandler: Send + Sync {
     async fn subscribe_with_options(
         &self,
         topic: String,
-        callback: Box<dyn Fn(Arc<EventContext>, ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
+        callback: Box<
+            dyn Fn(
+                    Arc<EventContext>,
+                    ArcValueType,
+                ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
+                + Send
+                + Sync,
+        >,
         options: SubscriptionOptions,
     ) -> Result<String>;
 
@@ -696,13 +693,13 @@ pub trait NodeRequestHandler: Send + Sync {
 pub trait ArcContextLogging {
     /// Log a debug level message
     fn debug(&self, message: impl Into<String>);
-    
+
     /// Log an info level message
     fn info(&self, message: impl Into<String>);
-    
+
     /// Log a warning level message
     fn warn(&self, message: impl Into<String>);
-    
+
     /// Log an error level message
     fn error(&self, message: impl Into<String>);
 }
@@ -712,15 +709,15 @@ impl ArcContextLogging for Arc<RequestContext> {
     fn debug(&self, message: impl Into<String>) {
         self.logger.debug(message);
     }
-    
+
     fn info(&self, message: impl Into<String>) {
         self.logger.info(message);
     }
-    
+
     fn warn(&self, message: impl Into<String>) {
         self.logger.warn(message);
     }
-    
+
     fn error(&self, message: impl Into<String>) {
         self.logger.error(message);
     }
@@ -761,21 +758,21 @@ pub trait EventDispatcher: Send + Sync {
     /// # use std::future::Future;
     /// # use std::pin::Pin;
     /// # use std::sync::Arc;
-    /// 
+    ///
     /// struct Node {
     ///     // Node state...
     ///     network_id: String,
     /// }
-    /// 
-    /// type SubscriberCallback = Box<dyn Fn(Arc<EventContext>, ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
+    ///
+    /// type SubscriberCallback = Box<dyn Fn(Arc<EventContext>, ArcValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
     /// struct Subscriber {
     ///     id: String,
     ///     callback: SubscriberCallback,
     /// }
-    /// 
+    ///
     /// #[async_trait]
     /// impl EventDispatcher for Node {
-    ///     async fn publish(&self, topic: &str, event: &str, data: Option<ValueType>, network_id: &str) -> Result<()> {
+    ///     async fn publish(&self, topic: &str, event: &str, data: Option<ArcValueType>, network_id: &str) -> Result<()> {
     ///         // Find subscribers for the topic
     ///         let subscribers: Vec<Subscriber> = Vec::new(); // Would fetch from a storage
     ///         
@@ -800,10 +797,16 @@ pub trait EventDispatcher: Send + Sync {
     ///     }
     /// }
     /// ```
-    async fn publish(&self, topic: &str, event: &str, data: Option<ValueType>, network_id: &str) -> Result<()>;
+    async fn publish(
+        &self,
+        topic: &str,
+        event: &str,
+        data: Option<ArcValueType>,
+        network_id: &str,
+    ) -> Result<()>;
 }
 
-/// Unified Node Delegate trait 
+/// Unified Node Delegate trait
 ///
 /// INTENTION: Provide a single interface for all Node operations that services
 /// need to interact with, combining both request handling and event dispatching.
@@ -816,23 +819,37 @@ pub trait EventDispatcher: Send + Sync {
 #[async_trait::async_trait]
 pub trait NodeDelegate: Send + Sync {
     /// Process a service request
-    async fn request(&self, path: String, params: ValueType) -> Result<ServiceResponse>;
- 
+    async fn request(&self, path: String, params: ArcValueType) -> Result<ServiceResponse>;
+
     /// Simplified publish for common cases
-    async fn publish(&self, topic: String, data: ValueType) -> Result<()>;
+    async fn publish(&self, topic: String, data: ArcValueType) -> Result<()>;
 
     /// Subscribe to a topic
     async fn subscribe(
         &self,
         topic: String,
-        callback: Box<dyn Fn(Arc<EventContext>, ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
+        callback: Box<
+            dyn Fn(
+                    Arc<EventContext>,
+                    ArcValueType,
+                ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
+                + Send
+                + Sync,
+        >,
     ) -> Result<String>;
 
-    /// Subscribe to a topic with options
+    /// Subscribe with options for more control
     async fn subscribe_with_options(
         &self,
         topic: String,
-        callback: Box<dyn Fn(Arc<EventContext>, ValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>,
+        callback: Box<
+            dyn Fn(
+                    Arc<EventContext>,
+                    ArcValueType,
+                ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
+                + Send
+                + Sync,
+        >,
         options: SubscriptionOptions,
     ) -> Result<String>;
 
@@ -842,8 +859,12 @@ pub trait NodeDelegate: Send + Sync {
     /// Register an action handler for a specific path
     ///
     /// INTENTION: Allow services to register handlers for actions through the NodeDelegate.
-    /// This consolidates all node interactions through a single interface.
-    async fn register_action_handler(&self, topic_path: &TopicPath, handler: ActionHandler, metadata: Option<ActionMetadata>) -> Result<()>;
+    async fn register_action_handler(
+        &self,
+        path: String,
+        handler: ActionHandler,
+        metadata: Option<ActionMetadata>,
+    ) -> Result<()>;
 }
 
 /// Registry Delegate trait for registry service operations
@@ -856,16 +877,22 @@ pub trait NodeDelegate: Send + Sync {
 pub trait RegistryDelegate: Send + Sync {
     /// Get all service states
     async fn get_all_service_states(&self) -> HashMap<String, ServiceState>;
-    
+
     /// Get metadata for a specific service
-    async fn get_service_metadata(&self, service_path: &TopicPath) -> Option<CompleteServiceMetadata>;
-    
+    async fn get_service_metadata(
+        &self,
+        service_path: &TopicPath,
+    ) -> Option<CompleteServiceMetadata>;
+
     /// Get metadata for all registered services with an option to filter internal services
     ///
     /// INTENTION: Retrieve metadata for all registered services with the option
     /// to exclude internal services (those with paths starting with $)
-    async fn get_all_service_metadata(&self, include_internal_services: bool) -> HashMap<String, CompleteServiceMetadata>;
-    
+    async fn get_all_service_metadata(
+        &self,
+        include_internal_services: bool,
+    ) -> HashMap<String, CompleteServiceMetadata>;
+
     /// Register a remote action handler
     ///
     /// INTENTION: Allow RemoteLifecycleContext to register remote action handlers
@@ -874,7 +901,7 @@ pub trait RegistryDelegate: Send + Sync {
         &self,
         topic_path: &TopicPath,
         handler: ActionHandler,
-        remote_service: Arc<RemoteService>
+        remote_service: Arc<RemoteService>,
     ) -> Result<()>;
 }
 
@@ -889,7 +916,7 @@ pub struct RemoteLifecycleContext {
     /// Service path - identifies the service within the network
     pub service_path: String,
     /// Optional configuration data
-    pub config: Option<ValueType>,
+    pub config: Option<ArcValueType>,
     /// Logger instance with service context
     pub logger: Logger,
     /// Registry delegate for registry operations
@@ -909,20 +936,23 @@ impl RemoteLifecycleContext {
             registry_delegate: None,
         }
     }
-    
+
     /// Add configuration to a RemoteLifecycleContext
     ///
     /// Use builder-style methods instead of specialized constructors.
-    pub fn with_config(mut self, config: ValueType) -> Self {
+    pub fn with_config(mut self, config: ArcValueType) -> Self {
         self.config = Some(config);
         self
     }
-    
+
     /// Add a RegistryDelegate to a RemoteLifecycleContext
     ///
     /// INTENTION: Provide access to registry operations during service lifecycle events,
     /// including action registration.
-    pub fn with_registry_delegate(mut self, delegate: Arc<dyn RegistryDelegate + Send + Sync>) -> Self {
+    pub fn with_registry_delegate(
+        mut self,
+        delegate: Arc<dyn RegistryDelegate + Send + Sync>,
+    ) -> Self {
         self.registry_delegate = Some(delegate);
         self
     }
@@ -951,18 +981,58 @@ impl RemoteLifecycleContext {
     ///
     /// INTENTION: Allow a remote service to register a handler function for a specific action.
     pub async fn register_remote_action_handler(
-        &self, 
-        topic_path: &TopicPath, 
+        &self,
+        topic_path: &TopicPath,
         handler: ActionHandler,
-        remote_service: Arc<RemoteService>
+        remote_service: Arc<RemoteService>,
     ) -> Result<()> {
         // Get the registry delegate
         let delegate = match &self.registry_delegate {
             Some(d) => d,
             None => return Err(anyhow!("No registry delegate available")),
         };
-        
+
         // Call the delegate to register the remote action handler
-        delegate.register_remote_action_handler(topic_path, handler, remote_service).await
+        delegate
+            .register_remote_action_handler(topic_path, handler, remote_service)
+            .await
     }
-} 
+}
+
+/// Service handler function type
+/// Handler receives optional payload and context, returns a response
+pub type ServiceHandler = Box<
+    dyn Fn(
+            Option<ArcValueType>,
+            Arc<RequestContext>,
+        ) -> Pin<Box<dyn Future<Output = ServiceResponse> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Helper function to convert an ArcValueType to a FieldSchema for metadata
+/// This is needed because the metadata structs require FieldSchema but we get ArcValueType
+fn arc_value_to_field_schema(value: ArcValueType) -> runar_common::models::schemas::FieldSchema {
+    use runar_common::models::schemas::{FieldSchema, SchemaDataType};
+
+    // Create a basic schema based on the ArcValueType
+    // ArcValueType has a type() method that returns a string, not an enum
+    let type_str = value.type_name();
+
+    match type_str {
+        "String" => FieldSchema::string(),
+        "Integer" => FieldSchema::integer(),
+        "Float" | "Number" => FieldSchema::number(),
+        "Boolean" => FieldSchema::boolean(),
+        "List" | "Array" => {
+            // For lists, create an array schema with generic items
+            FieldSchema::array(Box::new(FieldSchema::new(SchemaDataType::String)))
+        }
+        "Map" | "Object" => {
+            // For maps, create an object schema with no properties
+            let properties = std::collections::HashMap::new();
+            FieldSchema::object(properties, None)
+        }
+        _ => FieldSchema::new(SchemaDataType::String), // Default to string for other types
+    }
+}

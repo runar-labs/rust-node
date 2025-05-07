@@ -3,17 +3,17 @@
 // This is a simple service implementation used for testing path parameter extraction.
 // It implements template paths to demonstrate proper parameter extraction.
 
-use std::collections::HashMap;
 use anyhow::Result;
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use runar_common::types::ValueType;
 use runar_node::services::abstract_service::AbstractService;
-use runar_node::services::{RequestContext, ServiceResponse, LifecycleContext};
+use runar_node::services::{LifecycleContext, RequestContext, ServiceResponse};
 
 /// A simple service for testing path parameters extraction
-/// 
+///
 /// This service is used to verify the extraction of parameters from template paths
 /// and their availability in the request context.
 pub struct PathParamsService {
@@ -52,21 +52,26 @@ impl PathParamsService {
             network_id: None, // will be set by the node
         }
     }
-    
+
     /// Handle the extract action - returns all path parameters
-    async fn handle_extract(&self, params: Option<ValueType>, context: RequestContext) -> Result<ServiceResponse> {
+    async fn handle_extract(
+        &self,
+        params: Option<ValueType>,
+        context: RequestContext,
+    ) -> Result<ServiceResponse> {
         // Log that we're handling the request
         context.info("Handling extract path parameters request".to_string());
-        
+
         // Convert the path parameters to ValueType::String values for the response
-        let param_values: HashMap<String, ValueType> = context.path_params
+        let param_values: HashMap<String, ValueType> = context
+            .path_params
             .iter()
             .map(|(k, v)| (k.clone(), ValueType::String(v.clone())))
             .collect();
-        
+
         // Log the parameters we extracted
         context.info(format!("Extracted parameters: {:?}", param_values));
-        
+
         // Return the parameters
         Ok(ServiceResponse::ok(ValueType::Map(param_values)))
     }
@@ -77,15 +82,15 @@ impl AbstractService for PathParamsService {
     fn name(&self) -> &str {
         &self.name
     }
-    
+
     fn version(&self) -> &str {
         &self.version
     }
-    
+
     fn path(&self) -> &str {
         &self.path
     }
-    
+
     fn description(&self) -> &str {
         &self.description
     }
@@ -93,39 +98,42 @@ impl AbstractService for PathParamsService {
     fn network_id(&self) -> Option<String> {
         self.network_id.clone()
     }
-    
+
     async fn init(&self, context: LifecycleContext) -> Result<()> {
         // Log the service information being initialized
-        context.info(format!("Initializing PathParamsService with name: {}, path: {}", self.name, self.path));
-        
+        context.info(format!(
+            "Initializing PathParamsService with name: {}, path: {}",
+            self.name, self.path
+        ));
+
         // Create an owned copy to move into the closures
         let owned_self = self.clone();
-        
+
         // Register the extract action with a template path
         context.info("Registering 'extract' action with template path".to_string());
-        context.register_action(
-            "{param_1}/items/{param_2}",
-            Arc::new(move |params, request_ctx| {
-                let self_clone = owned_self.clone();
-                Box::pin(async move {
-                    self_clone.handle_extract(params, request_ctx).await
-                })
-            }),
-        ).await?;
-        
+        context
+            .register_action(
+                "{param_1}/items/{param_2}",
+                Arc::new(move |params, request_ctx| {
+                    let self_clone = owned_self.clone();
+                    Box::pin(async move { self_clone.handle_extract(params, request_ctx).await })
+                }),
+            )
+            .await?;
+
         // Log successful initialization
         context.info("PathParamsService initialized".to_string());
-        
+
         Ok(())
     }
-    
+
     async fn start(&self, context: LifecycleContext) -> Result<()> {
         context.info("PathParamsService started".to_string());
         Ok(())
     }
-    
+
     async fn stop(&self, context: LifecycleContext) -> Result<()> {
         context.info("PathParamsService stopped".to_string());
         Ok(())
     }
-} 
+}

@@ -11,7 +11,7 @@
 //!
 //! ## API Ergonomics
 //!
-//! Throughout the codebase, string parameters have been designed for maximum flexibility 
+//! Throughout the codebase, string parameters have been designed for maximum flexibility
 //! using Rust's `impl Into<String>` pattern. This means you can pass string parameters in
 //! various forms:
 //!
@@ -40,7 +40,7 @@
 //! This flexibility extends to all public APIs in the codebase including:
 //! - Node API methods (publish, subscribe, request)
 //! - TopicPath constructors and methods
-//! - ServiceRequest constructors 
+//! - ServiceRequest constructors
 //! - LifecycleContext registration methods
 //!
 //! ## Core Components
@@ -73,35 +73,36 @@
 //! ```
 
 // Public modules
-pub mod node;
-pub mod services;
-pub mod routing;
-pub mod network;
 pub mod config;
+pub mod network;
+pub mod node;
+pub mod routing;
+pub mod services;
 pub mod utils;
 
 // Re-export the main types from the node module
 pub use node::{Node, NodeConfig};
 
 // Re-export the main types from the services module
-pub use services::{
-    ActionHandler, EventContext, LifecycleContext, NodeDelegate, PublishOptions,
-    RequestContext, RegistryDelegate, ServiceRequest, ServiceResponse, SubscriptionOptions
+pub use services::abstract_service::{
+    AbstractService, ActionMetadata, CompleteServiceMetadata, ServiceState,
 };
 pub use services::service_registry::ServiceRegistry;
-pub use services::abstract_service::{AbstractService, ActionMetadata, CompleteServiceMetadata, ServiceState};
+pub use services::{
+    ActionHandler, EventContext, LifecycleContext, NodeDelegate, PublishOptions, RegistryDelegate,
+    RequestContext, ServiceRequest, ServiceResponse, SubscriptionOptions,
+};
 
 // Re-export the main types from the routing module
 pub use routing::TopicPath;
 
 // Re-export the main types from the network module
 pub use network::{
-    NetworkTransport, PeerId, TransportOptions, NetworkMessage, 
-    TransportFactory, NetworkMessageType,
-    NodeDiscovery, NodeInfo, DiscoveryOptions
+    DiscoveryOptions, NetworkMessage, NetworkMessageType, NetworkTransport, NodeDiscovery,
+    NodeInfo, PeerId, TransportFactory, TransportOptions,
 };
 // Re-export peer registry types from transport
-pub use network::transport::{PeerRegistry, PeerStatus, PeerEntry};
+pub use network::transport::{PeerEntry, PeerRegistry, PeerStatus};
 
 // Re-export common types
 pub use runar_common::types::ValueType;
@@ -111,4 +112,4 @@ pub use runar_common::vmap;
 
 // Version information
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const NAME: &str = env!("CARGO_PKG_NAME"); 
+pub const NAME: &str = env!("CARGO_PKG_NAME");

@@ -11,11 +11,11 @@
 // and consistent handling. The context avoids data duplication by
 // deriving values from the TopicPath when needed.
 
-use std::fmt;
-use std::collections::HashMap;
 use crate::routing::TopicPath;
-use runar_common::logging::{Logger, LoggingContext, Component};
+use runar_common::logging::{Component, Logger, LoggingContext};
 use runar_common::types::ValueType;
+use std::collections::HashMap;
+use std::fmt;
 
 /// Context for handling service requests
 ///
@@ -94,7 +94,7 @@ impl RequestContext {
         } else {
             logger
         };
-        
+
         Self {
             topic_path: Some(topic_path.clone()),
             metadata: None,
@@ -102,7 +102,7 @@ impl RequestContext {
             path_params: HashMap::new(),
         }
     }
-    
+
     /// Add metadata to a RequestContext
     ///
     /// Use builder-style methods instead of specialized constructors.
@@ -136,7 +136,7 @@ impl RequestContext {
     pub fn debug(&self, message: impl Into<String>) {
         self.logger.debug(message);
     }
-    
+
     /// Helper method to log info level message
     ///
     /// INTENTION: Provide a convenient way to log info messages with the
@@ -144,7 +144,7 @@ impl RequestContext {
     pub fn info(&self, message: impl Into<String>) {
         self.logger.info(message);
     }
-    
+
     /// Helper method to log warning level message
     ///
     /// INTENTION: Provide a convenient way to log warning messages with the
@@ -152,7 +152,7 @@ impl RequestContext {
     pub fn warn(&self, message: impl Into<String>) {
         self.logger.warn(message);
     }
-    
+
     /// Helper method to log error level message
     ///
     /// INTENTION: Provide a convenient way to log error messages with the
@@ -166,7 +166,7 @@ impl LoggingContext for RequestContext {
     fn component(&self) -> Component {
         Component::Service
     }
-    
+
     fn service_path(&self) -> Option<&str> {
         if let Some(topic_path) = &self.topic_path {
             let path = topic_path.service_path();
@@ -175,12 +175,12 @@ impl LoggingContext for RequestContext {
             None
         }
     }
-    
+
     fn action_path(&self) -> Option<&str> {
         // Get from logger's action_path
         self.logger.action_path()
     }
-    
+
     fn logger(&self) -> &Logger {
         &self.logger
     }

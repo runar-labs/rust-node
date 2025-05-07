@@ -3,18 +3,20 @@
 // This module provides network transport capabilities for the Runar system.
 // It includes traits and implementations for network communication between nodes.
 
-pub mod transport;
 pub mod discovery;
-pub mod capabilities;
+pub mod transport;
 
-pub use transport::{
-    NetworkTransport, NetworkMessage, PeerId, TransportOptions, 
-    TransportFactory, NetworkMessageType, MessageHandler,
-    PeerRegistry, PeerStatus, PeerEntry, QuicTransport, QuicTransportOptions
+pub use discovery::{
+    DiscoveryListener, DiscoveryOptions, MemoryDiscovery, MulticastDiscovery, NodeDiscovery,
+    NodeInfo,
 };
-pub use discovery::{NodeDiscovery, DiscoveryOptions, NodeInfo, DiscoveryListener, MulticastDiscovery, MemoryDiscovery};
-pub use capabilities::{ServiceCapability, ActionCapability, EventCapability};
+pub use runar_common::models::schemas::{ActionMetadata, EventMetadata, ServiceMetadata};
+pub use transport::{
+    MessageHandler, NetworkMessage, NetworkMessageType, NetworkTransport, PeerEntry, PeerId,
+    PeerRegistry, PeerStatus, QuicTransport, QuicTransportOptions, TransportFactory,
+    TransportOptions,
+};
 
 // Implementation modules should be imported directly when needed:
 // use runar_node::network::discovery::multicast_discovery::MulticastDiscovery;
-// use runar_node::network::transport::quic_transport::{QuicTransport, QuicTransportOptions}; 
+// use runar_node::network::transport::quic_transport::{QuicTransport, QuicTransportOptions};
