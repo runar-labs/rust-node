@@ -8,7 +8,7 @@ use anyhow::Result;
 use tokio::time::timeout;
 
 use runar_common::types::ValueType;
-use runar_common::{Component, Logger};
+use runar_common::{Component, Logger, hmap};
 use runar_node::node::{Node, NodeConfig};
 use runar_node::network::discovery::{DiscoveryOptions, MulticastDiscovery};
 use runar_node::network::transport::quic_transport::QuicTransportOptions;
@@ -65,12 +65,12 @@ async fn test_node_network_remote_calls() -> Result<()> {
         // Debug: Check the action handlers registered with each node
         println!("Checking node1's registry services...");
         let registry_response1 = node1.request("$registry/services/list".to_string(), 
-            ValueType::from(serde_json::json!({"include_actions": true}))).await;
+            ValueType::Map(hmap! {"include_actions" => true})).await;
         println!("Node1 services with actions: {:?}", registry_response1);
 
         println!("Checking node2's registry services...");
         let registry_response2 = node2.request("$registry/services/list".to_string(), 
-            ValueType::from(serde_json::json!({"include_actions": true}))).await;
+            ValueType::Map(hmap! {"include_actions" => true})).await;
         println!("Node2 services with actions: {:?}", registry_response2);
 
         // Check the specific service information
@@ -94,9 +94,14 @@ async fn test_node_network_remote_calls() -> Result<()> {
         println!("Attempting to call: test-network:MathB/add");
         
         // Call the node with the full network path
+        let add_params = ValueType::Map(hmap! {
+            "a" => 5.0,
+            "b" => 3.0
+        });
+        
         let result = node1.request(
             "test-network:MathB/add".to_string(),
-            ValueType::from(serde_json::json!({"a": 5, "b": 3})),
+            add_params,
         ).await?;
         
         println!("Result from Node2's add service: {:?}", result);
@@ -111,11 +116,11 @@ async fn test_node_network_remote_calls() -> Result<()> {
         // Test 2: Node2 calls Node1's multiply service
         println!("Test 2: Node2 calling Node1's multiply service...");
         
-        // Create parameters for multiplication
-        let params2 = ValueType::Map([
-            ("a".to_string(), ValueType::Number(4.0)),
-            ("b".to_string(), ValueType::Number(7.0)),
-        ].into_iter().collect());
+        // Create parameters for multiplication using hmap! macro
+        let params2 = ValueType::Map(hmap! {
+            "a" => 4.0,
+            "b" => 7.0
+        });
         
         // Create the request path using TopicPath for proper formatting
         let remote_path2 = "test-network:MathA/multiply".to_string();

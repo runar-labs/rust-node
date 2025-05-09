@@ -13,7 +13,7 @@ use tokio::time::timeout;
 
 use runar_common::logging::{Component, Logger};
 use runar_common::types::ArcValueType;
-use runar_common::vmap;
+use runar_common::{hmap, vmap};
 use runar_node::node::{LogLevel, LoggingConfig, Node, NodeConfig};
 use runar_node::routing::TopicPath;
 use runar_node::services::{ActionHandler, EventContext, RequestContext, ServiceResponse};
@@ -122,10 +122,10 @@ async fn test_node_request() {
         node.start().await.unwrap();
 
         // Create parameters for the add operation using vmap! macro
-        let params = vmap! {
+        let params = ArcValueType::new_map(hmap! {
             "a" => 5.0,
             "b" => 3.0
-        };
+        });
 
         // Make a request to the math service's add action
         let response = node.request("math/add", params).await.unwrap();
