@@ -20,17 +20,17 @@ mod tests {
     use anyhow::anyhow;
     use tokio::time::timeout;
 
-    async fn create_test_discovery(network_id: &str) -> Result<MulticastDiscovery> {
+    async fn create_test_discovery(network_id: &str, node_id: &str) -> Result<MulticastDiscovery> {
         let mut options = DiscoveryOptions::default();
         options.multicast_group = format!("{}:45678", DEFAULT_MULTICAST_ADDR);
         options.announce_interval = Duration::from_secs(1); // Use shorter interval for tests
         
         // Create a logger for testing
-        let logger = Logger::new_root(Component::NetworkDiscovery, "test_multicast_discovery");
+        let logger = Logger::new_root(Component::NetworkDiscovery, node_id);
         
         // Create a test node info
         let node_info = NodeInfo {
-            peer_id: PeerId::new(format!("test-node-{}", network_id)),
+            peer_id: PeerId::new(node_id.to_string()),
             network_ids: vec![network_id.to_string()],
             addresses: vec!["127.0.0.1:8000".to_string()],
             capabilities: vec![
@@ -79,7 +79,7 @@ mod tests {
         async fn test_multicast_discovery_listener() -> Result<()> {
             // Create a test node ID to use for verification later
             let test_node_id = format!("test-node-test-network");
-            let discovery = create_test_discovery("test-network").await?;
+            let discovery = create_test_discovery("test-network", "test-node-test-network").await?;
             
             // Create channel for receiving notifications
             let (tx, mut rx) = mpsc::channel::<PeerInfo>(10);
@@ -148,8 +148,8 @@ mod tests {
     async fn test_multicast_announce_and_discover() -> Result<()> {
         async fn test_multiple_discovery_instances() -> Result<()> {
             // Create two discovery instances
-            let discovery1 = create_test_discovery("test-network").await?;
-            let discovery2 = create_test_discovery("test-network").await?;
+            let discovery1 = create_test_discovery("test-network", "test-node-1").await?;
+            let discovery2 = create_test_discovery("test-network", "test-node-2").await?;
             
             // Create channels for receiving notifications
             let (tx1, mut rx1) = mpsc::channel::<PeerInfo>(10);
@@ -168,7 +168,7 @@ mod tests {
                 
                 Box::pin(async move {
                     // Only trigger for node2
-                    if peer_info.public_key.contains("node2") {
+                    if peer_info.public_key.contains("node-2") {
                         // Send the peer info to our channel
                         if let Err(e) = tx.send(peer_info).await {
                             eprintln!("Channel send error: {}", e);
@@ -190,7 +190,7 @@ mod tests {
                 
                 Box::pin(async move {
                     // Only trigger for node1
-                    if peer_info.public_key.contains("node1") {
+                    if peer_info.public_key.contains("node-1") {
                         // Send the peer info to our channel
                         if let Err(e) = tx.send(peer_info).await {
                             eprintln!("Channel send error: {}", e);
@@ -239,6 +239,9 @@ mod tests {
             // Shutdown both discoveries
             discovery1.stop_announcing().await?;
             discovery2.stop_announcing().await?;
+
+            assert!(node1_found_node2);
+            assert!(node2_found_node1); 
             
             Ok(())
         }
