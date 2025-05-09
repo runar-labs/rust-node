@@ -5,10 +5,10 @@
 
 use std::time::Duration;
 use tokio::time::timeout;
-use runar_common::types::ValueType;
 use runar_node::node::{LogLevel, LoggingConfig, Node, NodeConfig};
 use runar_common::logging::{Logger, Component};
 use runar_node::services::RegistryDelegate;
+use runar_common::types::ArcValueType;
 
 // Import the test fixtures
 use crate::fixtures::math_service::MathService;
@@ -24,7 +24,10 @@ async fn test_registry_service_list_services() {
     // Wrap the test in a timeout to prevent it from hanging
     match timeout(Duration::from_secs(10), async {
         // Create a node with a test network ID
-        let config = NodeConfig::new("node-reg-list" , "test_network" );
+        let config = NodeConfig::new(
+            "node-reg-list".to_string(),
+            "test_network".to_string()
+        );
         let mut node = Node::new(config).await.unwrap();
         
         // Create a test service
@@ -33,27 +36,36 @@ async fn test_registry_service_list_services() {
         // Add the service to the node
         node.add_service(math_service).await.unwrap();
         
+        // Start the node to initialize services
+        node.start().await.unwrap();
+        
         // Use the request method to query the registry service
-        let response = node.request("$registry/services/list" , ValueType::Null).await.unwrap();
+        let response = node.request(
+            "$registry/services/list".to_string(),
+            ArcValueType::null()
+        ).await.unwrap();
         
         // Verify response is successful
         assert_eq!(response.status, 200, "Registry service request failed: {:?}", response);
         
         // Parse the response to verify it contains our registered services
-        if let Some(ValueType::Array(services)) = response.data {
+        if let Some(value) = response.data {
+            let services = value.as_list_ref::<ArcValueType>().expect("Expected array response from registry service");
             // The services list should contain at least the math service and the registry service itself
             assert!(services.len() >= 2, "Expected at least 2 services, got {}", services.len());
             
             // Verify the math service is in the list
             let has_math_service = services.iter().any(|service| {
-                if let ValueType::Map(service_info) = service {
-                    if let Some(ValueType::String(path)) = service_info.get("path") {
-                        path == "math"
-                    } else {
-                        false
-                    }
+                // Need to make service mutable for as_map_ref
+                let mut service_clone = service.clone();
+                let service_info = service_clone.as_map_ref::<String, ArcValueType>().expect("Expected map in service info");
+                if let Some(path_value) = service_info.get("path") {
+                    // Need to make path_value mutable for as_type
+                    let mut path_value_clone = path_value.clone();
+                    let path: String = path_value_clone.as_type().expect("Expected string path");
+                    path == "math"
                 } else {
-                    false
+                    false   
                 }
             });
             
@@ -103,12 +115,12 @@ async fn test_registry_service_get_service_info() {
         test_logger.debug(format!("Service states AFTER start: {:?}", states_after));
         
         // Debug log available handlers using logger
-        let list_response = node.request("$registry/services/list", ValueType::Null).await.unwrap();
+        let list_response = node.request("$registry/services/list", ArcValueType::null()).await.unwrap();
         test_logger.debug(format!("Available services: {:?}", list_response));
         
         // Use the request method to query the registry service for the math service
         // Note: We should use the correct parameter path format
-        let response = node.request("$registry/services/math", ValueType::Null).await.unwrap();
+        let response = node.request("$registry/services/math", ArcValueType::null()).await.unwrap();
         test_logger.debug(format!("Service info response: {:?}", response));
         
         // Verify response is successful
@@ -118,9 +130,11 @@ async fn test_registry_service_get_service_info() {
         if let Some(ref data) = response.data {
             test_logger.debug(format!("Response data type: {:?}", data));
             match data {
-                ValueType::Map(map) => {
-                    test_logger.debug(format!("Response map keys: {:?}", map.keys().collect::<Vec<_>>()));
-                    for (k, v) in map {
+                value => {
+                    let mut value_clone = value.clone();
+                    let map_data = value_clone.as_map_ref::<String, ArcValueType>().expect("Expected map in response");
+                    test_logger.debug(format!("Response map keys: {:?}", map_data.keys().collect::<Vec<_>>()));
+                    for (k, v) in map_data {
                         test_logger.debug(format!("Key: {}, Value: {:?}", k, v));
                     }
                 },
@@ -129,9 +143,13 @@ async fn test_registry_service_get_service_info() {
         }
         
         // Parse the response to verify it contains correct service information
-        if let Some(ValueType::Map(service_info)) = response.data {
+        if let Some(value) = response.data {
+            let mut value_clone = value.clone();
+            let service_info = value_clone.as_map_ref::<String, ArcValueType>().expect("Expected map in service info");
             // Verify service path
-            if let Some(ValueType::String(path)) = service_info.get("path") {
+            if let Some(path_value) = service_info.get("path") {
+                let mut path_value_clone = path_value.clone();
+                let path: String = path_value_clone.as_type().expect("Expected string path");
                 assert_eq!(path, "math", "Expected service path 'math', got '{}'", path);
             } else {
                 test_logger.warn("Service path not found in response");
@@ -139,7 +157,9 @@ async fn test_registry_service_get_service_info() {
             }
             
             // Verify service state is present (instead of checking specific value)
-            if let Some(ValueType::String(state)) = service_info.get("state") {
+            if let Some(state_value) = service_info.get("state") {
+                let mut state_value_clone = state_value.clone();
+                let state: String = state_value_clone.as_type().expect("Expected string state");
                 assert!(!state.is_empty(), "Expected non-empty service state, got '{}'", state);
                 test_logger.debug(format!("Service state from response: {}", state));
             } else {
@@ -148,7 +168,9 @@ async fn test_registry_service_get_service_info() {
             }
             
             // Verify service name
-            if let Some(ValueType::String(name)) = service_info.get("name") {
+            if let Some(name_value) = service_info.get("name") {
+                let mut name_value_clone = name_value.clone();
+                let name: String = name_value_clone.as_type().expect("Expected string name");
                 assert_eq!(name, "Math", "Expected service name 'Math', got '{}'", name);
             } else {
                 test_logger.error("Service name not found in response");
@@ -194,14 +216,16 @@ async fn test_registry_service_get_service_state() {
         test_logger.debug(format!("Service states before request: {:?}", states_before));
         
         // Use the request method to query the registry service for the math service state
-        let response = node.request("$registry/services/math/state", ValueType::Null).await.unwrap();
+        let response = node.request("$registry/services/math/state", ArcValueType::null()).await.unwrap();
         test_logger.debug(format!("Initial service state response: {:?}", response));
         
         // Verify response is successful
         assert_eq!(response.status, 200, "Registry service request failed: {:?}", response);
         
         // Parse the response to verify it contains service state
-        if let Some(ValueType::Map(state_info)) = response.data.clone() {
+        if let Some(value) = response.data.clone() {
+            let mut value_clone = value.clone();
+            let state_info = value_clone.as_map_ref::<String, ArcValueType>().expect("Expected map in state info");
             // Verify service state is present
             assert!(state_info.contains_key("state"), "Service state field not found in response");
             
@@ -219,12 +243,16 @@ async fn test_registry_service_get_service_state() {
         test_logger.debug(format!("Service states after start: {:?}", states_after));
         
         // Check state after service is started
-        let response = node.request("$registry/services/math/state", ValueType::Null).await.unwrap();
+        let response = node.request("$registry/services/math/state", ArcValueType::null()).await.unwrap();
         test_logger.debug(format!("Service state after start: {:?}", response));
         
-        if let Some(ValueType::Map(state_info)) = response.data {
+        if let Some(value) = response.data {
+            let mut value_clone = value.clone();
+            let state_info = value_clone.as_map_ref::<String, ArcValueType>().expect("Expected map in state info");
             // Verify service state is present
-            if let Some(ValueType::String(state)) = state_info.get("state") {
+            if let Some(state_value) = state_info.get("state") {
+                let mut state_value_clone = state_value.clone();
+                let state: String = state_value_clone.as_type().expect("Expected string state");
                 assert!(!state.is_empty(), "Expected non-empty service state, got '{}'", state);
                 test_logger.debug(format!("Final service state from response: {}", state));
             } else {
@@ -267,7 +295,7 @@ async fn test_registry_service_missing_parameter() {
         // Make an invalid request with missing service_path parameter
         // The registry service expects a path parameter in the URL, but we're using an invalid path
         // that the router won't be able to match to a template with a parameter
-        let response = node.request("$registry/services", ValueType::Null).await;
+        let response = node.request("$registry/services", ArcValueType::null()).await;
         
         // The request should fail or return an error response
         match response {
@@ -285,7 +313,7 @@ async fn test_registry_service_missing_parameter() {
         }
         
         // Test with an invalid path format for service_path/state endpoint
-        let state_response = node.request("$registry/services//state", ValueType::Null).await;
+        let state_response = node.request("$registry/services//state", ArcValueType::null()).await;
         
         // The request should fail or return an error response
         match state_response {

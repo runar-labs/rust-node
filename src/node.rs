@@ -5,24 +5,24 @@
 // coordinating event publishing and subscriptions.
 
 use anyhow::{anyhow, Result};
+use std::pin::Pin;
 use async_trait::async_trait;
 use chrono;
 use env_logger;
 use rcgen;
 use runar_common::logging::{Component, Logger};
-use runar_common::models::schemas::{
-    ActionMetadata, EventMetadata, FieldSchema, SchemaDataType, ServiceMetadata,
-};
+use runar_common::types::schemas::{ActionMetadata, EventMetadata, FieldSchema, SchemaDataType, ServiceMetadata};
 use runar_common::types::{ArcValueType, SerializerRegistry};
 use rustls;
 use rustls::{Certificate, PrivateKey};
+use serde_json;
 use socket2;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::future::Future;
 use std::io::Read;
 use std::net::SocketAddr;
-use std::pin::Pin;
+ 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -38,7 +38,7 @@ use crate::network::transport::{
     NetworkTransport, PeerId, QuicTransport, QuicTransportOptions,
 };
 use crate::routing::TopicPath;
-use crate::services::abstract_service::{AbstractService, CompleteServiceMetadata, ServiceState};
+use crate::services::abstract_service::{AbstractService, ServiceState};
 use crate::services::registry_info::RegistryService;
 use crate::services::remote_service::RemoteService;
 use crate::services::service_registry::{ServiceEntry, ServiceRegistry};
@@ -740,10 +740,17 @@ impl Node {
             .await?;
 
         // Service initialized successfully, create the ServiceEntry and register it
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+            
         let service_entry = ServiceEntry {
             service: Arc::new(service),
             service_topic,
             service_state: ServiceState::Initialized,
+            registration_time: now,
+            last_start_time: None, // Will be set when the service is started
         };
         registry
             .register_local_service(Arc::new(service_entry))
@@ -959,18 +966,17 @@ impl Node {
                         let provider_type_clone = provider_type.clone();
 
                         discovery
-                            .set_discovery_listener(Box::new(move |peer_info| {
+                            .set_discovery_listener(Arc::new(move |peer_info| {
                                 let node = node_clone.clone();
                                 let provider_type_clone = provider_type_clone.clone();
-
-                                tokio::spawn(async move {
+                                Box::pin(async move {
                                     if let Err(e) = node.handle_discovered_node(peer_info).await {
                                         node.logger.error(format!(
                                             "Failed to handle node discovered by {} provider: {}",
                                             provider_type_clone, e
                                         ));
                                     }
-                                });
+                                })
                             }))
                             .await?;
 
@@ -1082,31 +1088,7 @@ impl Node {
             {
                 self.logger
                     .info(format!("connected to node: {} - will", peer_public_key));
-
-                // // Always connect to the peer for now
-                // let should_connect = true; // In future: perform public/private key checks
-
-                // if should_connect {
-
-                //     // Try to connect to the peer
-                //     if let Ok(addr) = address.parse::<SocketAddr>() {
-                //         match transport.connect(peer_id.clone(), addr).await {
-                //             Ok(_) => {
-                //                 self.logger.info(format!("Connected to peer: {}", peer_id));
-
-                //                 // Process capabilities AFTER successful connection
-                //                 let _ = self.process_remote_capabilities(
-                //                     node_info.clone()
-                //                 ).await;
-                //             },
-                //             Err(e) => self.logger.warn(format!("Failed to connect to peer: {} - Error: {}",
-                //                 peer_id, e))
-                //         }
-                //     } else {
-                //         self.logger.warn(format!("Invalid address format for peer: {} - {}",
-                //             peer_id, address));
-                //     }
-                // }
+ 
             } else {
                 self.logger.warn(format!(
                     "Failed to add node to registry: {}",
@@ -1737,11 +1719,11 @@ impl Node {
                 // Create a channel for the response
                 let (sender, receiver) = oneshot::channel();
 
-                // Create a type registry for serialization
-                let type_registry = SerializerRegistry::with_defaults();
-
-                // Serialize the parameters
+                // Serialize the parameters using the SerializerRegistry
                 let params_value = params.unwrap_or_else(|| ArcValueType::null());
+                let type_registry = SerializerRegistry::with_defaults();
+                
+                // Serialize the parameters to bytes
                 let serialized_params = match type_registry.serialize_value(&params_value) {
                     Ok(bytes) => bytes.to_vec(),
                     Err(e) => {
@@ -1926,13 +1908,13 @@ impl Node {
     ///
     pub async fn collect_local_service_capabilities(&self) -> Result<Vec<ServiceMetadata>> {
         // Get all local services
-        let service_paths = self.service_registry.get_local_services().await;
+        let service_paths: HashMap<TopicPath, Arc<ServiceEntry>> = self.service_registry.get_local_services().await;
         if service_paths.is_empty() {
             return Ok(Vec::new());
         }
 
         // Build capability information for each service
-        let mut capabilities = Vec::new();
+        let mut services = Vec::new();
 
         for (service_path, service_entry) in service_paths {
             let service = &service_entry.service;
@@ -1943,119 +1925,20 @@ impl Node {
             }
 
             // Get the service actions from registry
-            let meta = self
+            if let Some(meta) = self
                 .service_registry
                 .get_service_metadata(&service_path)
-                .await;
-
-            // Convert registered actions to ActionMetadata objects
-            let mut actions = Vec::new();
-            let mut events = Vec::new();
-
-            if let Some(metadata) = meta {
-                // Get actions from service metadata (which should have all registered handlers)
-                for action in metadata.registered_actions.values() {
-                    // Create a full path for the action
-                    let full_path = format!("{}/{}", service.path(), action.path);
-
-                    // Convert parameters_schema from HashMap<String, ArcValueType> to FieldSchema
-                    let parameters_schema = if let Some(params_schema) = &action.parameters_schema {
-                        // Clone the original parameters_schema
-                        Some(params_schema.clone())
-                    } else {
-                        None
-                    };
-
-                    // Convert return_schema from HashMap<String, ArcValueType> to FieldSchema
-                    let return_schema = if let Some(result_schema) = &action.return_schema {
-                        // Clone the original return_schema
-                        Some(result_schema.clone())
-                    } else {
-                        None
-                    };
-
-                    actions.push(ActionMetadata {
-                        path: full_path,
-                        description: action.description.clone(),
-                        parameters_schema,
-                        return_schema,
-                    });
-                }
-
-                // Get events from service metadata
-                for event in metadata.registered_events.values() {
-                    // Create a full path for the event
-                    let full_path = format!("{}/{}", service.path(), event.path);
-
-                    // Convert data_schema from HashMap<String, ArcValueType> to FieldSchema
-                    let data_schema = if let Some(schema) = &event.data_schema {
-                        // Clone the original schema
-                        Some(schema.clone())
-                    } else {
-                        None
-                    };
-
-                    events.push(EventMetadata {
-                        path: full_path,
-                        description: event.description.clone(),
-                        data_schema,
-                    });
-                }
-
-                self.logger.debug(format!(
-                    "Found {} registered actions for service {} in metadata",
-                    actions.len(),
-                    service_path
-                ));
+                .await {
+                services.push(meta);
             }
-
-            // Create a complete capability object
-            let capability = ServiceMetadata {
-                network_id: match service.network_id() {
-                    Some(id) => id.to_string(),
-                    None => self.network_id.clone(),
-                },
-                service_path: service.path().to_string(),
-                name: service.name().to_string(),
-                version: service.version().to_string(),
-                description: service.description().to_string(),
-                actions,
-                events,
-            };
-
-            self.logger.debug(format!(
-                "Created capability for service {} with network_id={} and {} actions: {:?}",
-                capability.service_path,
-                capability.network_id,
-                capability.actions.len(),
-                capability
-                    .actions
-                    .iter()
-                    .map(|a| a.path.clone())
-                    .collect::<Vec<_>>()
-            ));
-
-            capabilities.push(capability);
         }
 
         // Log all capabilities collected
         self.logger.info(format!(
-            "Collected {} service capabilities",
-            capabilities.len()
+            "Collected {} services metadata",
+            services.len()
         ));
-        for cap in &capabilities {
-            self.logger.debug(format!(
-                "Capability: service={}, network_id={}, actions={:?}",
-                cap.service_path,
-                cap.network_id,
-                cap.actions
-                    .iter()
-                    .map(|a| a.path.clone())
-                    .collect::<Vec<_>>()
-            ));
-        }
-
-        Ok(capabilities)
+        Ok(services)
     }
 
     /// Get the node's public network address
@@ -2403,7 +2286,7 @@ impl RegistryDelegate for Node {
     async fn get_service_metadata(
         &self,
         service_path: &TopicPath,
-    ) -> Option<CompleteServiceMetadata> {
+    ) -> Option<ServiceMetadata> {
         self.service_registry
             .get_service_metadata(service_path)
             .await
@@ -2413,7 +2296,7 @@ impl RegistryDelegate for Node {
     async fn get_all_service_metadata(
         &self,
         include_internal_services: bool,
-    ) -> HashMap<String, CompleteServiceMetadata> {
+    ) -> HashMap<String, ServiceMetadata> {
         self.service_registry
             .get_all_service_metadata(include_internal_services)
             .await

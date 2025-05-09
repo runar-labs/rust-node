@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use runar_node::network::transport::{NetworkTransport, NetworkMessage, PeerId, MessageHandler};
 use runar_node::network::transport::{NetworkError, ConnectionCallback};
 use runar_node::network::discovery::{NodeDiscovery, NodeInfo, DiscoveryOptions, DiscoveryListener};
-use runar_common::types::ValueType;
+use runar_common::types::{ValueType, ServiceMetadata, ActionMetadata, EventMetadata, FieldSchema, SchemaDataType};
 use runar_common::Logger;
 use runar_node::network::transport::peer_registry::PeerRegistry;
 
@@ -309,8 +309,29 @@ mod tests {
         let node_info = NodeInfo {
             peer_id: PeerId::new("node-1".to_string()),
             network_ids: vec!["test-network".to_string()],
-            address: "localhost:8080".to_string(),
-            capabilities: vec!["request".to_string(), "event".to_string()],
+            addresses: vec!["localhost:8080".to_string()],
+            capabilities: vec![
+                ServiceMetadata {
+                    name: "test-service".to_string(),
+                    version: "1.0.0".to_string(),
+                    description: "Test service for unit tests".to_string(),
+                    actions: vec![
+                        ActionMetadata {
+                            name: "request".to_string(),
+                            description: "Test request".to_string(),
+                            input_schema: None,
+                            output_schema: None,
+                        }
+                    ],
+                    events: vec![
+                        EventMetadata {
+                            name: "event".to_string(),
+                            description: "Test event".to_string(),
+                            data_schema: None,
+                        }
+                    ],
+                }
+            ],
             last_seen: SystemTime::now(),
         };
         
@@ -319,8 +340,8 @@ mod tests {
         
         // Check if listener was notified
         if let Some(received_node_info) = rx.recv().await {
-            assert_eq!(received_node_info.peer_id.node_id, "node-1");
-            assert_eq!(received_node_info.address, "localhost:8080");
+            assert_eq!(received_node_info.peer_id.public_key, "node-1");
+            assert_eq!(received_node_info.addresses, vec!["localhost:8080".to_string()]);
         } else {
             return Err(anyhow!("Discovery listener was not notified"));
         }

@@ -78,20 +78,20 @@ pub mod network;
 pub mod node;
 pub mod routing;
 pub mod services;
-pub mod utils;
 
 // Re-export the main types from the node module
 pub use node::{Node, NodeConfig};
 
 // Re-export the main types from the services module
-pub use services::abstract_service::{
-    AbstractService, ActionMetadata, CompleteServiceMetadata, ServiceState,
-};
+pub use services::abstract_service::{AbstractService, ServiceState};
 pub use services::service_registry::ServiceRegistry;
 pub use services::{
     ActionHandler, EventContext, LifecycleContext, NodeDelegate, PublishOptions, RegistryDelegate,
     RequestContext, ServiceRequest, ServiceResponse, SubscriptionOptions,
 };
+
+// Re-export the schema types from runar_common
+pub use runar_common::types::schemas::{ActionMetadata, EventMetadata, ServiceMetadata};
 
 // Re-export the main types from the routing module
 pub use routing::TopicPath;
@@ -103,10 +103,7 @@ pub use network::{
 };
 // Re-export peer registry types from transport
 pub use network::transport::{PeerEntry, PeerRegistry, PeerStatus};
-
-// Re-export common types
-pub use runar_common::types::ValueType;
-
+ 
 // Re-export common macros for convenience
 pub use runar_common::vmap;
 

@@ -1,7 +1,8 @@
 use std::collections::HashMap;
-use anyhow::Result;
+use std::sync::Arc;
+use anyhow::{Result, anyhow};
 use serde::{Serialize, Deserialize};
-use runar_common::types::ValueType;
+use runar_common::types::{ArcValueType, SerializerRegistry};
 use runar_node::network::transport::{NetworkMessage, NetworkMessagePayloadItem, PeerId};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -13,10 +14,18 @@ struct TestStruct {
 
 #[test]
 fn test_message_payload_item_serialization() -> Result<()> {
-    // Create a simple payload item
+    // Create a simple payload item with ArcValueType
+    let value = ArcValueType::new_primitive("test-value".to_string());
+    
+    // Create a SerializerRegistry for serialization
+    let registry = SerializerRegistry::with_defaults();
+    
+    // Serialize the ArcValueType
+    let value_bytes = registry.serialize_value(&value)?;
+    
     let payload_item = NetworkMessagePayloadItem::new(
         "test/path".to_string(),
-        ValueType::String("test-value".to_string()),
+        value_bytes.to_vec(),
         "correlation-123".to_string()
     );
     
@@ -30,13 +39,13 @@ fn test_message_payload_item_serialization() -> Result<()> {
     // Verify the data matches
     assert_eq!(deserialized.path, "test/path");
     assert_eq!(deserialized.correlation_id, "correlation-123");
-    if let ValueType::String(s) = &deserialized.value {
-        assert_eq!(s, "test-value");
-    } else {
-        panic!("Expected ValueType::String");
-    }
     
-    println!("Test passed: Payload item serialization/deserialization works");
+    // Deserialize the value bytes back to ArcValueType
+    let mut deserialized_value = registry.deserialize_value(Arc::from(deserialized.value_bytes.clone()))?;
+    let string_value: String = deserialized_value.as_type()?;
+    assert_eq!(string_value, "test-value");
+    
+    println!("Test passed: Payload item serialization/deserialization works with ArcValueType");
     Ok(())
 }
 
@@ -46,10 +55,18 @@ fn test_network_message_serialization() -> Result<()> {
     let source_id = PeerId::new("source-node".to_string());
     let dest_id = PeerId::new("dest-node".to_string());
     
-    // Create a payload
+    // Create a payload with ArcValueType
+    let value = ArcValueType::new_primitive(42.0);
+    
+    // Create a SerializerRegistry for serialization
+    let registry = SerializerRegistry::with_defaults();
+    
+    // Serialize the ArcValueType
+    let value_bytes = registry.serialize_value(&value)?;
+    
     let payload_item = NetworkMessagePayloadItem::new(
         "test/path".to_string(),
-        ValueType::Number(42.0),
+        value_bytes.to_vec(),
         "correlation-456".to_string()
     );
     
@@ -75,13 +92,13 @@ fn test_network_message_serialization() -> Result<()> {
     assert_eq!(deserialized.payloads.len(), 1);
     assert_eq!(deserialized.payloads[0].path, "test/path");
     assert_eq!(deserialized.payloads[0].correlation_id, "correlation-456");
-    if let ValueType::Number(n) = deserialized.payloads[0].value {
-        assert_eq!(n, 42.0);
-    } else {
-        panic!("Expected ValueType::Number");
-    }
     
-    println!("Test passed: Network message serialization/deserialization works");
+    // Deserialize the value bytes back to ArcValueType
+    let mut deserialized_value = registry.deserialize_value(Arc::from(deserialized.payloads[0].value_bytes.clone()))?;
+    let number_value: f64 = deserialized_value.as_type()?;
+    assert_eq!(number_value, 42.0);
+    
+    println!("Test passed: Network message serialization/deserialization works with ArcValueType");
     Ok(())
 }
 
@@ -103,19 +120,28 @@ fn test_struct_serialization_in_network_message() -> Result<()> {
     let source_id = PeerId::new("source-node".to_string());
     let dest_id = PeerId::new("dest-node".to_string());
     
-    // Create a payload with the struct - directly using bincode
-    let payload_item = NetworkMessagePayloadItem::with_struct(
+    // Create a payload with the struct using ArcValueType
+    let arc_value = ArcValueType::from_struct(original.clone());
+    
+    // Create a SerializerRegistry for serialization
+    let registry = SerializerRegistry::with_defaults();
+    
+    // Serialize the ArcValueType
+    let value_bytes = registry.serialize_value(&arc_value)?;
+    
+    let payload_item = NetworkMessagePayloadItem::new(
         "test/path".to_string(),
-        original.clone(),
+        value_bytes.to_vec(),
         "test-correlation-123".to_string()
-    )?;
+    );
     
-    // Verify we can use both extract_struct and deserialize_to
-    let extracted1: TestStruct = payload_item.extract_struct()?;
-    let extracted2: TestStruct = payload_item.value.deserialize_to()?;
+    // Deserialize the value bytes back to ArcValueType
+    let mut deserialized_value = registry.deserialize_value(Arc::from(payload_item.value_bytes.clone()))?;
     
-    assert_eq!(extracted1, original, "extract_struct failed");
-    assert_eq!(extracted2, original, "deserialize_to failed");
+    // Extract the struct from ArcValueType
+    let extracted1: TestStruct = deserialized_value.as_struct_ref::<TestStruct>()?.as_ref().clone();
+    
+    assert_eq!(extracted1, original, "struct extraction failed");
     
     // Create a network message
     let message = NetworkMessage {
@@ -132,13 +158,14 @@ fn test_struct_serialization_in_network_message() -> Result<()> {
     // Deserialize the message
     let deserialized_message: NetworkMessage = bincode::deserialize(&serialized_message)?;
     
-    // Both methods should work for extracting the struct
-    let extracted_struct1: TestStruct = deserialized_message.payloads[0].extract_struct()?;
-    let extracted_struct2: TestStruct = deserialized_message.payloads[0].value.deserialize_to()?;
+    // Deserialize the value bytes back to ArcValueType
+    let mut deserialized_value = registry.deserialize_value(Arc::from(deserialized_message.payloads[0].value_bytes.clone()))?;
+    
+    // Extract the struct from ArcValueType
+    let extracted_struct: TestStruct = deserialized_value.as_struct_ref::<TestStruct>()?.as_ref().clone();
     
     // Verify the data
-    assert_eq!(extracted_struct1, original, "Extracted struct using extract_struct doesn't match original");
-    assert_eq!(extracted_struct2, original, "Extracted struct using deserialize_to doesn't match original");
+    assert_eq!(extracted_struct, original, "Extracted struct doesn't match original");
     assert_eq!(deserialized_message.message_type, "TestMessage");
     assert_eq!(deserialized_message.payloads[0].path, "test/path");
     assert_eq!(deserialized_message.payloads[0].correlation_id, "test-correlation-123");
@@ -180,18 +207,27 @@ fn test_multiple_struct_types_in_message() -> Result<()> {
     let source_id = PeerId::new("source-node".to_string());
     let dest_id = PeerId::new("dest-node".to_string());
     
-    // Create payloads with different struct types
-    let user_payload = NetworkMessagePayloadItem::with_struct(
-        "users/data".to_string(),
-        user.clone(),
-        "user-123".to_string()
-    )?;
+    // Create payloads with different struct types using ArcValueType
+    // Create a SerializerRegistry for serialization
+    let registry = SerializerRegistry::with_defaults();
     
-    let product_payload = NetworkMessagePayloadItem::with_struct(
+    // Create ArcValueType for user data
+    let user_arc_value = ArcValueType::from_struct(user.clone());
+    let user_value_bytes = registry.serialize_value(&user_arc_value)?;
+    let user_payload = NetworkMessagePayloadItem::new(
+        "users/data".to_string(),
+        user_value_bytes.to_vec(),
+        "user-123".to_string()
+    );
+    
+    // Create ArcValueType for product data
+    let product_arc_value = ArcValueType::from_struct(product.clone());
+    let product_value_bytes = registry.serialize_value(&product_arc_value)?;
+    let product_payload = NetworkMessagePayloadItem::new(
         "products/data".to_string(),
-        product.clone(),
+        product_value_bytes.to_vec(),
         "product-456".to_string()
-    )?;
+    );
     
     // Create a network message with multiple payloads
     let message = NetworkMessage {
@@ -208,9 +244,13 @@ fn test_multiple_struct_types_in_message() -> Result<()> {
     // Deserialize the message
     let deserialized_message: NetworkMessage = bincode::deserialize(&serialized_message)?;
     
-    // Extract the structs from the payloads
-    let extracted_user: UserData = deserialized_message.payloads[0].extract_struct()?;
-    let extracted_product: ProductData = deserialized_message.payloads[1].extract_struct()?;
+    // Deserialize the value bytes back to ArcValueType
+    let mut deserialized_user_value = registry.deserialize_value(Arc::from(deserialized_message.payloads[0].value_bytes.clone()))?;
+    let mut deserialized_product_value = registry.deserialize_value(Arc::from(deserialized_message.payloads[1].value_bytes.clone()))?;
+    
+    // Extract the structs from ArcValueType
+    let extracted_user: UserData = deserialized_user_value.as_struct_ref::<UserData>()?.as_ref().clone();
+    let extracted_product: ProductData = deserialized_product_value.as_struct_ref::<ProductData>()?.as_ref().clone();
     
     // Verify the data
     assert_eq!(extracted_user, user, "Extracted user doesn't match original");
@@ -218,7 +258,7 @@ fn test_multiple_struct_types_in_message() -> Result<()> {
     assert_eq!(deserialized_message.payloads[0].path, "users/data");
     assert_eq!(deserialized_message.payloads[1].path, "products/data");
     
-    println!("Multi-struct test passed: All data correctly serialized and deserialized");
+    println!("Multi-struct test passed: All data correctly serialized and deserialized using ArcValueType");
     Ok(())
 }
 
@@ -246,24 +286,36 @@ fn test_various_types_in_network_messages() -> Result<()> {
     // Create an array
     let test_array = vec![1, 2, 3, 4, 5];
     
-    // Create payload items for each type
-    let struct_payload = NetworkMessagePayloadItem::with_struct(
+    // Create a SerializerRegistry for serialization
+    let registry = SerializerRegistry::with_defaults();
+    
+    // Create payload items for each type using ArcValueType
+    // Struct payload
+    let struct_arc_value = ArcValueType::from_struct(test_struct.clone());
+    let struct_value_bytes = registry.serialize_value(&struct_arc_value)?;
+    let struct_payload = NetworkMessagePayloadItem::new(
         "test/struct".to_string(),
-        test_struct.clone(),
+        struct_value_bytes.to_vec(),
         "correlation-struct".to_string()
-    )?;
+    );
     
-    let map_payload = NetworkMessagePayloadItem::with_map(
+    // Map payload
+    let map_arc_value = ArcValueType::from_map(test_map.clone());
+    let map_value_bytes = registry.serialize_value(&map_arc_value)?;
+    let map_payload = NetworkMessagePayloadItem::new(
         "test/map".to_string(),
-        test_map.clone(),
+        map_value_bytes.to_vec(),
         "correlation-map".to_string()
-    )?;
+    );
     
-    let array_payload = NetworkMessagePayloadItem::with_array(
+    // Array payload
+    let array_arc_value = ArcValueType::from_list(test_array.clone());
+    let array_value_bytes = registry.serialize_value(&array_arc_value)?;
+    let array_payload = NetworkMessagePayloadItem::new(
         "test/array".to_string(),
-        test_array.clone(),
+        array_value_bytes.to_vec(),
         "correlation-array".to_string()
-    )?;
+    );
     
     // Create a network message with all payloads
     let message = NetworkMessage {
@@ -280,32 +332,32 @@ fn test_various_types_in_network_messages() -> Result<()> {
     // Deserialize the message
     let deserialized: NetworkMessage = bincode::deserialize(&serialized)?;
     
+    // Deserialize the value bytes back to ArcValueType for each payload
+    let mut deserialized_struct_value = registry.deserialize_value(Arc::from(deserialized.payloads[0].value_bytes.clone()))?;
+    let mut deserialized_map_value = registry.deserialize_value(Arc::from(deserialized.payloads[1].value_bytes.clone()))?;
+    let mut deserialized_array_value = registry.deserialize_value(Arc::from(deserialized.payloads[2].value_bytes.clone()))?;
+    
     // Verify struct payload
-    let extracted_struct: TestStruct = deserialized.payloads[0].extract()?;
+    let extracted_struct: TestStruct = deserialized_struct_value.as_struct_ref::<TestStruct>()?.as_ref().clone();
     assert_eq!(extracted_struct, test_struct, "Extracted struct doesn't match original");
-    println!("✓ Struct extraction works");
+    println!("✓ Struct extraction works with ArcValueType");
     
     // Verify map payload
-    let extracted_map: HashMap<String, String> = deserialized.payloads[1].extract_map()?;
+    let extracted_map: HashMap<String, String> = deserialized_map_value.as_map_ref()?.as_ref().clone();
     assert_eq!(extracted_map, test_map, "Extracted map doesn't match original");
-    println!("✓ Map extraction works");
+    println!("✓ Map extraction works with ArcValueType");
     
     // Verify array payload
-    let extracted_array: Vec<i32> = deserialized.payloads[2].extract_array()?;
+    let extracted_array: Vec<i32> = deserialized_array_value.as_list_ref()?.as_ref().clone();
     assert_eq!(extracted_array, test_array, "Extracted array doesn't match original");
-    println!("✓ Array extraction works");
+    println!("✓ Array extraction works with ArcValueType");
     
-    // Try using the generic extract method for all types
-    let extracted_struct2: TestStruct = deserialized.payloads[0].extract()?;
-    let extracted_map2: HashMap<String, String> = deserialized.payloads[1].extract()?;
-    let extracted_array2: Vec<i32> = deserialized.payloads[2].extract()?;
+    assert_eq!(extracted_struct, test_struct, "Struct extraction failed");
+    assert_eq!(extracted_map, test_map, "Map extraction failed");
+    assert_eq!(extracted_array, test_array, "Array extraction failed");
     
-    assert_eq!(extracted_struct2, test_struct, "Generic extract of struct failed");
-    assert_eq!(extracted_map2, test_map, "Generic extract of map failed");
-    assert_eq!(extracted_array2, test_array, "Generic extract of array failed");
-    
-    println!("✓ Generic extract method works for all types");
-    println!("All tests passed for various data types in network messages");
+    println!("✓ ArcValueType extraction works for all types");
+    println!("All tests passed for various data types in network messages using ArcValueType");
     
     Ok(())
 } 

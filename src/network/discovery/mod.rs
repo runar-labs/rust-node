@@ -9,8 +9,9 @@ use async_trait::async_trait;
 use multicast_discovery::PeerInfo;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use std::sync::Arc;
 
-use crate::network::capabilities::ServiceCapability;
+use runar_common::types::ServiceMetadata;
 use crate::network::transport::PeerId;
 
 pub mod memory_discovery;
@@ -68,13 +69,17 @@ pub struct NodeInfo {
     /// The node's  network addressess (e.g., "IP:PORT") - ordered by preference
     pub addresses: Vec<String>,
     /// Node capabilities representing the services provided by this node
-    pub capabilities: Vec<ServiceCapability>,
+    pub capabilities: Vec<ServiceMetadata>,
     /// Timestamp when this node information was last confirmed or updated.
     pub last_seen: std::time::SystemTime,
 }
 
 /// Callback function type for discovery events
-pub type DiscoveryListener = Box<dyn Fn(PeerInfo) + Send + Sync>;
+use std::future::Future;
+use std::pin::Pin;
+
+/// Callback function type for discovery events (async)
+pub type DiscoveryListener = Arc<dyn Fn(PeerInfo) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// Interface for node discovery mechanisms
 #[async_trait]
@@ -88,7 +93,7 @@ pub trait NodeDiscovery: Send + Sync {
     /// Stop announcing this node's presence
     async fn stop_announcing(&self) -> Result<()>;
 
-    /// Set a listener to be called when nodes are discovered or updated
+        /// Set a listener to be called when nodes are discovered or updated (async)
     async fn set_discovery_listener(&self, listener: DiscoveryListener) -> Result<()>;
 
     /// Shutdown the discovery mechanism

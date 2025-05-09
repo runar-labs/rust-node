@@ -28,16 +28,15 @@ pub mod service_registry;
 use crate::routing::TopicPath;
 use anyhow::{anyhow, Result};
 use runar_common::logging::{Component, Logger, LoggingContext};
-use runar_common::types::ArcValueType;
+use runar_common::types::{ActionMetadata, ArcValueType, FieldSchema};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
 // Import types from submodules
-use crate::services::abstract_service::{
-    ActionMetadata, CompleteServiceMetadata, EventMetadata, ServiceState,
-};
+use crate::services::abstract_service::ServiceState;
+use runar_common::types::schemas::ServiceMetadata;
 use crate::services::remote_service::RemoteService;
 
 // Re-export the context types from their dedicated modules
@@ -242,8 +241,8 @@ impl LifecycleContext {
         let metadata = ActionMetadata {
             path: action_name_string.clone(),
             description: options.description.unwrap_or_default(),
-            parameters_schema: options.params_schema.map(arc_value_to_field_schema),
-            return_schema: options.return_schema.map(arc_value_to_field_schema),
+            input_schema: options.input_schema,
+            output_schema: options.output_schema,
         };
 
         // Get the node delegate
@@ -273,22 +272,22 @@ impl LifecycleContext {
         event_name: impl Into<String>,
         options: EventRegistrationOptions,
     ) -> Result<()> {
-        let event_name_string = event_name.into();
+        // let event_name_string = event_name.into();
 
-        // Create event metadata
-        let metadata = EventMetadata {
-            path: event_name_string.clone(),
-            description: options.description.unwrap_or_default(),
-            data_schema: options.data_schema.map(arc_value_to_field_schema),
-        };
+        // // Create event metadata
+        // let metadata = EventMetadata {
+        //     name: event_name_string.clone(),
+        //     description: options.description.unwrap_or_default(),
+        //     data_schema: options.data_schema.map(arc_value_to_field_schema),
+        // };
 
-        // Log event registration with metadata
-        self.logger.debug(&format!(
-            "Registered event '{}' with metadata: description='{}', has_schema={}",
-            event_name_string,
-            metadata.description,
-            metadata.data_schema.is_some()
-        ));
+        // // Log event registration with metadata
+        // self.logger.debug(&format!(
+        //     "Registered event '{}' with metadata: description='{}', has_schema={}",
+        //     event_name_string,
+        //     metadata.description,
+        //     metadata.data_schema.is_some()
+        // ));
 
         // Note: The NodeDelegate trait doesn't currently support registering events with metadata.
         // This information is logged for documentation purposes but not stored in the registry.
@@ -595,17 +594,17 @@ pub struct ActionRegistrationOptions {
     /// Description of what the action does
     pub description: Option<String>,
     /// Parameter schema for validation and documentation
-    pub params_schema: Option<ArcValueType>,
+    pub input_schema: Option<FieldSchema>,
     /// Return value schema for documentation
-    pub return_schema: Option<ArcValueType>,
+    pub output_schema: Option<FieldSchema>,
 }
 
 impl Default for ActionRegistrationOptions {
     fn default() -> Self {
         Self {
             description: None,
-            params_schema: None,
-            return_schema: None,
+            input_schema: None,
+            output_schema: None,
         }
     }
 }
@@ -619,7 +618,7 @@ pub struct EventRegistrationOptions {
     /// Description of what the event represents
     pub description: Option<String>,
     /// Schema of the event data
-    pub data_schema: Option<ArcValueType>,
+    pub data_schema: Option<FieldSchema>,
 }
 
 impl Default for EventRegistrationOptions {
@@ -882,7 +881,7 @@ pub trait RegistryDelegate: Send + Sync {
     async fn get_service_metadata(
         &self,
         service_path: &TopicPath,
-    ) -> Option<CompleteServiceMetadata>;
+    ) -> Option<ServiceMetadata>;
 
     /// Get metadata for all registered services with an option to filter internal services
     ///
@@ -891,7 +890,7 @@ pub trait RegistryDelegate: Send + Sync {
     async fn get_all_service_metadata(
         &self,
         include_internal_services: bool,
-    ) -> HashMap<String, CompleteServiceMetadata>;
+    ) -> HashMap<String, ServiceMetadata>;
 
     /// Register a remote action handler
     ///
@@ -1009,30 +1008,4 @@ pub type ServiceHandler = Box<
         + Send
         + Sync,
 >;
-
-/// Helper function to convert an ArcValueType to a FieldSchema for metadata
-/// This is needed because the metadata structs require FieldSchema but we get ArcValueType
-fn arc_value_to_field_schema(value: ArcValueType) -> runar_common::models::schemas::FieldSchema {
-    use runar_common::models::schemas::{FieldSchema, SchemaDataType};
-
-    // Create a basic schema based on the ArcValueType
-    // ArcValueType has a type() method that returns a string, not an enum
-    let type_str = value.type_name();
-
-    match type_str {
-        "String" => FieldSchema::string(),
-        "Integer" => FieldSchema::integer(),
-        "Float" | "Number" => FieldSchema::number(),
-        "Boolean" => FieldSchema::boolean(),
-        "List" | "Array" => {
-            // For lists, create an array schema with generic items
-            FieldSchema::array(Box::new(FieldSchema::new(SchemaDataType::String)))
-        }
-        "Map" | "Object" => {
-            // For maps, create an object schema with no properties
-            let properties = std::collections::HashMap::new();
-            FieldSchema::object(properties, None)
-        }
-        _ => FieldSchema::new(SchemaDataType::String), // Default to string for other types
-    }
-}
+ 

@@ -298,7 +298,7 @@ async fn test_path_params_in_context() {
     if let Some(data) = response.data {
         // Convert to HashMap<String, String>
         let params_map: HashMap<String, String> = data
-            .as_map_ref()
+            .as_map_ref::<String, String>()
             .unwrap()
             .iter()
             .map(|(k, v)| (k.clone(), v.as_type::<String>().unwrap_or_default()))

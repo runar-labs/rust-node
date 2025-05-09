@@ -15,7 +15,7 @@ use crate::services::NodeDelegate;
 use crate::services::{PublishOptions, ServiceResponse};
 use anyhow::{anyhow, Result};
 use runar_common::logging::{Component, Logger, LoggingContext};
-use runar_common::types::ValueType;
+use runar_common::types::ArcValueType;
 use std::fmt;
 use std::sync::Arc;
 
@@ -140,7 +140,7 @@ impl EventContext {
     /// - Full path with network ID: "network:service/topic" (used as is)
     /// - Path with service: "service/topic" (network ID added)
     /// - Simple topic: "topic" (both service path and network ID added)
-    pub async fn publish(&self, topic: impl Into<String>, data: ValueType) -> Result<()> {
+    pub async fn publish(&self, topic: impl Into<String>, data: ArcValueType) -> Result<()> {
         if let Some(delegate) = &self.node_delegate {
             let topic_string = topic.into();
 
@@ -182,7 +182,7 @@ impl EventContext {
     pub async fn request(
         &self,
         path: impl Into<String>,
-        params: ValueType,
+        params: ArcValueType,
     ) -> Result<ServiceResponse> {
         if let Some(delegate) = &self.node_delegate {
             let path_string = path.into();

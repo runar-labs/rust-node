@@ -20,8 +20,7 @@ use crate::routing::TopicPath;
 use crate::services::abstract_service::{AbstractService, ServiceState};
 use crate::services::{LifecycleContext, RegistryDelegate, RequestContext, ServiceResponse};
 use runar_common::logging::Logger;
-use runar_common::models::schemas::FieldSchema;
-use runar_common::types::{ArcValueType, ValueCategory};
+use runar_common::types::{ArcValueType}; 
 use runar_common::vmap;
 
 /// Registry Info Service - provides information about registered services without holding state
@@ -107,33 +106,19 @@ impl RegistryService {
             "Registering service_info handler with path: services/{{service_path}}"
         ));
 
-        // Use register_action directly since we don't need special options
         context
             .register_action(
                 "services/{service_path}",
                 Arc::new(move |params, ctx| {
                     let inner_self = self_clone.clone();
                     Box::pin(async move {
-                        // Use the helper method to extract service_path
-                        match inner_self.extract_service_path(&ctx) {
-                            Ok(service_path) => {
-                                // Process the request with the extracted service path
-                                inner_self
-                                    .handle_service_info(
-                                        &service_path,
-                                        params.unwrap_or_else(|| ArcValueType::null()),
-                                        ctx,
-                                    )
-                                    .await
-                            }
-                            Err(_) => {
-                                // Return error response if service_path is missing
-                                Ok(ServiceResponse::error(
-                                    400,
-                                    "Missing required service path parameter",
-                                ))
-                            }
-                        }
+                        inner_self
+                            .handle_service_info(
+                                "",
+                                params.unwrap_or_else(|| ArcValueType::null()),
+                                ctx,
+                            )
+                            .await
                     })
                 }),
             )
@@ -160,26 +145,13 @@ impl RegistryService {
                 Arc::new(move |params, ctx| {
                     let inner_self = self_clone.clone();
                     Box::pin(async move {
-                        // Use the helper method to extract service_path
-                        match inner_self.extract_service_path(&ctx) {
-                            Ok(service_path) => {
-                                // Process the request with the extracted service path
-                                inner_self
-                                    .handle_service_state(
-                                        &service_path,
-                                        params.unwrap_or_else(|| ArcValueType::null()),
-                                        ctx,
-                                    )
-                                    .await
-                            }
-                            Err(_) => {
-                                // Return error response if service_path is missing
-                                Ok(ServiceResponse::error(
-                                    400,
-                                    "Missing required service path parameter",
-                                ))
-                            }
-                        }
+                        inner_self
+                            .handle_service_state(
+                                "",
+                                params.unwrap_or_else(|| ArcValueType::null()),
+                                ctx,
+                            )
+                            .await
                     })
                 }),
             )
@@ -194,170 +166,26 @@ impl RegistryService {
     /// Handler for listing all services
     async fn handle_list_services(
         &self,
-        params: ArcValueType,
+        _params: ArcValueType,
         ctx: RequestContext,
     ) -> Result<ServiceResponse> {
-        let mut services = Vec::new();
+        ctx.logger.debug("Listing all services");
 
-        // Parse parameters to check if we should include detailed action metadata
-        let include_actions = match params.as_map_ref::<String, ArcValueType>() {
-            Ok(param_map) => {
-                if let Some(value) = param_map.get("include_actions") {
-                    if value.is_bool() {
-                        value.as_bool().unwrap_or(false)
-                    } else if value.is_string() {
-                        value.as_string().unwrap_or_default().to_lowercase() == "true"
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            }
-            Err(_) => false,
-        };
-
-        ctx.logger.debug(format!(
-            "List services request with include_actions={}",
-            include_actions
-        ));
-
-        // Get all service states and metadata in one call
-        let service_states = self.registry_delegate.get_all_service_states().await;
+        // Get all service metadata directly
         let service_metadata = self.registry_delegate.get_all_service_metadata(false).await;
-
-        // Combine the information
-        for (path, state) in service_states {
-            // Create base service info
-            let mut service_info = if let Some(meta) = service_metadata.get(&path) {
-                vmap! {
-                    "path" => path.clone(),
-                    "state" => format!("{:?}", state),
-                    "name" => meta.name.clone(),
-                    "version" => meta.version.clone(),
-                    "description" => meta.description.clone()
-                }
-            } else {
-                vmap! {
-                    "path" => path.clone(),
-                    "state" => format!("{:?}", state)
-                }
-            };
-
-            // Include action metadata if requested
-            if include_actions {
-                if let Some(meta) = service_metadata.get(&path) {
-                    if !meta.registered_actions.is_empty() {
-                        // Extract network ID from the path (format: "network_id:path")
-                        let network_id = if path.contains(':') {
-                            path.split(':').next().unwrap_or("").to_string()
-                        } else {
-                            // Default to test-network if not specified
-                            "test-network".to_string()
-                        };
-
-                        let actions: Vec<ArcValueType> = meta
-                            .registered_actions
-                            .values()
-                            .map(|action| {
-                                let desc = action.description.clone();
-
-                                // First create the base metadata
-                                let mut action_metadata_map = HashMap::new();
-
-                                // Get the action path
-                                let name = action
-                                    .path
-                                    .split('/')
-                                    .last()
-                                    .unwrap_or(&action.path)
-                                    .to_string();
-
-                                action_metadata_map.insert(
-                                    "name".to_string(),
-                                    ArcValueType::new_primitive(name.clone()),
-                                );
-                                action_metadata_map.insert(
-                                    "description".to_string(),
-                                    ArcValueType::new_primitive(if desc.is_empty() {
-                                        "No description".to_string()
-                                    } else {
-                                        desc
-                                    }),
-                                );
-                                action_metadata_map.insert(
-                                    "full_path".to_string(),
-                                    ArcValueType::new_primitive(format!(
-                                        "{}:{}/{}",
-                                        network_id, path, name
-                                    )),
-                                );
-
-                                // Add parameter schema if available - convert FieldSchema to ArcValueType
-                                if let Some(params_schema) = &action.parameters_schema {
-                                    action_metadata_map.insert(
-                                        "parameters_schema".to_string(),
-                                        Self::field_schema_to_arc_value(params_schema),
-                                    );
-                                }
-
-                                // Add return schema if available - convert FieldSchema to ArcValueType
-                                if let Some(result_schema) = &action.return_schema {
-                                    action_metadata_map.insert(
-                                        "return_schema".to_string(),
-                                        Self::field_schema_to_arc_value(result_schema),
-                                    );
-                                }
-
-                                ArcValueType::new_map(action_metadata_map)
-                            })
-                            .collect();
-
-                        // Get the mutable map reference from ArcValueType
-                        let current_map = match service_info.as_map_ref::<String, ArcValueType>() {
-                            Ok(map) => map,
-                            Err(_) => Arc::new(HashMap::new()),
-                        };
-
-                        // Create a new map with all the existing entries plus our new ones
-                        let mut new_map = HashMap::new();
-                        for (k, v) in current_map.iter() {
-                            new_map.insert(k.clone(), v.clone());
-                        }
-
-                        // Add our new entries
-                        new_map.insert("actions".to_string(), ArcValueType::new_list(actions));
-                        new_map.insert(
-                            "network_id".to_string(),
-                            ArcValueType::new_primitive(network_id),
-                        );
-
-                        // Replace service_info with the new map
-                        service_info = ArcValueType::new_map(new_map);
-                    }
-                }
-            }
-
-            services.push(service_info);
-        }
-
-        // Return the services list
-        Ok(ServiceResponse::ok(ArcValueType::new_list(services)))
-    }
-
-    /// Helper function to convert FieldSchema to ArcValueType for serialization
-    fn field_schema_to_arc_value(
-        schema: &runar_common::models::schemas::FieldSchema,
-    ) -> ArcValueType {
-        // Use the FieldSchema's existing to_arc_value_type method
-        schema.to_arc_value_type()
+        
+        // Convert the HashMap of ServiceMetadata to a Vec
+        let metadata_vec: Vec<_> = service_metadata.values().cloned().collect();
+        
+        // Return the list of service metadata
+        Ok(ServiceResponse::ok(ArcValueType::from_list(metadata_vec)))
     }
 
     /// Handler for getting detailed information about a specific service
     async fn handle_service_info(
         &self,
         _service_path: &str,
-        params: ArcValueType,
+        _params: ArcValueType,
         ctx: RequestContext,
     ) -> Result<ServiceResponse> {
         // Extract the service path from path parameters
@@ -371,214 +199,21 @@ impl RegistryService {
             }
         };
 
-        // Get service state and metadata directly from the registry delegate
-        let service_states = self.registry_delegate.get_all_service_states().await;
-
-        // Check if the service exists
-        if let Some(state) = service_states.get(&actual_service_path) {
-            // Use vmap! macro to build the response
-            let mut service_info = vmap! {
-                "path" => actual_service_path.clone(),
-                "state" => format!("{:?}", state)
-            };
-
-            // Create a TopicPath from the service path
-            let service_topic = match TopicPath::new(&actual_service_path, "default") {
-                Ok(topic) => topic,
-                Err(_) => {
-                    return Ok(ServiceResponse::error(500, "Invalid service path format"));
-                }
-            };
-
-            // Add metadata if available
-            if let Some(meta) = self
-                .registry_delegate
-                .get_service_metadata(&service_topic)
-                .await
-            {
-                // Extract network ID from the path (format: "network_id:path")
-                let network_id = if actual_service_path.contains(':') {
-                    actual_service_path
-                        .split(':')
-                        .next()
-                        .unwrap_or("")
-                        .to_string()
-                } else {
-                    // Default to test-network if not specified
-                    "test-network".to_string()
-                };
-
-                // Instead of using as_map_ref and from_map, we'll create a new map
-                // and add all entries from the original map plus our new data
-                let mut service_info_map = match service_info.as_map_ref::<String, ArcValueType>() {
-                    Ok(map) => {
-                        // Create a new map with all the existing entries
-                        let mut new_map = HashMap::new();
-                        for (k, v) in map.iter() {
-                            new_map.insert(k.clone(), v.clone());
-                        }
-                        new_map
-                    }
-                    Err(_) => HashMap::new(),
-                };
-
-                // Add the name and other metadata
-                service_info_map.insert(
-                    "name".to_string(),
-                    ArcValueType::new_primitive(meta.name.clone()),
-                );
-                service_info_map.insert(
-                    "version".to_string(),
-                    ArcValueType::new_primitive(meta.version.clone()),
-                );
-                service_info_map.insert(
-                    "description".to_string(),
-                    ArcValueType::new_primitive(meta.description.clone()),
-                );
-                service_info_map.insert(
-                    "network_id".to_string(),
-                    ArcValueType::new_primitive(network_id.clone()),
-                );
-
-                // Add registered actions with more detailed metadata
-                let actions: Vec<ArcValueType> = meta
-                    .registered_actions
-                    .values()
-                    .map(|action| {
-                        let desc = action.description.clone();
-
-                        // Create a new map directly
-                        let mut action_metadata_map = HashMap::new();
-                        action_metadata_map.insert(
-                            "name".to_string(),
-                            ArcValueType::new_primitive(action.path.clone()),
-                        );
-                        action_metadata_map.insert(
-                            "description".to_string(),
-                            ArcValueType::new_primitive(if desc.is_empty() {
-                                "No description".to_string()
-                            } else {
-                                desc
-                            }),
-                        );
-                        action_metadata_map.insert(
-                            "full_path".to_string(),
-                            ArcValueType::new_primitive(format!(
-                                "{}:{}/{}",
-                                network_id, actual_service_path, action.path
-                            )),
-                        );
-
-                        // Add parameter schema if available
-                        if let Some(params_schema) = &action.parameters_schema {
-                            action_metadata_map.insert(
-                                "parameters_schema".to_string(),
-                                Self::field_schema_to_arc_value(params_schema),
-                            );
-                        }
-
-                        // Add return schema if available
-                        if let Some(result_schema) = &action.return_schema {
-                            action_metadata_map.insert(
-                                "return_schema".to_string(),
-                                Self::field_schema_to_arc_value(result_schema),
-                            );
-                        }
-
-                        ArcValueType::new_map(action_metadata_map)
-                    })
-                    .collect();
-
-                // Add actions to the service map
-                if !actions.is_empty() {
-                    service_info_map
-                        .insert("actions".to_string(), ArcValueType::from_list(actions));
-                }
-
-                // Add registered events with more detailed metadata
-                let events: Vec<ArcValueType> = meta
-                    .registered_events
-                    .values()
-                    .map(|event| {
-                        let desc = event.description.clone();
-
-                        // First create the base metadata
-                        let mut event_metadata_map = HashMap::new();
-                        event_metadata_map.insert(
-                            "name".to_string(),
-                            ArcValueType::new_primitive(event.path.clone()),
-                        );
-                        event_metadata_map.insert(
-                            "description".to_string(),
-                            ArcValueType::new_primitive(if desc.is_empty() {
-                                "No description".to_string()
-                            } else {
-                                desc
-                            }),
-                        );
-                        event_metadata_map.insert(
-                            "full_path".to_string(),
-                            ArcValueType::new_primitive(format!(
-                                "{}:{}/{}",
-                                network_id, actual_service_path, event.path
-                            )),
-                        );
-
-                        // Add schema if available
-                        if let Some(schema) = &event.data_schema {
-                            event_metadata_map.insert(
-                                "schema".to_string(),
-                                Self::field_schema_to_arc_value(schema),
-                            );
-                        }
-
-                        ArcValueType::new_map(event_metadata_map)
-                    })
-                    .collect();
-
-                // Add events to the service map
-                if !events.is_empty() {
-                    service_info_map.insert("events".to_string(), ArcValueType::from_list(events));
-                }
-
-                // Add timestamps
-                service_info_map.insert(
-                    "registration_time".to_string(),
-                    ArcValueType::new_primitive(meta.registration_time as f64),
-                );
-
-                if let Some(start_time) = meta.last_start_time {
-                    service_info_map.insert(
-                        "started_at".to_string(),
-                        ArcValueType::new_primitive(start_time as f64),
-                    );
-
-                    // Calculate uptime if service is running
-                    if *state == ServiceState::Running {
-                        let now = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs();
-                        let uptime = now.saturating_sub(start_time);
-                        service_info_map.insert(
-                            "uptime_seconds".to_string(),
-                            ArcValueType::new_primitive(uptime as f64),
-                        );
-                    }
-                }
-
-                // Use the new service_info_map instead of trying to use as_map_mut()
-                service_info = ArcValueType::new_map(service_info_map);
+        // Get the service metadata for the specific service path
+        let service_topic = match TopicPath::new(&actual_service_path, "default") {
+            Ok(topic) => topic,
+            Err(_) => {
+                return Ok(ServiceResponse::error(500, "Invalid service path format"));
             }
-
-            Ok(ServiceResponse::ok(service_info))
+        };
+        
+        if let Some(service_metadata) = self.registry_delegate.get_service_metadata(&service_topic).await {
+            return Ok(ServiceResponse::ok(ArcValueType::from_struct(service_metadata)));
         } else {
-            ctx.logger
-                .warn(format!("Service '{}' not found", actual_service_path));
-            Ok(ServiceResponse::error(
+            return Ok(ServiceResponse::error(
                 404,
                 &format!("Service '{}' not found", actual_service_path),
-            ))
+            ));
         }
     }
 
@@ -604,7 +239,7 @@ impl RegistryService {
         let service_states = self.registry_delegate.get_all_service_states().await;
 
         // Print all service states for debugging
-        ctx.logger.debug(format!("ALL SERVICE STATES:"));
+        ctx.logger.debug("ALL SERVICE STATES:");
         for (key, value) in &service_states {
             ctx.logger.debug(format!("  - '{}': {:?}", key, value));
         }

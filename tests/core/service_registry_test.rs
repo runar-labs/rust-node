@@ -10,12 +10,13 @@ use anyhow::Result;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::time::timeout;
-
-use runar_common::types::ValueType; 
+ 
 use runar_node::services::service_registry::ServiceRegistry;
 use runar_node::services::{ServiceResponse, ActionHandler, EventContext, RequestContext, SubscriptionOptions};
 use runar_node::routing::TopicPath;
 use runar_common::logging::{Logger, Component};
+use runar_common::types::ArcValueType;
+use runar_node::services::SerializerRegistry;
 
 /// Create a test handler that validates its network ID
 fn create_test_handler(name: &str, expected_network_id: &str) -> ActionHandler {
@@ -34,7 +35,7 @@ fn create_test_handler(name: &str, expected_network_id: &str) -> ActionHandler {
                 return Err(anyhow::anyhow!("Network ID mismatch"));
             }
             
-            Ok(ServiceResponse::ok(ValueType::String(name.to_string())))
+            Ok(ServiceResponse::ok(ArcValueType::new_primitive(name.to_string())))
         })
     })
 }
@@ -59,7 +60,7 @@ async fn test_subscribe_and_unsubscribe() {
         let was_called_clone = was_called.clone();
         
         // Create a callback that would be invoked when an event is published
-        let callback = Arc::new(move |_ctx: Arc<EventContext>, _: ValueType| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
+        let callback = Arc::new(move |_ctx: Arc<EventContext>, _: ArcValueType| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
             let was_called = was_called_clone.clone();
             Box::pin(async move {
                 // Set the flag to true when called
@@ -101,7 +102,7 @@ async fn test_wildcard_subscriptions() {
         let registry = ServiceRegistry::new_with_default_logger();
         
         // Create a callback
-        let callback = Arc::new(move |_ctx: Arc<EventContext>, _: ValueType| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
+        let callback = Arc::new(move |_ctx: Arc<EventContext>, _: ArcValueType| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
             Box::pin(async move {
                 Ok(())
             })
@@ -299,12 +300,12 @@ async fn test_action_handler_network_isolation() {
         // Test handler 1 with network1 context
         let result1 = registry.get_local_action_handler(&network1_path).await.unwrap();
         let (handler1_retrieved, _) = result1;  // Extract the handler from the tuple
-        handler1_retrieved(Some(ValueType::Null), request_ctx1).await.unwrap();
+        handler1_retrieved(Some(ArcValueType::null()), request_ctx1).await.unwrap();
         
         // Test handler 2 with network2 context
         let result2 = registry.get_local_action_handler(&network2_path).await.unwrap();
         let (handler2_retrieved, _) = result2;  // Extract the handler from the tuple
-        handler2_retrieved(Some(ValueType::Null), request_ctx2).await.unwrap();
+        handler2_retrieved(Some(ArcValueType::null()), request_ctx2).await.unwrap();
         
         println!("\nVERIFICATION 3: Demonstrating the network isolation");
         
@@ -325,7 +326,7 @@ async fn test_action_handler_network_isolation() {
         
         // Even though the PathTrie bug is fixed, it's still good practice to validate network IDs
         // in handlers for defense in depth
-        let handler1_with_wrong_ctx = handler1(Some(ValueType::Null), wrong_network_context.clone()).await;
+        let handler1_with_wrong_ctx = handler1(Some(ArcValueType::null()), wrong_network_context.clone()).await;
         assert!(handler1_with_wrong_ctx.is_err(), "Handler should validate network ID");
         
         println!("\nCONCLUSION: Network isolation works correctly");
@@ -578,7 +579,7 @@ async fn test_multiple_network_ids() {
             assert_eq!(network_id, "network1");
             
             Box::pin(async move {
-                Ok(ServiceResponse::ok(ValueType::String(format!("Response from {}", network_id))))
+                Ok(ServiceResponse::ok(ArcValueType::new_primitive(format!("Response from {}", network_id))))
             })
         } else {
             Box::pin(async move {
@@ -593,7 +594,7 @@ async fn test_multiple_network_ids() {
             assert_eq!(network_id, "network2");
             
             Box::pin(async move {
-                Ok(ServiceResponse::ok(ValueType::String(format!("Response from {}", network_id))))
+                Ok(ServiceResponse::ok(ArcValueType::new_primitive(format!("Response from {}", network_id))))
             })
         } else {
             Box::pin(async move {
@@ -609,11 +610,11 @@ async fn test_multiple_network_ids() {
     // Test that each network gets its own handler
     let result1 = registry.get_local_action_handler(&network1_path).await.unwrap();
     let (handler1, _) = result1;
-    handler1(Some(ValueType::Null), request_ctx1).await.unwrap();
+    handler1(Some(ArcValueType::null()), request_ctx1).await.unwrap();
     
     let result2 = registry.get_local_action_handler(&network2_path).await.unwrap();
     let (handler2, _) = result2;
-    handler2(Some(ValueType::Null), request_ctx2).await.unwrap();
+    handler2(Some(ArcValueType::null()), request_ctx2).await.unwrap();
 }
  
  

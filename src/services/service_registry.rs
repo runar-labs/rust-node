@@ -29,9 +29,8 @@ use uuid::Uuid;
 
 use crate::network::transport::PeerId;
 use crate::routing::{PathTrie, TopicPath};
-use crate::services::abstract_service::{
-    AbstractService, ActionMetadata, CompleteServiceMetadata, ServiceState,
-};
+use crate::services::abstract_service::{AbstractService, ServiceState};
+use runar_common::types::schemas::{ActionMetadata, EventMetadata, ServiceMetadata};
 use crate::services::{
     ActionHandler, EventContext, RegistryDelegate, RemoteService, ServiceResponse,
     SubscriptionOptions,
@@ -102,6 +101,11 @@ pub struct ServiceEntry {
     pub service_topic: TopicPath,
     //service state
     pub service_state: ServiceState,
+    /// Timestamp when the service was registered (in seconds since UNIX epoch)
+    pub registration_time: u64,
+    /// Timestamp when the service was last started (in seconds since UNIX epoch)
+    /// This is None if the service has never been started
+    pub last_start_time: Option<u64>,
 }
 
 impl std::fmt::Debug for ServiceEntry {
@@ -113,6 +117,8 @@ impl std::fmt::Debug for ServiceEntry {
             .field("description", &self.service.description())
             .field("state", &self.service_state)
             .field("topic", &self.service_topic)
+            .field("registration_time", &self.registration_time)
+            .field("last_start_time", &self.last_start_time)
             .finish()
     }
 }
@@ -582,6 +588,7 @@ impl ServiceRegistry {
         // Convert PathTrie results to the expected HashMap format
         let mut result = HashMap::new();
 
+        //TODO improve search so we don need to passa dummy padn adn jusgt pass none tyo get all.       
         // Use a dummy path to get all handlers - will be ignored in find_matches
         // since we're getting all entries
         let dummy_path = TopicPath::new_service("default", "dummy");
@@ -774,16 +781,9 @@ impl ServiceRegistry {
     pub async fn get_all_service_metadata(
         &self,
         include_internal_services: bool,
-    ) -> HashMap<String, CompleteServiceMetadata> {
+    ) -> HashMap<String, ServiceMetadata> {
         let mut result = HashMap::new();
         let local_services = self.get_local_services().await;
-        let states = self.service_states_by_service_path.read().await;
-
-        // Create timestamp for registration
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
 
         // Iterate through all services
         for (_, service_entry) in local_services {
@@ -795,30 +795,27 @@ impl ServiceRegistry {
                 continue;
             }
 
-            let state = states
-                .get(&path_str)
-                .cloned()
-                .unwrap_or(ServiceState::Unknown);
 
             // Create metadata using individual getter methods from the service
             result.insert(
                 path_str,
-                CompleteServiceMetadata {
+                ServiceMetadata {
+                    network_id: service.network_id().unwrap_or_default().to_string(),
+                    service_path: service.path().to_string(),
                     name: service.name().to_string(),
-                    path: service.path().to_string(),
                     version: service.version().to_string(),
                     description: service.description().to_string(),
-                    registered_actions: HashMap::new(), // Would need more complex logic to populate
-                    registered_events: HashMap::new(),  // Would need more complex logic to populate
-                    current_state: state,
-                    registration_time: now,
-                    last_start_time: None,
+                    actions: Vec::new(), // TODO: Populate with actual actions
+                    events: Vec::new(),  // TODO: Populate with actual events
+                    registration_time: service_entry.registration_time,
+                    last_start_time: service_entry.last_start_time,
                 },
             );
         }
 
         result
     }
+
 }
 
 #[async_trait::async_trait]
@@ -832,7 +829,7 @@ impl crate::services::RegistryDelegate for ServiceRegistry {
     async fn get_service_metadata(
         &self,
         topic_path: &TopicPath,
-    ) -> Option<CompleteServiceMetadata> {
+    ) -> Option<ServiceMetadata> {
         // Find service in the local services trie
         let services = self.local_services.read().await;
         let matches = services.find_matches(topic_path);
@@ -840,37 +837,21 @@ impl crate::services::RegistryDelegate for ServiceRegistry {
         if !matches.is_empty() {
             let service_entry = &matches[0].handler;
             let service = service_entry.service.clone();
-            let states = self.service_states_by_service_path.read().await;
-            let service_path_str = topic_path.service_path();
-            let state = states
-                .get(&service_path_str)
-                .cloned()
-                .unwrap_or(ServiceState::Unknown);
-
-            // Create timestamp for registration
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
 
             // Create metadata using individual getter methods
-            return Some(CompleteServiceMetadata {
+            return Some(ServiceMetadata {
+                network_id: service.network_id().unwrap_or_default().to_string(),
+                service_path: service.path().to_string(),
                 name: service.name().to_string(),
-                path: service.path().to_string(),
                 version: service.version().to_string(),
                 description: service.description().to_string(),
-                //TODO
-                registered_actions: HashMap::new(),
-                //TODO
-                registered_events: HashMap::new(),
-                current_state: state,
-                registration_time: now,
-                last_start_time: None,
+                actions: Vec::new(), // TODO: Populate with actual actions
+                events: Vec::new(),  // TODO: Populate with actual events
+                registration_time: service_entry.registration_time,
+                last_start_time: service_entry.last_start_time,
             });
         }
 
-        // If not found, it might be a remote service - this would need to be implemented
-        // based on how remote service metadata is stored
         None
     }
 
@@ -878,7 +859,7 @@ impl crate::services::RegistryDelegate for ServiceRegistry {
     async fn get_all_service_metadata(
         &self,
         include_internal_services: bool,
-    ) -> HashMap<String, CompleteServiceMetadata> {
+    ) -> HashMap<String, ServiceMetadata> {
         self.get_all_service_metadata(include_internal_services)
             .await
     }

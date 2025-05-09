@@ -12,10 +12,9 @@
 // deriving values from the TopicPath when needed.
 
 use crate::routing::TopicPath;
-use runar_common::logging::{Component, Logger, LoggingContext};
-use runar_common::types::ValueType;
-use std::collections::HashMap;
-use std::fmt;
+use runar_common::{logging::{Component, Logger, LoggingContext}, types::ArcValueType}; 
+ 
+use std::{collections::HashMap, fmt};
 
 /// Context for handling service requests
 ///
@@ -37,7 +36,7 @@ pub struct RequestContext {
     /// Complete topic path for this request (optional) - includes service path and action
     pub topic_path: Option<TopicPath>,
     /// Metadata for this request - additional contextual information
-    pub metadata: Option<ValueType>,
+    pub metadata: Option<ArcValueType>,
     /// Logger for this context - pre-configured with the appropriate component and path
     pub logger: Logger,
     /// Path parameters extracted from template matching
@@ -106,7 +105,7 @@ impl RequestContext {
     /// Add metadata to a RequestContext
     ///
     /// Use builder-style methods instead of specialized constructors.
-    pub fn with_metadata(mut self, metadata: ValueType) -> Self {
+    pub fn with_metadata(mut self, metadata: ArcValueType) -> Self {
         self.metadata = Some(metadata);
         self
     }

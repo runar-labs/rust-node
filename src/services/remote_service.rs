@@ -16,12 +16,11 @@ use uuid::Uuid;
 use crate::network::transport::{
     NetworkMessage, NetworkMessagePayloadItem, NetworkTransport, PeerId,
 };
-use crate::network::ServiceCapability;
 use crate::routing::TopicPath;
-use crate::services::abstract_service::{AbstractService, ActionMetadata};
+use crate::services::abstract_service::AbstractService;
 use crate::services::{ActionHandler, LifecycleContext, ServiceResponse};
 use runar_common::logging::Logger;
-use runar_common::types::ArcValueType;
+use runar_common::types::{ActionMetadata, ArcValueType, ServiceMetadata};
 
 /// Represents a service running on a remote node
 #[derive(Clone)]
@@ -85,13 +84,13 @@ impl RemoteService {
         }
     }
 
-    /// Create RemoteService instances from capability strings
+    /// Create RemoteService instances from service metadata
     ///
-    /// INTENTION: Parse capability strings from a discovered node and create
-    /// RemoteService instances for each service capability.
+    /// INTENTION: Parse service metadata from a discovered node and create
+    /// RemoteService instances for each service.
     pub async fn create_from_capabilities(
         peer_id: PeerId,
-        capabilities: Vec<ServiceCapability>,
+        capabilities: Vec<ServiceMetadata>,
         network_transport: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>,
         logger: Logger,
         local_node_id: PeerId,
@@ -99,7 +98,7 @@ impl RemoteService {
     ) -> Result<Vec<Arc<RemoteService>>> {
         let log = logger.clone();
         log.info(format!(
-            "Creating RemoteServices from {} capability strings",
+            "Creating RemoteServices from {} service metadata entries",
             capabilities.len()
         ));
 
@@ -109,29 +108,28 @@ impl RemoteService {
             return Err(anyhow!("Network transport not available"));
         }
 
-        // Create remote services for each capability
+        // Create remote services for each service metadata
         let mut remote_services = Vec::new();
 
-        for capability in capabilities {
-            // Create a topic path using the correct network ID from the capability
-            let service_path =
-                match TopicPath::new(&capability.service_path, &capability.network_id) {
-                    Ok(path) => path,
-                    Err(e) => {
-                        log.error(format!(
-                            "Invalid service path '{}': {}",
-                            capability.service_path, e
-                        ));
-                        continue;
-                    }
-                };
+        for service_metadata in capabilities {
+            // Create a topic path using the service name as the path
+            let service_path = match TopicPath::new(&service_metadata.name, "default") {
+                Ok(path) => path,
+                Err(e) => {
+                    log.error(format!(
+                        "Invalid service path '{}': {}",
+                        service_metadata.name, e
+                    ));
+                    continue;
+                }
+            };
 
             // Create the remote service
             let service = Arc::new(Self::new(
-                capability.name,
+                service_metadata.name.clone(),
                 service_path,
-                capability.version,
-                capability.description,
+                service_metadata.version.clone(),
+                service_metadata.description.clone(),
                 peer_id.clone(),
                 network_transport.clone(),
                 local_node_id.clone(),
@@ -140,38 +138,13 @@ impl RemoteService {
             ));
 
             // Add actions to the service
-            for action in capability.actions {
-                // Convert HashMap schemas to ArcValueType if present
-                let params_schema = action.params_schema.map(|schema_map| {
-                    // Convert HashMap<String, String> to an ArcValueType
-                    let mut map = HashMap::new();
-                    for (k, v) in schema_map {
-                        map.insert(k, ArcValueType::new_primitive(v));
-                    }
-                    ArcValueType::from_map(map)
-                });
-
-                let result_schema = action.result_schema.map(|schema_map| {
-                    // Convert HashMap<String, String> to an ArcValueType
-                    let mut map = HashMap::new();
-                    for (k, v) in schema_map {
-                        map.insert(k, ArcValueType::new_primitive(v));
-                    }
-                    ArcValueType::from_map(map)
-                });
-
-                let action_metadata = ActionMetadata {
-                    name: action.name.clone(),
-                    description: action.description,
-                    parameters_schema: params_schema,
-                    return_schema: result_schema,
-                };
-                service.add_action(action.name, action_metadata).await?;
+            for action in service_metadata.actions {
+                service.add_action(action.path.clone(), action).await?;
             }
-
             // Add service to the result list
             remote_services.push(service);
         }
+
 
         log.info(format!(
             "Created {} RemoteService instances",

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use runar_common::logging::Logger;
 use runar_common::Component;
-use runar_common::types::ValueType;
+use runar_common::types::{ArcValueType, SerializerRegistry};
 use runar_node::network::transport::QuicTransportOptions;
 use runar_node::node::{Node, NodeConfig, NetworkConfig, TransportType, LoggingConfig, LogLevel};
 use std::collections::HashMap;
@@ -74,12 +74,13 @@ mod remote_action_tests {
         // Test calling math service1 (on node1) from node2
         logger.info("Testing remote action call from node2 to node1...");
         let mut add_params_map = HashMap::new();
-        add_params_map.insert("a".to_string(), ValueType::Number(5.0.into()));
-        add_params_map.insert("b".to_string(), ValueType::Number(3.0.into()));
-        let add_params = ValueType::Map(add_params_map);
+        add_params_map.insert("a".to_string(), 5.0);
+        add_params_map.insert("b".to_string(), 3.0);
+        let add_params = ArcValueType::from_map(add_params_map);
         
         let response = node2.request("math1/add", add_params).await?;
-        if let Some(ValueType::Number(result)) = response.data {
+        if let Some(result_value) = response.data {
+            let result: f64 = result_value.as_type()?;
             assert_eq!(result, 8.0);
             logger.info(format!("Add operation succeeded: 5 + 3 = {}", result));
         } else {
@@ -89,12 +90,13 @@ mod remote_action_tests {
         // Test calling math service2 (on node2) from node1
         logger.info("Testing remote action call from node1 to node2...");
         let mut multiply_params_map = HashMap::new();
-        multiply_params_map.insert("a".to_string(), ValueType::Number(4.0.into()));
-        multiply_params_map.insert("b".to_string(), ValueType::Number(7.0.into()));
-        let multiply_params = ValueType::Map(multiply_params_map);
+        multiply_params_map.insert("a".to_string(), 4.0);
+        multiply_params_map.insert("b".to_string(), 7.0);
+        let multiply_params = ArcValueType::from_map(multiply_params_map);
         
         let response = node1.request("math2/multiply", multiply_params).await?;
-        if let Some(ValueType::Number(result)) = response.data {
+        if let Some(result_value) = response.data {
+            let result: f64 = result_value.as_type()?;
             assert_eq!(result, 28.0);
             logger.info(format!("Multiply operation succeeded: 4 * 7 = {}", result));
         } else {

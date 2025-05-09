@@ -15,7 +15,7 @@ pub struct MockNodeDiscovery {
     /// Known nodes
     nodes: Arc<RwLock<HashMap<String, NodeInfo>>>,
     /// Listeners for discovery events
-    listeners: Arc<RwLock<Vec<DiscoveryListener>>>,
+    listeners: Arc<RwLock<Vec<DiscoveryListener>>>, // DiscoveryListener is now Arc<...>
 }
 
 impl MockNodeDiscovery {
@@ -45,8 +45,17 @@ impl MockNodeDiscovery {
         let key = node_info.peer_id.to_string();
         self.nodes.write().unwrap().insert(key, node_info.clone());
         // Notify listeners
-        for listener in self.listeners.read().unwrap().iter() {
-            listener(node_info.clone());
+        let peer_info = crate::network::discovery::PeerInfo {
+            public_key: node_info.peer_id.public_key.clone(),
+            addresses: node_info.addresses.clone(),
+        };
+        let listeners = {
+            let guard = self.listeners.read().unwrap();
+            guard.iter().cloned().collect::<Vec<_>>()
+        };
+        for listener in listeners {
+            let fut = listener(peer_info.clone());
+            fut.await;
         }
     }
 }
@@ -65,19 +74,6 @@ impl NodeDiscovery for MockNodeDiscovery {
         Ok(())
     }
 
-    async fn discover_nodes(&self, network_id: Option<&str>) -> Result<Vec<NodeInfo>> {
-        let nodes_map = self.nodes.read().unwrap();
-        Ok(nodes_map
-            .values()
-            .filter(|info| {
-                network_id.map_or(true, |net_id| {
-                    info.network_ids.contains(&net_id.to_string())
-                })
-            })
-            .cloned()
-            .collect())
-    }
-
     async fn set_discovery_listener(&self, listener: DiscoveryListener) -> Result<()> {
         self.listeners.write().unwrap().push(listener);
         Ok(())
@@ -86,21 +82,5 @@ impl NodeDiscovery for MockNodeDiscovery {
     async fn shutdown(&self) -> Result<()> {
         self.nodes.write().unwrap().clear();
         Ok(())
-    }
-
-    async fn register_node(&self, node_info: NodeInfo) -> Result<()> {
-        self.add_mock_node(node_info).await;
-        Ok(())
-    }
-
-    async fn update_node(&self, node_info: NodeInfo) -> Result<()> {
-        self.add_mock_node(node_info).await;
-        Ok(())
-    }
-
-    async fn find_node(&self, network_id: &str, node_id: &str) -> Result<Option<NodeInfo>> {
-        let nodes = self.nodes.read().unwrap();
-        let key = PeerId::new(node_id.to_string()).to_string();
-        Ok(nodes.get(&key).cloned())
     }
 }

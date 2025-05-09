@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use runar_node::network::transport::{NetworkTransport, NetworkMessage, PeerId, TransportOptions, pick_free_port};
 use runar_node::network::transport::quic_transport::QuicTransport;
 use runar_node::node::NetworkConfig;
-use runar_common::types::ValueType;
+use runar_common::types::{ArcValueType, SerializerRegistry};
 use runar_common::Logger;
 use runar_common::Component;
 use uuid::Uuid;
@@ -22,6 +22,8 @@ use runar_node::network::discovery::multicast_discovery::PeerInfo;
 
 #[cfg(test)]
 mod tests {
+    use runar_node::network::transport::NetworkMessagePayloadItem;
+
     use super::*;
 
     // Helper function to create and initialize a test QuicTransport with custom port
@@ -221,14 +223,18 @@ mod tests {
 
         // Set up a test message using the updated structure with payloads
         let test_topic = "test/service/action".to_string();
-        let test_payload = ValueType::String("test-payload-data".to_string());
+        let test_payload = ArcValueType::new_primitive("test-payload-data".to_string());
+        
+        let registry = SerializerRegistry::with_defaults();
+        // Serialize the ArcValueType
+        let serialized_payload = registry.serialize_value(&test_payload)?;
         let test_corr_id = "corr-id-123".to_string();
         
         let message = NetworkMessage {
             source: node_id1.clone(),
             destination: node_id2.clone(),
             message_type: "Request".to_string(),
-            payloads: vec![(test_topic.clone(), test_payload.clone(), test_corr_id.clone())],
+            payloads: vec![(test_topic.clone(), serialized_payload.to_vec(), test_corr_id.clone())],
         };
         
         // Send message from transport1 to transport2
@@ -248,13 +254,20 @@ mod tests {
         assert_eq!(received_message.destination, node_id2);
         assert_eq!(received_message.message_type, "Request");
         assert_eq!(received_message.payloads.len(), 1);
-        assert_eq!(received_message.payloads[0].0, test_topic);
-        assert_eq!(received_message.payloads[0].1, test_payload);
-        assert_eq!(received_message.payloads[0].2, test_corr_id);
+        assert!(!received_message.payloads.is_empty(), "No payloads in received message");
+        assert_eq!(received_message.payloads[0].path, test_topic);
+        // If test_payload is ArcValueType, compare to value_bytes as bytes
+        // Otherwise, ensure both are Vec<u8>
+        assert_eq!(received_message.payloads[0].value_bytes, test_payload.as_ref());
+        assert_eq!(received_message.payloads[0].correlation_id, test_corr_id);
         
         // Shutdown both transports
-        transport1.stop().await?;
-        transport2.stop().await?;
+        if let Err(e) = transport1.stop().await {
+            println!("Error shutting down transport1: {:?}", e);
+        }
+        if let Err(e) = transport2.stop().await {
+            println!("Error shutting down transport2: {:?}", e);
+        }
         
         Ok(())
     }
@@ -272,9 +285,12 @@ mod tests {
             last_seen: std::time::SystemTime::now(),
         };
         
-        // Step 1: Create a ValueType from the NodeInfo
-        println!("Step 1: Creating ValueType from NodeInfo");
-        let value_type = ValueType::from_struct(local_node_info.clone());
+        // Step 1: Create an ArcValueType from the NodeInfo
+        println!("Step 1: Creating ArcValueType from NodeInfo");
+        let arc_value_type = ArcValueType::from_struct(local_node_info.clone());
+        
+        // Create a SerializerRegistry for serialization
+        let registry = SerializerRegistry::with_defaults();
         
         // Convert ValueType to binary
         println!("Step 2: Converting ValueType to binary");
@@ -334,7 +350,7 @@ mod tests {
         
         // Step 6: Try to extract the NodeInfo from the payload
         println!("Step 6: Extracting NodeInfo from binary payload");
-        if let Some((_, payload_bytes, _)) = deserialized_msg.payloads.get(0) {
+        if let Some(    NetworkMessagePayloadItem { path: _, value_bytes: payload_bytes, correlation_id: _ }) = deserialized_msg.payloads.get(0) {
             // Deserialize the binary data back to NodeInfo
             let node_info: NodeInfo = match bincode::deserialize(payload_bytes) {
                 Ok(info) => {

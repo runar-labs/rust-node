@@ -71,7 +71,7 @@ impl MulticastMessage {
 }
 
 // Define DiscoveryCallback type alias for clarity
-type DiscoveryCallback = Box<dyn Fn(NodeInfo) + Send + Sync>;
+// type DiscoveryCallback = Box<dyn Fn(NodeInfo) + Send + Sync>;
 
 /// Multicast-based node discovery implementation
 pub struct MulticastDiscovery {
@@ -398,8 +398,9 @@ impl MulticastDiscovery {
                 }
                 logger.debug(format!("Processing announce message from {}", discovery_msg.public_key));
                 
-                // Store the node info - clone peer_public_key before using it outside this block
+                
                 let peer_public_key = discovery_msg.public_key.clone();
+                // Store the peer info - clone peer_public_key before using it outside this block
                 {
                     let mut nodes_write = nodes.write().await; 
                     nodes_write.insert(peer_public_key.clone(), discovery_msg.clone());
@@ -409,8 +410,8 @@ impl MulticastDiscovery {
                 {
                     let listeners_read = listeners.read().await; 
                     for listener in listeners_read.iter() {
-                        logger.debug(format!("Notifying listener about node {}", peer_public_key));
-                        listener(discovery_msg.clone());
+                        let fut = listener(discovery_msg.clone());
+                        fut.await;
                     }
                 }
                 
@@ -551,58 +552,4 @@ impl NodeDiscovery for MulticastDiscovery {
         Ok(())
     }
 
-    async fn register_node(&self, node_info: NodeInfo) -> Result<()> {
-        // Convert NodeInfo to PeerInfo for registration
-        let peer_info = PeerInfo {
-            public_key: node_info.peer_id.public_key.clone(),
-            addresses: node_info.addresses.clone(),
-        };
-        
-        // Add to discovered nodes
-        let mut nodes_write = self.discovered_nodes.write().await;
-        nodes_write.insert(peer_info.public_key.clone(), peer_info);
-        
-        self.logger.info(format!("Manually registered node: {}", node_info.peer_id));
-        Ok(())
-    }
-
-    async fn update_node(&self, node_info: NodeInfo) -> Result<()> {
-        // Same as register for this implementation
-        self.register_node(node_info).await
-    }
-
-    async fn discover_nodes(&self, network_id: Option<&str>) -> Result<Vec<NodeInfo>> {
-        // We don't filter by network_id in this implementation
-        let nodes_read = self.discovered_nodes.read().await;
-        
-        // Convert PeerInfo to NodeInfo
-        let result = nodes_read.values()
-            .map(|peer_info| NodeInfo {
-                peer_id: PeerId::new(peer_info.public_key.clone()),
-                network_ids: vec![network_id.unwrap_or("default").to_string()], // Set default network ID
-                addresses: peer_info.addresses.clone(),
-                capabilities: vec![], // We don't have capabilities in PeerInfo
-                last_seen: SystemTime::now(),
-            })
-            .collect();
-            
-        Ok(result)
-    }
-
-    async fn find_node(&self, _network_id: &str, node_id: &str) -> Result<Option<NodeInfo>> {
-        let nodes_read = self.discovered_nodes.read().await;
-        
-        if let Some(peer_info) = nodes_read.get(node_id) {
-            // Convert PeerInfo to NodeInfo
-            Ok(Some(NodeInfo {
-                peer_id: PeerId::new(peer_info.public_key.clone()),
-                network_ids: vec![_network_id.to_string()],
-                addresses: peer_info.addresses.clone(),
-                capabilities: vec![], // We don't have capabilities in PeerInfo
-                last_seen: SystemTime::now(),
-            }))
-        } else {
-            Ok(None)
-        }
-    }
 } 
