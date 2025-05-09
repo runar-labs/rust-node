@@ -10,8 +10,8 @@ async fn test_service_capability_serialization() -> Result<()> {
     let capability = ServiceMetadata {
         network_id: "test-network".to_string(),
         service_path: "test-service".to_string(),
-        registration_time: SystemTime::now(),
-        last_start_time: SystemTime::now(),
+        registration_time: SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+        last_start_time: Some(SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()),
         name: "math-service".to_string(),
         version: "1.0.0".to_string(),
         description: "Provides math operations".to_string(),

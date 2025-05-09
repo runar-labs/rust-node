@@ -217,7 +217,7 @@ async fn test_node_events() {
         // Create a node with a test network ID
         let mut config = NodeConfig::new("test-node", "test_network");
         config.network_config = None;
-        let node = Node::new(config).await.unwrap();
+        let mut node = Node::new(config).await.unwrap();
 
         // Create a flag to track if the callback was called
         let was_called = Arc::new(AtomicBool::new(false));
@@ -295,14 +295,11 @@ async fn test_path_params_in_context() {
     assert_eq!(response.status, 200, "Request failed: {:?}", response);
 
     // Verify the path parameters were correctly extracted
-    if let Some(data) = response.data {
+    if let Some(data) = &response.data {
         // Convert to HashMap<String, String>
-        let params_map: HashMap<String, String> = data
+        let params_map = data.clone()
             .as_map_ref::<String, String>()
-            .unwrap()
-            .iter()
-            .map(|(k, v)| (k.clone(), v.as_type::<String>().unwrap_or_default()))
-            .collect();
+            .expect("Failed to extract map from ArcValueType");
 
         assert_eq!(params_map.get("param_1").unwrap(), "abc123");
         assert_eq!(params_map.get("param_2").unwrap(), "xyz789");

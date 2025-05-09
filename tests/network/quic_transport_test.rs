@@ -234,7 +234,11 @@ mod tests {
             source: node_id1.clone(),
             destination: node_id2.clone(),
             message_type: "Request".to_string(),
-            payloads: vec![(test_topic.clone(), serialized_payload.to_vec(), test_corr_id.clone())],
+            payloads: vec![NetworkMessagePayloadItem::new(
+                test_topic.clone(),
+                serialized_payload.to_vec(),
+                test_corr_id.clone(),
+            )],
         };
         
         // Send message from transport1 to transport2
@@ -258,7 +262,10 @@ mod tests {
         assert_eq!(received_message.payloads[0].path, test_topic);
         // If test_payload is ArcValueType, compare to value_bytes as bytes
         // Otherwise, ensure both are Vec<u8>
-        assert_eq!(received_message.payloads[0].value_bytes, test_payload.as_ref());
+        // Compare serialized bytes directly
+        let registry = SerializerRegistry::with_defaults();
+        let expected_bytes = registry.serialize_value(&test_payload)?;
+        assert_eq!(received_message.payloads[0].value_bytes, expected_bytes.as_ref().to_vec());
         assert_eq!(received_message.payloads[0].correlation_id, test_corr_id);
         
         // Shutdown both transports
@@ -305,7 +312,11 @@ mod tests {
             source: source_id.clone(),
             destination: dest_id.clone(),
             message_type: "Handshake".to_string(),
-            payloads: vec![("".to_string(), binary_data, "".to_string())],
+            payloads: vec![NetworkMessagePayloadItem::new(
+                "".to_string(),
+                binary_data,
+                "".to_string(),
+            )],
         };
         
         // Step 4: Serialize the NetworkMessage with bincode

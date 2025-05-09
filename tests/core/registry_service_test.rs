@@ -134,7 +134,7 @@ async fn test_registry_service_get_service_info() {
                     let mut value_clone = value.clone();
                     let map_data = value_clone.as_map_ref::<String, ArcValueType>().expect("Expected map in response");
                     test_logger.debug(format!("Response map keys: {:?}", map_data.keys().collect::<Vec<_>>()));
-                    for (k, v) in map_data {
+                    for (k, v) in map_data.as_ref().iter() {
                         test_logger.debug(format!("Key: {}, Value: {:?}", k, v));
                     }
                 },

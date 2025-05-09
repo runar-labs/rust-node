@@ -15,8 +15,7 @@ use runar_node::services::service_registry::ServiceRegistry;
 use runar_node::services::{ServiceResponse, ActionHandler, EventContext, RequestContext, SubscriptionOptions};
 use runar_node::routing::TopicPath;
 use runar_common::logging::{Logger, Component};
-use runar_common::types::ArcValueType;
-use runar_node::services::SerializerRegistry;
+use runar_common::types::ArcValueType; 
 
 /// Create a test handler that validates its network ID
 fn create_test_handler(name: &str, expected_network_id: &str) -> ActionHandler {
@@ -361,7 +360,7 @@ async fn test_multiple_event_handlers() {
         let received_topic2_clone = received_topic2.clone();
         
         // Create a first event handler to track events with "topic1"
-        let handler1 = Arc::new(move |_ctx: Arc<EventContext>, _data: ValueType| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
+        let handler1 = Arc::new(move |_ctx: Arc<EventContext>, _data: ArcValueType| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
             let received = received_topic1_clone.clone();
             Box::pin(async move {
                 received.store(true, Ordering::SeqCst);
@@ -370,7 +369,7 @@ async fn test_multiple_event_handlers() {
         });
         
         // Create a second event handler to track events with "topic2"
-        let handler2 = Arc::new(move |_ctx: Arc<EventContext>, _data: ValueType| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
+        let handler2 = Arc::new(move |_ctx: Arc<EventContext>, _data: ArcValueType| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
             let received = received_topic2_clone.clone();
             Box::pin(async move {
                 received.store(true, Ordering::SeqCst);

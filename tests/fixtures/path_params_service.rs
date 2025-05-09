@@ -5,10 +5,10 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use runar_common::types::ArcValueType;
 use std::collections::HashMap;
 use std::sync::Arc;
-
-use runar_common::types::ValueType;
+ 
 use runar_node::services::abstract_service::AbstractService;
 use runar_node::services::{LifecycleContext, RequestContext, ServiceResponse};
 
@@ -56,24 +56,21 @@ impl PathParamsService {
     /// Handle the extract action - returns all path parameters
     async fn handle_extract(
         &self,
-        params: Option<ValueType>,
+        params: Option<ArcValueType>,
         context: RequestContext,
     ) -> Result<ServiceResponse> {
         // Log that we're handling the request
         context.info("Handling extract path parameters request".to_string());
 
         // Convert the path parameters to ValueType::String values for the response
-        let param_values: HashMap<String, ValueType> = context
-            .path_params
-            .iter()
-            .map(|(k, v)| (k.clone(), ValueType::String(v.clone())))
-            .collect();
+        let param_values: HashMap<String, String> = context
+            .path_params.clone();
 
         // Log the parameters we extracted
         context.info(format!("Extracted parameters: {:?}", param_values));
 
         // Return the parameters
-        Ok(ServiceResponse::ok(ValueType::Map(param_values)))
+        Ok(ServiceResponse::ok(ArcValueType::from_map(param_values)))
     }
 }
 

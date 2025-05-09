@@ -9,11 +9,11 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use runar_common::types::ArcValueType;
 use std::sync::{Arc, Mutex};
-
-use runar_common::types::ValueType;
+ 
 use runar_node::services::abstract_service::AbstractService;
-use runar_node::services::{ArcContextLogging, LifecycleContext, RequestContext, ServiceResponse};
+use runar_node::services::{LifecycleContext, RequestContext, ServiceResponse};
 
 /// A simple math service for testing
 ///
@@ -152,41 +152,7 @@ impl MathService {
         *self.counter.lock().unwrap()
     }
 
-    /// Extract the 'a' and 'b' parameters from the request data
-    ///
-    /// IMPORTANT: This method demonstrates proper parameter extraction and validation.
-    /// It shows how to check for required parameters and handle errors appropriately.
-    fn extract_parameters(
-        &self,
-        data: &ValueType,
-        ctx: &RequestContext,
-    ) -> anyhow::Result<(f64, f64)> {
-        match data {
-            ValueType::Map(map) => {
-                // Extract 'a' parameter
-                let a = if let Some(value) = map.get("a") {
-                    value.as_f64().unwrap_or(0.0)
-                } else {
-                    ctx.error("Missing or invalid parameter 'a'".to_string());
-                    return Err(anyhow!("Missing or invalid parameter 'a'"));
-                };
 
-                // Extract 'b' parameter
-                let b = if let Some(value) = map.get("b") {
-                    value.as_f64().unwrap_or(0.0)
-                } else {
-                    ctx.error("Missing or invalid parameter 'b'".to_string());
-                    return Err(anyhow!("Missing or invalid parameter 'b'"));
-                };
-
-                Ok((a, b))
-            }
-            _ => {
-                ctx.error("Expected map with 'a' and 'b' parameters".to_string());
-                Err(anyhow!("Expected map with 'a' and 'b' parameters"))
-            }
-        }
-    }
 
     /// Handle the add operation
     ///
@@ -194,138 +160,133 @@ impl MathService {
     /// It uses the context for logging, extracts parameters, and returns appropriate responses.
     async fn handle_add(
         &self,
-        params: Option<ValueType>,
+        params: Option<ArcValueType>,
         context: RequestContext,
     ) -> Result<ServiceResponse> {
-        // Use the context logger directly
         context.info("Handling add operation request".to_string());
-
-        // Get parameters or use empty map if none provided
-        let data = params.unwrap_or(ValueType::Map(std::collections::HashMap::new()));
-
-        // Extract parameters
-        match self.extract_parameters(&data, &context) {
-            Ok((a, b)) => {
-                // Perform the addition
-                let result = self.add(a, b, &context);
-
-                // Log result with context
-                context.info(format!("Addition successful: {} + {} = {}", a, b, result));
-
-                // Return the result
-                Ok(ServiceResponse::ok(ValueType::Number(result)))
+        let zero = 0.0;
+        let mut data = params.unwrap_or_else(|| ArcValueType::null());
+        let (a, b) = match data.as_map_ref::<String, f64>() {
+            Ok(map) => {
+                
+                let a = *map.get("a").unwrap_or_else(|| {
+                    context.error("Missing or invalid parameter 'a'".to_string());
+                    &zero
+                });
+                let b = *map.get("b").unwrap_or_else(|| {
+                    context.error("Missing or invalid parameter 'b'".to_string());
+                    &zero
+                });
+                (a, b)
             }
             Err(e) => {
-                context.error(format!("Parameter extraction failed: {}", e));
-                Ok(ServiceResponse::error(400, &format!("{}", e)))
+                context.error(format!("Parameter extraction error: {}", e));
+                return Ok(ServiceResponse::error(400, &format!("Parameter extraction error: {}", e)));
             }
-        }
+        };
+        let result = self.add(a, b, &context);
+        context.info(format!("Addition successful: {} + {} = {}", a, b, result));
+        Ok(ServiceResponse::ok(ArcValueType::new_primitive(result)))
     }
 
     /// Handle the subtract operation
     async fn handle_subtract(
         &self,
-        params: Option<ValueType>,
+        params: Option<ArcValueType>,
         context: RequestContext,
     ) -> Result<ServiceResponse> {
-        // Use the context logger directly
         context.info("Handling subtract operation request".to_string());
-
-        // Get parameters or use empty map if none provided
-        let data = params.unwrap_or(ValueType::Map(std::collections::HashMap::new()));
-
-        // Extract parameters
-        match self.extract_parameters(&data, &context) {
-            Ok((a, b)) => {
-                // Perform the subtraction
-                let result = self.subtract(a, b, &context);
-
-                // Log result with context
-                context.info(format!(
-                    "Subtraction successful: {} - {} = {}",
-                    a, b, result
-                ));
-
-                // Return the result
-                Ok(ServiceResponse::ok(ValueType::Number(result)))
+        let zero = 0.0;
+        let mut data = params.unwrap_or_else(|| ArcValueType::null());
+        let (a, b) = match data.as_map_ref::<String, f64>() {
+            Ok(map) => {
+                
+                let a = *map.get("a").unwrap_or_else(|| {
+                    context.error("Missing or invalid parameter 'a'".to_string());
+                    &zero
+                });
+                let b = *map.get("b").unwrap_or_else(|| {
+                    context.error("Missing or invalid parameter 'b'".to_string());
+                    &zero
+                });
+                (a, b)
             }
             Err(e) => {
-                context.error(format!("Parameter extraction failed: {}", e));
-                Ok(ServiceResponse::error(400, &format!("{}", e)))
+                context.error(format!("Parameter extraction error: {}", e));
+                return Ok(ServiceResponse::error(400, &format!("Parameter extraction error: {}", e)));
             }
-        }
+        };
+        let result = self.subtract(a, b, &context);
+        context.info(format!("Subtraction successful: {} - {} = {}", a, b, result));
+        Ok(ServiceResponse::ok(ArcValueType::new_primitive(result)))
     }
 
     /// Handle the multiply operation
     async fn handle_multiply(
         &self,
-        params: Option<ValueType>,
+        params: Option<ArcValueType>,
         context: RequestContext,
     ) -> Result<ServiceResponse> {
-        // Use the context logger directly
         context.info("Handling multiply operation request".to_string());
-
-        // Get parameters or use empty map if none provided
-        let data = params.unwrap_or(ValueType::Map(std::collections::HashMap::new()));
-
-        // Extract parameters
-        match self.extract_parameters(&data, &context) {
-            Ok((a, b)) => {
-                // Perform the multiplication
-                let result = self.multiply(a, b, &context);
-
-                // Log result with context
-                context.info(format!(
-                    "Multiplication successful: {} * {} = {}",
-                    a, b, result
-                ));
-
-                // Return the result
-                Ok(ServiceResponse::ok(ValueType::Number(result)))
+        let zero = 0.0;
+        let mut data = params.unwrap_or_else(|| ArcValueType::null());
+        let (a, b) = match data.as_map_ref::<String, f64>() {
+            Ok(map) => {
+                
+                let a = *map.get("a").unwrap_or_else(|| {
+                    context.error("Missing or invalid parameter 'a'".to_string());
+                    &zero
+                });
+                let b = *map.get("b").unwrap_or_else(|| {
+                    context.error("Missing or invalid parameter 'b'".to_string());
+                    &zero
+                });
+                (a, b)
             }
             Err(e) => {
-                context.error(format!("Parameter extraction failed: {}", e));
-                Ok(ServiceResponse::error(400, &format!("{}", e)))
+                context.error(format!("Parameter extraction error: {}", e));
+                return Ok(ServiceResponse::error(400, &format!("Parameter extraction error: {}", e)));
             }
-        }
+        };
+        let result = self.multiply(a, b, &context);
+        context.info(format!("Multiplication successful: {} * {} = {}", a, b, result));
+        Ok(ServiceResponse::ok(ArcValueType::new_primitive(result)))
     }
 
     /// Handle the divide operation
     async fn handle_divide(
         &self,
-        params: Option<ValueType>,
+        params: Option<ArcValueType>,
         context: RequestContext,
     ) -> Result<ServiceResponse> {
-        // Use the context logger directly
         context.info("Handling divide operation request".to_string());
-
-        // Get parameters or use empty map if none provided
-        let data = params.unwrap_or(ValueType::Map(std::collections::HashMap::new()));
-
-        // Extract parameters
-        match self.extract_parameters(&data, &context) {
-            Ok((a, b)) => {
-                // Perform the division with error handling
-                match self.divide(a, b, &context) {
-                    Ok(result) => {
-                        // Log result with context
-                        context.info(format!("Division successful: {} / {} = {}", a, b, result));
-
-                        // Return the result
-                        Ok(ServiceResponse::ok(ValueType::Number(result)))
-                    }
-                    Err(e) => {
-                        context.error(format!("Division error: {}", e));
-                        Ok(ServiceResponse::error(
-                            400,
-                            &format!("Division error: {}", e),
-                        ))
-                    }
-                }
+        let mut data = params.unwrap_or_else(|| ArcValueType::null());
+        let zero = 0.0;
+        let (a, b) = match data.as_map_ref::<String, f64>() {
+            Ok(map) => {
+                let a = *map.get("a").unwrap_or_else(|| {
+                    context.error("Missing or invalid parameter 'a'".to_string());
+                    &zero
+                });
+                let b = *map.get("b").unwrap_or_else(|| {
+                    context.error("Missing or invalid parameter 'b'".to_string());
+                    &zero
+                });
+                (a, b)
             }
             Err(e) => {
-                context.error(format!("Parameter extraction failed: {}", e));
-                Ok(ServiceResponse::error(400, &format!("{}", e)))
+                context.error(format!("Parameter extraction error: {}", e));
+                return Ok(ServiceResponse::error(400, &format!("Parameter extraction error: {}", e)));
+            }
+        };
+        match self.divide(a, b, &context) {
+            Ok(result) => {
+                context.info(format!("Division successful: {} / {} = {}", a, b, result));
+                Ok(ServiceResponse::ok(ArcValueType::new_primitive(result)))
+            }
+            Err(e) => {
+                context.error(format!("Division error: {}", e));
+                Ok(ServiceResponse::error(400, &format!("Division error: {}", e)))
             }
         }
     }
