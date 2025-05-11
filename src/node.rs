@@ -34,7 +34,7 @@ use crate::network::discovery::{
     DiscoveryOptions, MulticastDiscovery, NodeDiscovery, NodeInfo, DEFAULT_MULTICAST_ADDR,
 };
 use crate::network::transport::{
-    MessageCallback, MessageHandler, NetworkError, NetworkMessage, NetworkMessagePayloadItem,
+    ConnectionCallback, MessageCallback, MessageHandler, NetworkError, NetworkMessage, NetworkMessagePayloadItem,
     NetworkTransport, PeerId, QuicTransport, QuicTransportOptions,
 };
 use crate::routing::TopicPath;
@@ -1019,7 +1019,25 @@ impl Node {
                     // Clone the NetworkConfig to avoid reference issues
                     let owned_config = network_config.clone();
 
-                    let transport = QuicTransport::new(node_id, owned_config, self.logger.clone());
+                    // Create a new QuicTransport with a placeholder connection callback
+                    // This will be replaced later by the Node's actual connection callback
+                    let logger_clone = self.logger.clone();
+                    // Create a ConnectionCallback directly
+                    let placeholder_callback: ConnectionCallback = Arc::new(move |peer_id: PeerId, is_connected: bool, _node_info: Option<NodeInfo>| -> BoxFuture<'static, Result<()>> {
+                        let logger = logger_clone.clone();
+                        Box::pin(async move {
+                            logger.debug(format!("Placeholder callback: Peer {} is {}", 
+                                peer_id, if is_connected { "connected" } else { "disconnected" }));
+                            Ok(())
+                        })
+                    });
+                    
+                    let transport = QuicTransport::new(
+                        node_id, 
+                        owned_config, 
+                        self.logger.clone(),
+                        placeholder_callback,
+                    );
 
                     self.logger.debug("QUIC transport created");
                     Ok(Box::new(transport))

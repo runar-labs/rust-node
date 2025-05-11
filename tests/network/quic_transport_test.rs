@@ -9,8 +9,10 @@ use tokio::time::{Duration, timeout};
 use std::net::{SocketAddr, IpAddr, Ipv4Addr, TcpListener, UdpSocket};
 use std::str::FromStr;
 use std::collections::HashSet;
+use std::future::Future;
+use std::pin::Pin;
 
-use runar_node::network::transport::{NetworkTransport, NetworkMessage, PeerId, TransportOptions, pick_free_port};
+use runar_node::network::transport::{NetworkTransport, NetworkMessage, PeerId, TransportOptions, pick_free_port, ConnectionCallback};
 use runar_node::network::transport::quic_transport::QuicTransport;
 use runar_node::node::NetworkConfig;
 use runar_common::types::{ArcValueType, SerializerRegistry};
@@ -50,11 +52,24 @@ mod tests {
         };
         config.transport_options = transport_options;
         
-        // Create transport instance with the config
+        // Create a connection callback for test purposes
+        let connection_callback: ConnectionCallback = Arc::new(
+            move |peer_id: PeerId, is_connected: bool, node_info: Option<NodeInfo>| -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>> {
+                Box::pin(async move {
+                    // For testing, we just log the connection status but take no action
+                    println!("Connection callback: peer={}, connected={}, info={:?}", 
+                             peer_id, is_connected, node_info);
+                    Ok(())
+                })
+            }
+        );
+        
+        // Create transport instance with the config and the callback
         let transport = QuicTransport::new(
             node_id.clone(), 
             config, 
-            logger
+            logger,
+            connection_callback
         );
          
         // Start the transport

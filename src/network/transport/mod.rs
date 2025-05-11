@@ -274,6 +274,10 @@ pub type ConnectionCallback =
 /// Network transport interface
 #[async_trait]
 pub trait NetworkTransport: Send + Sync {
+
+    //initialize the transporter
+    fn init(&self, connection_callback: ConnectionCallback, message_handler: MessageHandler) -> Result<(), NetworkError>;
+
     /// Start listening for incoming connections
     async fn start(&self) -> Result<(), NetworkError>;
 
@@ -281,13 +285,13 @@ pub trait NetworkTransport: Send + Sync {
     async fn stop(&self) -> Result<(), NetworkError>;
 
     /// Check if the transport is running
-    fn is_running(&self) -> bool;
+    // fn is_running(&self) -> bool;
 
     /// Get the local address this transport is bound to
-    fn get_local_address(&self) -> String;
+    // fn get_local_address(&self) -> String;
 
     /// Get the local node identifier
-    fn get_local_node_id(&self) -> PeerId;
+    // fn get_local_node_id(&self) -> PeerId;
 
     /// Disconnect from a remote node
     async fn disconnect(&self, node_id: PeerId) -> Result<(), NetworkError>;
@@ -298,23 +302,17 @@ pub trait NetworkTransport: Send + Sync {
     /// Send a message to a remote node
     async fn send_message(&self, message: NetworkMessage) -> Result<(), NetworkError>;
 
+    //REMOVE mesasge handler is set during init
     /// Register a message handler for incoming messages
-    fn register_message_handler(&self, handler: MessageHandler) -> Result<()>;
+    // fn register_message_handler(&self, handler: MessageHandler) -> Result<()>;
 
-    /// Set a callback for connection status changes
-    fn set_connection_callback(&self, callback: ConnectionCallback) -> Result<()>;
+    // The connection callback is now a required parameter during construction
 
     /// Send a service request to a remote node
-    async fn send_request(&self, message: NetworkMessage) -> Result<NetworkMessage, NetworkError>;
+    // async fn send_request(&self, message: NetworkMessage) -> Result<NetworkMessage, NetworkError>;
 
     /// Handle an incoming network message
     async fn handle_message(&self, message: NetworkMessage) -> Result<(), NetworkError>;
-
-    /// Start node discovery process
-    async fn start_discovery(&self) -> Result<(), NetworkError>;
-
-    /// Stop node discovery process
-    async fn stop_discovery(&self) -> Result<(), NetworkError>;
 
     /// Register a discovered node
     async fn connect_node(
@@ -323,18 +321,28 @@ pub trait NetworkTransport: Send + Sync {
         local_node: NodeInfo,
     ) -> Result<(), NetworkError>;
 
-    /// Get all discovered nodes
-    fn get_discovered_nodes(&self) -> Vec<PeerId>;
-
-    /// Set the node discovery mechanism
-    fn set_node_discovery(&self, discovery: Box<dyn NodeDiscovery>) -> Result<()>;
-
-    /// Complete a pending request
-    fn complete_pending_request(
+     /// Complete a pending request
+     fn complete_pending_request(
         &self,
         correlation_id: String,
         response: NetworkMessage,
     ) -> Result<(), NetworkError>;
+
+    /// Start node discovery process
+    // async fn start_discovery(&self) -> Result<(), NetworkError>;
+
+    /// Stop node discovery process
+    // async fn stop_discovery(&self) -> Result<(), NetworkError>;
+
+    
+
+    /// Get all discovered nodes
+    // fn get_discovered_nodes(&self) -> Vec<PeerId>;
+
+    /// Set the node discovery mechanism
+    // fn set_node_discovery(&self, discovery: Box<dyn NodeDiscovery>) -> Result<()>;
+
+   
 }
 
 /// Factory for creating network transport instances
@@ -367,13 +375,18 @@ pub struct BaseNetworkTransport {
     /// Message handler for incoming messages
     message_handler: Arc<RwLock<Option<MessageHandler>>>,
 
-    /// Connection status callback
-    connection_callback: Arc<RwLock<Option<ConnectionCallback>>>,
+    /// Connection status callback - required for peer connection events
+    /// ConnectionCallback is already an Arc<dyn Fn...> type
+    connection_callback: ConnectionCallback,
 }
 
 impl BaseNetworkTransport {
-    /// Create a new BaseNetworkTransport with the given node ID and logger
-    pub fn new(local_node_id: PeerId, logger: Logger) -> Self {
+    /// Create a new BaseNetworkTransport with the given node ID, logger, and connection callback
+    /// 
+    /// - `local_node_id`: Local peer ID that identifies this node
+    /// - `logger`: Logger instance for transport logs
+    /// - `connection_callback`: Required callback function triggered when peers connect/disconnect
+    pub fn new(local_node_id: PeerId, logger: Logger, connection_callback: ConnectionCallback) -> Self {
         Self {
             node_discovery: Arc::new(RwLock::new(None)),
             discovered_nodes: Arc::new(RwLock::new(HashMap::new())),
@@ -381,7 +394,7 @@ impl BaseNetworkTransport {
             local_node_id,
             logger,
             message_handler: Arc::new(RwLock::new(None)),
-            connection_callback: Arc::new(RwLock::new(None)),
+            connection_callback,
         }
     }
 
@@ -510,20 +523,7 @@ impl NetworkTransport for BaseNetworkTransport {
         Ok(())
     }
 
-    /// Set a callback for connection status changes
-    fn set_connection_callback(&self, callback: ConnectionCallback) -> Result<()> {
-        let mut connection_callback = match self.connection_callback.try_write() {
-            Ok(guard) => guard,
-            Err(_) => {
-                return Err(anyhow::Error::msg(
-                    "Failed to acquire write lock for connection callback",
-                )
-                .into())
-            }
-        };
-        *connection_callback = Some(callback);
-        Ok(())
-    }
+    // Connection callback is now a required parameter during construction
 
     /// Send a service request to a remote node
     async fn send_request(&self, message: NetworkMessage) -> Result<NetworkMessage, NetworkError> {

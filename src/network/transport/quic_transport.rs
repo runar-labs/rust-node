@@ -25,8 +25,8 @@ use uuid;
 // Internal module imports
 use super::peer_registry::{PeerEntry, PeerRegistry, PeerStatus};
 use super::{
-    ConnectionCallback, MessageCallback, MessageHandler, NetworkError, NetworkMessage,
-    NetworkMessagePayloadItem, NetworkMessageType, NetworkTransport, PeerId, TransportOptions,
+    ConnectionCallback, MessageHandler, NetworkError, NetworkMessage,
+    NetworkMessagePayloadItem, NetworkTransport, PeerId,
 };
 use crate::network::discovery::multicast_discovery::PeerInfo;
 use crate::network::discovery::{NodeDiscovery, NodeInfo};
@@ -299,7 +299,6 @@ impl Default for QuicTransportOptions {
     }
 }
 
-/// QUIC-based implementation of NetworkTransport
 pub struct QuicTransport {
     /// Local node identifier
     node_id: PeerId,
@@ -319,8 +318,9 @@ pub struct QuicTransport {
     message_tx: Arc<TokioMutex<Option<mpsc::Sender<(NetworkMessage, PeerId)>>>>,
     /// Pending network requests waiting for responses
     pending_requests: Arc<TokioRwLock<HashMap<String, oneshot::Sender<NetworkMessage>>>>,
-    /// Connection status callback
-    connection_callback: Arc<TokioRwLock<Option<ConnectionCallback>>>,
+    /// Connection status callback - required for peer connection events
+    /// ConnectionCallback is already an Arc<dyn Fn...> type
+    connection_callback: ConnectionCallback,
     /// Registry of known peers
     peer_registry: Arc<PeerRegistry>,
     /// Logger instance
@@ -329,7 +329,18 @@ pub struct QuicTransport {
 
 impl QuicTransport {
     /// Create a new QUIC transport
-    pub fn new(node_id: PeerId, network_config: NetworkConfig, logger: Logger) -> Self {
+    /// 
+    /// - `node_id`: Local peer ID that identifies this node
+    /// - `network_config`: Network configuration options
+    /// - `logger`: Logger instance for transport logs
+    /// - `connection_callback`: Required callback function triggered when peers connect/disconnect
+    pub fn new(
+        node_id: PeerId, 
+        network_config: NetworkConfig, 
+        logger: Logger,
+        connection_callback: ConnectionCallback
+    ) -> Self {
+
         // Create peer registry with default options
         let peer_registry = Arc::new(PeerRegistry::new());
 
@@ -343,7 +354,7 @@ impl QuicTransport {
             cleanup_task: Arc::new(TokioMutex::new(None)),
             message_tx: Arc::new(TokioMutex::new(None)),
             pending_requests: Arc::new(TokioRwLock::new(HashMap::new())),
-            connection_callback: Arc::new(TokioRwLock::new(None)),
+            connection_callback,
             peer_registry,
             logger,
         }
@@ -401,132 +412,147 @@ impl QuicTransport {
             .quic_options
             .as_ref()
             .ok_or_else(|| anyhow!("No QUIC options provided in network config"))?;
-
         // Pass the logger to the options method
         quic_options.create_client_config(&self.logger)
     }
 
-    /// Handles the lifecycle of a single accepted incoming connection
+    /// Handle an incoming connection on the QUIC endpoint
     async fn handle_incoming_connection(
         conn: quinn::Connection,
         logger: Logger,
         handlers: Arc<StdRwLock<Vec<MessageHandler>>>,
         connections: Arc<TokioRwLock<HashMap<String, Arc<TokioMutex<PeerState>>>>>,
-        connection_callback: Arc<TokioRwLock<Option<ConnectionCallback>>>,
+        connection_callback: ConnectionCallback,
         max_idle_streams: usize,
     ) -> Result<()> {
+        // Define a default idle stream timeout
+        let stream_idle_timeout = Duration::from_secs(30);
+        
+        // Create a default peer ID to use in case handshake fails
+        let peer_addr = conn.remote_address().to_string();
+        // Initial value that will be replaced with the actual peer ID from handshake
+        let mut remote_peer_id = PeerId {
+            public_key: format!("unknown-{}", peer_addr),
+        };
+
+        logger.info(format!("[HANDSHAKE] Starting handshake process with peer at {}", peer_addr));
         logger.debug("Waiting for handshake message...");
 
         // 1. Accept the first stream for handshake
+        logger.info("[HANDSHAKE] Attempting to accept bidirectional stream for handshake...");
         let (mut handshake_send, mut handshake_recv) =
             match timeout(Duration::from_secs(10), conn.accept_bi()).await {
-                Ok(Ok(streams)) => streams,
+                Ok(Ok(streams)) => {
+                    logger.info("[HANDSHAKE] Successfully accepted bidirectional stream");
+                    streams
+                },
                 Ok(Err(e)) => {
-                    logger.error(format!("Error accepting handshake stream: {}", e));
+                    logger.error(format!("[HANDSHAKE] Error accepting handshake stream: {}", e));
                     conn.close(1u32.into(), b"handshake stream error");
                     return Err(anyhow!("Handshake stream error: {}", e));
                 }
                 Err(_) => {
                     // Timeout
-                    logger.error("Timeout waiting for handshake stream.");
-                    conn.close(2u32.into(), b"handshakeconnections timeout");
+                    logger.error("[HANDSHAKE] Timeout waiting for handshake stream - no bidirectional stream was opened by the client");
+                    logger.error("[HANDSHAKE] This likely means the client did not attempt to initiate the handshake");
+                    conn.close(2u32.into(), b"handshake timeout");
                     return Err(anyhow!("Handshake timeout"));
                 }
             };
 
-        // 2. Read and process the handshake message
-        let remote_peer_id = match timeout(
-            Duration::from_secs(5),
-            handshake_recv.read_to_end(1024 * 10),
-        )
-        .await
-        {
-            // Limit handshake size
-            Ok(Ok(data)) => {
-                logger.debug(format!("Received {} bytes for handshake", data.len()));
-                match bincode::deserialize::<NetworkMessage>(&data) {
-                    Ok(message) if message.message_type == "Handshake" => {
-                        let peer_id = message.source;
-                        logger.info(format!("Received valid handshake from peer {}", peer_id));
-                        // Send ACK for handshake
-                        if let Err(e) = handshake_send.write_all(b"ACK").await {
-                            logger.error(format!(
-                                "Failed to send handshake ACK to {}: {}",
-                                peer_id, e
-                            ));
-                            // Don't necessarily close connection, maybe just log
-                        }
-                        if let Err(e) = handshake_send.finish().await {
-                            logger.warn(format!(
-                                "Failed to finish handshake ACK stream for {}: {}",
-                                peer_id, e
-                            ));
-                        }
-
-                        // Check if the payload contains NodeInfo
-                        if let Some(payload_item) = message.payloads.get(0) {
-                            // Extract and deserialize the NodeInfo directly from the binary data
-                            match bincode::deserialize::<NodeInfo>(&payload_item.value_bytes) {
-                                Ok(node_info) => {
-                                    logger.debug(format!(
-                                        "Successfully deserialized NodeInfo from handshake: {}",
-                                        node_info.peer_id
-                                    ));
-                                    // Trigger connection callback with node info
-                                    Self::trigger_connection_callback(
-                                        connection_callback.clone(),
-                                        peer_id.clone(),
-                                        true,
-                                        Some(node_info),
-                                    )
-                                    .await;
-
-                                    peer_id
-                                }
-                                Err(e) => {
-                                    logger.warn(format!(
-                                        "Failed to deserialize NodeInfo from handshake: {}",
-                                        e
-                                    ));
-                                    peer_id
-                                }
-                            }
-                        } else {
-                            logger.warn("Handshake message contains no payloads");
-                            peer_id
-                        }
-                    }
-                    Ok(message) => {
-                        logger.error(format!(
-                            "Received invalid message type during handshake: {}",
-                            message.message_type
-                        ));
-                        conn.close(3u32.into(), b"invalid handshake message type");
-                        return Err(anyhow!("Invalid handshake message type"));
-                    }
-                    Err(e) => {
-                        logger.error(format!("Failed to deserialize handshake message: {}", e));
-                        conn.close(4u32.into(), b"handshake deserialization error");
-                        return Err(anyhow!("Handshake deserialization error: {}", e));
-                    }
-                }
+        // 2. Read and process the handshake message (with size limit)
+        // First read the handshake data
+        logger.info("[HANDSHAKE] Reading handshake data from stream...");
+        let handshake_data = match handshake_recv.read_to_end(1024 * 10).await {
+            Ok(data) => {
+                logger.info(format!("[HANDSHAKE] Received {} bytes for handshake", data.len()));
+                data
             }
-            Ok(Err(e)) => {
+            Err(e) => {
                 // Stream read error
-                logger.error(format!("Error reading handshake message: {}", e));
+                logger.error(format!("[HANDSHAKE] Error reading handshake message: {}", e));
+                logger.error("[HANDSHAKE] This could indicate connection issues or malformed data");
                 conn.close(5u32.into(), b"handshake read error");
                 return Err(anyhow!("Handshake read error: {}", e));
             }
-            Err(_) => {
-                // Timeout reading handshake
-                logger.error("Timeout reading handshake message.");
-                conn.close(6u32.into(), b"handshake read timeout");
-                return Err(anyhow!("Handshake read timeout"));
+        };
+        
+        // Then deserialize and process it
+        logger.info("[HANDSHAKE] Deserializing handshake message...");
+        let message = match bincode::deserialize::<NetworkMessage>(&handshake_data) {
+            Ok(msg) => msg,
+            Err(e) => {
+                logger.error(format!("Failed to deserialize handshake message: {}", e));
+                conn.close(4u32.into(), b"handshake deserialization error");
+                return Err(anyhow!("Handshake deserialization error: {}", e));
             }
         };
+        
+        // Validate the message type
+        if message.message_type != "Handshake" {
+            logger.error(format!(
+                "Received invalid message type during handshake: {}",
+                message.message_type
+            ));
+            conn.close(3u32.into(), b"invalid handshake message type");
+            return Err(anyhow!("Invalid handshake message type"));
+        }
+        
+        // Extract and use the peer ID - explicitly ensure it's a proper PeerId
+        let remote_peer_id: PeerId = message.source.clone();
+        logger.info(format!("Received valid handshake from peer {}", remote_peer_id));
+        
+        // Send ACK for handshake
+        if let Err(e) = handshake_send.write_all(b"ACK").await {
+            logger.error(format!(
+                "Failed to send handshake ACK to {}: {}",
+                remote_peer_id, e
+            ));
+            // Don't necessarily close connection, maybe just log
+        }
+        
+        // Process NodeInfo if present
+        if let Some(payload_item) = message.payloads.get(0) {
+            // Extract and deserialize the NodeInfo directly from the binary data
+            match bincode::deserialize::<NodeInfo>(&payload_item.value_bytes) {
+                Ok(node_info) => {
+                    logger.debug(format!(
+                        "Successfully deserialized NodeInfo from handshake: {}",
+                        node_info.peer_id
+                    ));
+                    // Trigger connection callback with node info
+                    if let Err(e) = connection_callback(remote_peer_id.clone(), true, Some(node_info)).await {
+                logger.error(format!("Error executing connection callback for peer {}: {}", remote_peer_id, e));
+            }
+                }
+                Err(e) => {
+                    logger.warn(format!(
+                        "Failed to deserialize NodeInfo from handshake: {}",
+                        e
+                    ));
+                }
+            }
+        } else {
+            logger.warn("Handshake message contains no payloads");
+        }
+        
+        // Finish the handshake stream
+        if let Err(e) = handshake_send.finish().await {
+            logger.warn(format!(
+                "Failed to finish handshake ACK stream for {}: {}",
+                remote_peer_id, e
+            ));
+        }
+        
+        // Ensure we have a valid PeerId for the connection tracking
+        if remote_peer_id.public_key.is_empty() {
+            logger.error("Remote peer ID is empty or invalid");
+            conn.close(7u32.into(), b"invalid peer id");
+            return Err(anyhow!("Invalid remote peer ID"));
+        }
 
-        // Capture peer_id before moving connection into state
-        let identified_peer_id = remote_peer_id.clone();
+        // We'll use remote_peer_id consistently throughout the function
+        // No need for a separate identified_peer_id variable
 
         let remote_addr = conn.remote_address();
         // 3. Store PeerState (Initialize idle_streams pool)
@@ -649,30 +675,30 @@ impl QuicTransport {
             "Connection handling loop finished for peer {}",
             remote_peer_id
         ));
-        // Remove PeerState from map
+        
+        // Remove PeerState from map using the peer's public key as the map key
         let existed = {
             let mut connections_write = connections.write().await;
             connections_write
-                .remove(&identified_peer_id.public_key)
+                .remove(&remote_peer_id.public_key)
                 .is_some()
         };
+        
         if existed {
             logger.debug(format!(
                 "Removed connection state for disconnected peer {}",
-                identified_peer_id
+                remote_peer_id
             ));
             // Trigger callback for disconnect
-            Self::trigger_connection_callback(
-                connection_callback.clone(),
-                identified_peer_id.clone(),
-                false,
-                None,
-            )
-            .await;
+            // Clone the peer_id before moving it to the callback
+            let peer_id_clone = remote_peer_id.clone();
+            if let Err(e) = connection_callback(remote_peer_id, false, None).await {
+                logger.error(format!("Error executing connection callback for peer {}: {}", peer_id_clone, e));
+            }
         } else {
             logger.warn(format!(
                 "Attempted to remove state for peer {}, but it was already gone.",
-                identified_peer_id
+                remote_peer_id
             ));
         }
 
@@ -833,9 +859,8 @@ impl QuicTransport {
     async fn start_cleanup_task(&self) -> Result<JoinHandle<()>> {
         let connections_arc: Arc<TokioRwLock<HashMap<String, Arc<TokioMutex<PeerState>>>>> =
             Arc::clone(&self.connections);
-        let callback_arc: Arc<TokioRwLock<Option<ConnectionCallback>>> =
-            Arc::clone(&self.connection_callback);
-        let logger = self.logger.clone();
+        let callback_arc = self.connection_callback.clone();
+        let logger_arc = self.logger.clone();
         let connection_idle_timeout = self
             .network_config
             .quic_options
@@ -845,7 +870,7 @@ impl QuicTransport {
                                                  // Revert: No stream timeout needed here anymore
         let check_interval = Duration::max(Duration::from_secs(5), connection_idle_timeout / 4);
 
-        logger.info(format!(
+        logger_arc.info(format!(
             "Starting cleanup task: Conn Idle Timeout: {:?}, Check Interval: {:?}", // Simplified log
             connection_idle_timeout, check_interval
         ));
@@ -853,7 +878,7 @@ impl QuicTransport {
         let task = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(check_interval).await;
-                logger.debug("Running connection cleanup check...");
+                logger_arc.debug("Running connection cleanup check...");
                 let now = Instant::now();
                 let mut peers_to_remove = Vec::new();
                 // Revert: Remove peers_to_update_time collection
@@ -865,7 +890,7 @@ impl QuicTransport {
                         if let Ok(state) = state_mutex.try_lock() {
                             // read lock is sufficient
                             if now.duration_since(state.last_used) > connection_idle_timeout {
-                                logger.info(format!(
+                                logger_arc.info(format!(
                                     "Peer {} connection idle ({:?}), scheduling removal.",
                                     peer_id,
                                     now.duration_since(state.last_used)
@@ -873,7 +898,7 @@ impl QuicTransport {
                                 peers_to_remove.push(peer_id.clone());
                             }
                         } else {
-                            logger.warn(format!(
+                            logger_arc.warn(format!(
                                 "Cleanup task could not lock state for peer {}, skipping check.",
                                 peer_id
                             ));
@@ -883,97 +908,29 @@ impl QuicTransport {
 
                 // Revert: Remove Apply Updates block for last_used
 
-                // Remove idle connections
                 if !peers_to_remove.is_empty() {
-                    let loop_callback_arc_remove = callback_arc.clone();
+                    // If we have any stale peers, iterate through them and close connections
                     let mut connections_write = connections_arc.write().await;
                     for peer_id in peers_to_remove {
                         if let Some(state_mutex) = connections_write.remove(&peer_id) {
-                            // ... close connection ...
-                            Self::trigger_connection_callback(
-                                loop_callback_arc_remove.clone(),
-                                PeerId::new(peer_id.clone()),
-                                false,
-                                None,
-                            )
-                            .await;
+                            // Close connection
+                            let state = state_mutex.lock().await;
+                            state.connection.close(0u32.into(), b"idle timeout");
+                            
+                            // Trigger callback for disconnect
+                            if let Err(e) = callback_arc(PeerId::new(peer_id.clone()), false, None).await {
+                                logger_arc.error(format!("Error executing connection callback for peer {}: {}", peer_id, e));
+                            }
                         } else {
-                            // ... log warning ...
+                            logger_arc.warn(format!("Failed to remove connection for peer {}", peer_id));
                         }
                     }
                 } else {
-                    logger.debug("No idle connections found to remove.");
-                }
-            }
+                    logger_arc.debug("No stale peers found in cleanup cycle.");
+                }          }
             // ... unreachable log ...
         });
         Ok(task)
-    }
-
-    /// Helper to trigger the connection callback if it's set
-    async fn trigger_connection_callback(
-        callback_arc: Arc<TokioRwLock<Option<ConnectionCallback>>>,
-        peer_id: PeerId,
-        is_connected: bool,
-        node_info: Option<NodeInfo>,
-    ) {
-        let callback_opt = callback_arc.read().await;
-        if let Some(callback) = callback_opt.as_ref() {
-            // Clone the Arc<dyn Fn...> so we don't hold the lock while awaiting
-            let cb = callback.clone();
-            // Release the read lock
-            drop(callback_opt);
-            // Call the callback with peer_id, connection status, and optionally node_info
-            if let Err(e) = cb(peer_id.clone(), is_connected, node_info).await {
-                // TODO: How to handle callback errors? Log for now.
-                // Need access to logger here, maybe pass it in?
-                eprintln!(
-                    "Error executing connection callback for peer {}: {}",
-                    peer_id, e
-                );
-            }
-        }
-    }
-
-    /// Register a peer in the registry
-    pub fn register_peer(&self, discovery_msg: PeerInfo) -> Result<()> {
-        self.logger
-            .debug(format!("Registering peer {} ", discovery_msg.public_key));
-        self.peer_registry.add_peer(discovery_msg)
-    }
-
-    /// Update peer status
-    pub fn update_peer_status(&self, peer_id: &PeerId, status: PeerStatus) -> Result<()> {
-        self.logger
-            .debug(format!("Updating peer {} status to {:?}", peer_id, status));
-        self.peer_registry.update_peer_status(peer_id, status)
-    }
-
-    /// Find a peer by its ID
-    pub fn find_peer(&self, peer_id: &PeerId) -> Option<PeerEntry> {
-        self.peer_registry.find_peer(peer_id.public_key.clone())
-    }
-
-    /// Get peer registry
-    pub fn peer_registry(&self) -> Arc<PeerRegistry> {
-        self.peer_registry.clone()
-    }
-
-    /// Add notify_peer_connected method to QuicTransport impl
-    pub async fn notify_peer_connected(&self, peer_id: PeerId, node_info: NodeInfo) {
-        self.logger.debug(format!(
-            "Node connected notification for peer {} with capabilities: {:?}",
-            peer_id, node_info.capabilities
-        ));
-
-        // Trigger the connection callback with node_info
-        Self::trigger_connection_callback(
-            self.connection_callback.clone(),
-            peer_id.clone(),
-            true,
-            Some(node_info),
-        )
-        .await;
     }
 
     /// Start the server task to accept incoming connections
@@ -982,8 +939,7 @@ impl QuicTransport {
         let handlers_arc: Arc<StdRwLock<Vec<MessageHandler>>> = Arc::clone(&self.handlers);
         let connections_arc: Arc<TokioRwLock<HashMap<String, Arc<TokioMutex<PeerState>>>>> =
             Arc::clone(&self.connections);
-        let callback_arc: Arc<TokioRwLock<Option<ConnectionCallback>>> =
-            Arc::clone(&self.connection_callback);
+        let callback_arc = self.connection_callback.clone();
         let max_idle_streams = self
             .network_config
             .quic_options
@@ -1009,7 +965,8 @@ impl QuicTransport {
                         let conn_connections = connections_arc.clone();
                         let conn_callback = callback_arc.clone();
                         tokio::spawn(async move {
-                            match Self::handle_incoming_connection(
+                            // Call the handle_incoming_connection method directly
+                            match QuicTransport::handle_incoming_connection(
                                 conn,
                                 conn_logger.clone(),
                                 conn_handlers,
@@ -1186,10 +1143,12 @@ impl NetworkTransport for QuicTransport {
             return Ok(());
         }
         // Add to registry using our helper method
-        match self.register_peer(peer_info.clone()) {
+        // Add the peer to registry
+        let add_result = self.peer_registry.add_peer(peer_info.clone());
+        match add_result {
             Ok(_) => {
                 self.logger.debug(format!(
-                    "Added node {} to registry - will connect to it now",
+                    "Added peer {} to registry - will connect to it now",
                     peer_public_key
                 ));
 
@@ -1265,56 +1224,62 @@ impl NetworkTransport for QuicTransport {
                                 Ok((mut send_stream, _recv_stream)) => {
                                     // We don't need recv_stream for simple handshake send
                                     // Step 1: Directly serialize the NodeInfo to binary format
-                                    let binary_data = match bincode::serialize(&local_node) {
-                                        Ok(data) => data,
+                                    self.logger.info("[HANDSHAKE] Creating handshake message with NodeInfo...");
+                                    let node_info_bytes = match bincode::serialize(&local_node) {
+                                        Ok(bytes) => {
+                                            self.logger.info(format!("[HANDSHAKE] Successfully serialized NodeInfo ({} bytes)", bytes.len()));
+                                            bytes
+                                        },
                                         Err(e) => {
                                             self.logger.error(format!(
-                                                "Failed to serialize NodeInfo for handshake: {}",
+                                                "[HANDSHAKE] Failed to serialize NodeInfo for handshake: {}",
                                                 e
                                             ));
-                                            return Err(NetworkError::TransportError(format!(
-                                                "Failed to serialize NodeInfo: {}",
-                                                e
-                                            )));
+                                            continue;
                                         }
                                     };
 
-                                    // Step 2: Create the handshake message, using binary data directly
-                                    let handshake_msg = NetworkMessage {
+                                    // Step 2: Create a complete handshake message with metadata
+                                    self.logger.info("[HANDSHAKE] Creating complete handshake message...");
+                                    let handshake_message = NetworkMessage {
                                         source: self.get_local_node_id(),
                                         destination: peer_id.clone(), // Destination is the peer we connected to
                                         message_type: "Handshake".to_string(),
                                         // Use binary data directly
                                         payloads: vec![NetworkMessagePayloadItem::new(
                                             "".to_string(),
-                                            binary_data,
+                                            node_info_bytes,
                                             "".to_string(),
                                         )],
                                     };
+                                    self.logger.info(format!("[HANDSHAKE] Created handshake message to peer {}", peer_id.public_key));
 
-                                    match bincode::serialize(&handshake_msg) {
+                                    match bincode::serialize(&handshake_message) {
                                         Ok(data) => {
                                             let size = data.len();
                                             self.logger.debug(format!(
-                                                "writting {} bytes for handshake",
+                                                "Writing {} bytes for handshake",
                                                 size
                                             ));
-                                            if let Err(e) = send_stream.write_all(&data).await {
-                                                // Log error but don't necessarily fail the connection yet
-                                                self.logger.error(format!(
-                                                    "Failed to write handshake message to {}: {}",
-                                                    peer_public_key, e
-                                                ));
-                                                // Close the stream potentially?
-                                                // let _ = send_stream.finish().await;
-                                            } else {
-                                                // Finish the stream after successful write
-                                                if let Err(e) = send_stream.finish().await {
-                                                    self.logger.warn(format!("Failed to finish handshake send stream for {}: {}", peer_public_key, e));
-                                                } else {
-                                                    self.logger.debug(format!(
-                                                        "Handshake message sent successfully to {}",
-                                                        peer_public_key
+                                            match send_stream.write_all(&data).await {
+                                                Ok(_) => {
+                                                    self.logger.info("[HANDSHAKE] Successfully sent handshake message");
+                                                    // Handshake sent, now finish stream and wait for ACK
+                                                    self.logger.info("[HANDSHAKE] Finishing handshake stream and waiting for ACK...");
+                                                    if let Err(e) = send_stream.finish().await {
+                                                        self.logger.warn(format!("Failed to finish handshake send stream for {}: {}", peer_public_key, e));
+                                                    } else {
+                                                        self.logger.debug(format!(
+                                                            "Handshake message sent successfully to {}",
+                                                            peer_public_key
+                                                        ));
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    // Log error but don't necessarily fail the connection yet
+                                                    self.logger.error(format!(
+                                                        "Failed to write handshake message to {}: {}",
+                                                        peer_public_key, e
                                                     ));
                                                 }
                                             }
@@ -1366,13 +1331,12 @@ impl NetworkTransport for QuicTransport {
                             ));
 
                             // Trigger callback AFTER storing state
-                            Self::trigger_connection_callback(
-                                self.connection_callback.clone(),
-                                peer_id,
-                                true,
-                                Some(local_node.clone()),
-                            )
-                            .await;
+                            if let Err(e) = (self.connection_callback)(peer_id.clone(), true, Some(local_node.clone())).await {
+                                self.logger.error(format!(
+                                    "Error executing connection callback for peer {}: {}",
+                                    peer_id, e
+                                ));
+                            }
 
                             //when connected, break out of the loop - no need to try other addresses
                             break;
@@ -1427,7 +1391,6 @@ impl NetworkTransport for QuicTransport {
     async fn disconnect(&self, target_peer_id: PeerId) -> Result<(), NetworkError> {
         self.logger
             .info(format!("Disconnecting from peer {}", target_peer_id));
-        let callback_arc = self.connection_callback.clone();
         let mut connections_write = self.connections.write().await;
 
         if let Some(state_mutex) = connections_write.remove(&target_peer_id.public_key) {
@@ -1445,8 +1408,14 @@ impl NetworkTransport for QuicTransport {
                 target_peer_id
             ));
             // Trigger callback AFTER removing state and closing connection
-            Self::trigger_connection_callback(callback_arc, target_peer_id.clone(), false, None)
-                .await;
+            // Clone the peer_id before using it in the callback to prevent ownership issues
+            let peer_id_for_log = target_peer_id.clone();
+            if let Err(e) = (self.connection_callback)(target_peer_id, false, None).await {
+                self.logger.error(format!(
+                    "Error executing connection callback for peer {}: {}",
+                    peer_id_for_log, e
+                ));
+            }
             Ok(())
         } else {
             self.logger.warn(format!(
@@ -1488,16 +1457,7 @@ impl NetworkTransport for QuicTransport {
         }
     }
 
-    /// Set a callback for connection status changes
-    fn set_connection_callback(&self, callback: ConnectionCallback) -> Result<()> {
-        let mut callback_guard = match self.connection_callback.try_write() {
-            Ok(guard) => guard,
-            // Using try_write to avoid blocking if called from async context inappropriately
-            Err(_) => return Err(anyhow!("Failed to acquire lock for connection callback").into()),
-        };
-        *callback_guard = Some(callback);
-        Ok(())
-    }
+    // Connection callback is now a required parameter during construction
 
     /// Send a message to a remote node
     async fn send_message(&self, message: NetworkMessage) -> Result<(), NetworkError> {

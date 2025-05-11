@@ -70,7 +70,7 @@ mod remote_action_tests {
 
         // Wait for discovery and connection to happen (simple sleep)
         logger.info("Waiting for nodes to discover each other...");
-        sleep(Duration::from_secs(300)).await;
+        sleep(Duration::from_secs(55)).await;
 
         // Test calling math service1 (on node1) from node2
         logger.info("Testing remote action call from node2 to node1...");
@@ -80,7 +80,7 @@ mod remote_action_tests {
         });
         
         // Use the proper network path format - with network ID for remote actions
-        let response = node2.request("test:node1:math1/add", add_params).await?;
+        let response = node2.request("math1/add", add_params).await?;
         if let Some(result_value) = response.data {
             let result: f64 = result_value.as_type()?;
             assert_eq!(result, 8.0);
