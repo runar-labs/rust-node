@@ -9,7 +9,7 @@
 
 // Working tests - these tests have been updated to work with the current API
 pub mod capability_exchange_test;
-// Removed reference to quic_transport_test as it's no longer needed with the new architecture
+pub mod quic_transport_test;
 pub mod multicast_discovery_test;
 // pub mod discovery_test;
 pub mod binary_serialization_test;
