@@ -1,16 +1,9 @@
 // Network Transport Module
-//
-// This module defines the network transport interfaces and implementations.
-
-// Standard library imports
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use bincode;
 use rand;
 use runar_common::types::{ArcValueType, SerializerRegistry};
 use runar_common::Logger;
-use serde::de::{Deserializer, Error as DeError, MapAccess, SeqAccess, Visitor};
-use serde::ser::{SerializeStruct, Serializer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -21,7 +14,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
-use tokio::sync::{oneshot, RwLock};
 
 // Internal module declarations
 pub mod peer_registry;
@@ -35,8 +27,8 @@ pub use quic_transport::{QuicTransport, QuicTransportOptions};
 
 use super::discovery::multicast_discovery::PeerInfo;
 // Import NodeInfo from the discovery module
-use super::discovery::{NodeDiscovery, NodeInfo};
-use crate::services::ServiceResponse;
+use super::discovery::{ NodeInfo};
+
 
 /// Type alias for async-returning function
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -274,24 +266,13 @@ pub type ConnectionCallback =
 /// Network transport interface
 #[async_trait]
 pub trait NetworkTransport: Send + Sync {
-
-    //initialize the transporter
-    fn init(&self, connection_callback: ConnectionCallback, message_handler: MessageHandler) -> Result<(), NetworkError>;
+    // No init method - all required fields should be provided in constructor
 
     /// Start listening for incoming connections
     async fn start(&self) -> Result<(), NetworkError>;
 
     /// Stop listening for incoming connections
     async fn stop(&self) -> Result<(), NetworkError>;
-
-    /// Check if the transport is running
-    // fn is_running(&self) -> bool;
-
-    /// Get the local address this transport is bound to
-    // fn get_local_address(&self) -> String;
-
-    /// Get the local node identifier
-    // fn get_local_node_id(&self) -> PeerId;
 
     /// Disconnect from a remote node
     async fn disconnect(&self, node_id: PeerId) -> Result<(), NetworkError>;
@@ -302,151 +283,21 @@ pub trait NetworkTransport: Send + Sync {
     /// Send a message to a remote node
     async fn send_message(&self, message: NetworkMessage) -> Result<(), NetworkError>;
 
-    //REMOVE mesasge handler is set during init
-    /// Register a message handler for incoming messages
-    // fn register_message_handler(&self, handler: MessageHandler) -> Result<()>;
-
-    // The connection callback is now a required parameter during construction
-
-    /// Send a service request to a remote node
-    // async fn send_request(&self, message: NetworkMessage) -> Result<NetworkMessage, NetworkError>;
-
-    /// Handle an incoming network message
-    async fn handle_message(&self, message: NetworkMessage) -> Result<(), NetworkError>;
-
-    /// Register a discovered node
-    async fn connect_node(
+    /// connect to a discovered node
+    async fn connect_peer(
         &self,
         discovery_msg: PeerInfo,
         local_node: NodeInfo,
     ) -> Result<(), NetworkError>;
-
-     /// Complete a pending request
-     fn complete_pending_request(
-        &self,
-        correlation_id: String,
-        response: NetworkMessage,
-    ) -> Result<(), NetworkError>;
-
-    /// Start node discovery process
-    // async fn start_discovery(&self) -> Result<(), NetworkError>;
-
-    /// Stop node discovery process
-    // async fn stop_discovery(&self) -> Result<(), NetworkError>;
-
     
-
-    /// Get all discovered nodes
-    // fn get_discovered_nodes(&self) -> Vec<PeerId>;
-
-    /// Set the node discovery mechanism
-    // fn set_node_discovery(&self, discovery: Box<dyn NodeDiscovery>) -> Result<()>;
-
-   
-}
-
-/// Factory for creating network transport instances
-#[async_trait]
-pub trait TransportFactory: Send + Sync {
-    type Transport: NetworkTransport;
-    /// Create a new transport instance, passing the logger down
-    async fn create_transport(&self, node_id: PeerId, logger: Logger) -> Result<Self::Transport>;
-}
-
-/// Base implementation for network transport with common fields
-pub struct BaseNetworkTransport {
-    /// Network-specific concerns moved from Node
-
-    /// Node discovery mechanism
-    pub node_discovery: Arc<RwLock<Option<Box<dyn NodeDiscovery>>>>,
-
-    /// Registry of discovered nodes
-    pub discovered_nodes: Arc<RwLock<HashMap<String, PeerInfo>>>,
-
-    /// Pending network requests waiting for responses
-    pub pending_requests: Arc<RwLock<HashMap<String, oneshot::Sender<Result<ServiceResponse>>>>>,
-
-    /// Local node identifier
-    pub local_node_id: PeerId,
-
-    /// Logger instance
-    pub logger: Logger,
-
-    /// Message handler for incoming messages
-    message_handler: Arc<RwLock<Option<MessageHandler>>>,
-
-    /// Connection status callback - required for peer connection events
-    /// ConnectionCallback is already an Arc<dyn Fn...> type
-    connection_callback: ConnectionCallback,
-}
-
-impl BaseNetworkTransport {
-    /// Create a new BaseNetworkTransport with the given node ID, logger, and connection callback
-    /// 
-    /// - `local_node_id`: Local peer ID that identifies this node
-    /// - `logger`: Logger instance for transport logs
-    /// - `connection_callback`: Required callback function triggered when peers connect/disconnect
-    pub fn new(local_node_id: PeerId, logger: Logger, connection_callback: ConnectionCallback) -> Self {
-        Self {
-            node_discovery: Arc::new(RwLock::new(None)),
-            discovered_nodes: Arc::new(RwLock::new(HashMap::new())),
-            pending_requests: Arc::new(RwLock::new(HashMap::new())),
-            local_node_id,
-            logger,
-            message_handler: Arc::new(RwLock::new(None)),
-            connection_callback,
-        }
-    }
-
-    /// Set the node discovery mechanism
-    pub async fn set_node_discovery(&self, discovery: Box<dyn NodeDiscovery>) -> Result<()> {
-        let mut node_discovery = self.node_discovery.write().await;
-        *node_discovery = Some(discovery);
-        Ok(())
-    }
-
-    /// Get the node discovery mechanism
-    pub async fn get_node_discovery(&self) -> Option<Arc<RwLock<Option<Box<dyn NodeDiscovery>>>>> {
-        Some(self.node_discovery.clone())
-    }
-
-    /// Register a discovered node
-    pub async fn discovered_node(&self, discovery_msg: PeerInfo) -> Result<()> {
-        let mut discovered_nodes = self.discovered_nodes.write().await;
-        discovered_nodes.insert(discovery_msg.public_key.clone(), discovery_msg);
-        Ok(())
-    }
-
-    /// Get all discovered nodes
-    pub async fn get_discovered_nodes(&self) -> Vec<PeerInfo> {
-        let discovered_nodes = self.discovered_nodes.read().await;
-        discovered_nodes.values().cloned().collect()
-    }
-
-    /// Register a pending request
-    pub async fn register_pending_request(
+    /// Get the local address this transport is bound to as a string
+    fn get_local_address(&self) -> String;
+    
+    /// Register a message handler for incoming messages
+    async fn register_message_handler(
         &self,
-        correlation_id: String,
-        sender: oneshot::Sender<Result<ServiceResponse>>,
-    ) -> Result<()> {
-        let mut pending_requests = self.pending_requests.write().await;
-        pending_requests.insert(correlation_id, sender);
-        Ok(())
-    }
-
-    /// Complete a pending request
-    pub async fn complete_pending_request(
-        &self,
-        correlation_id: &str,
-        response: Result<ServiceResponse>,
-    ) -> Result<()> {
-        let mut pending_requests = self.pending_requests.write().await;
-        if let Some(sender) = pending_requests.remove(correlation_id) {
-            // It's okay if the receiver is dropped, this just means the caller timed out or is no longer interested
-            let _ = sender.send(response);
-        }
-        Ok(())
-    }
+        handler: Box<dyn Fn(NetworkMessage) -> Result<(), NetworkError> + Send + Sync + 'static>,
+    ) -> Result<(), NetworkError>;
 }
 
 /// Error type for network operations
@@ -464,125 +315,4 @@ pub enum NetworkError {
     ConfigurationError(String),
 }
 
-#[async_trait]
-impl NetworkTransport for BaseNetworkTransport {
-    /// Start listening for incoming connections
-    async fn start(&self) -> Result<(), NetworkError> {
-        Ok(())
-    }
-
-    /// Stop listening for incoming connections
-    async fn stop(&self) -> Result<(), NetworkError> {
-        Ok(())
-    }
-
-    /// Check if the transport is running
-    fn is_running(&self) -> bool {
-        false
-    }
-
-    /// Get the local address this transport is bound to
-    fn get_local_address(&self) -> String {
-        "0.0.0.0:0".to_string()
-    }
-
-    /// Get the local node identifier
-    fn get_local_node_id(&self) -> PeerId {
-        self.local_node_id.clone()
-    }
-
-    /// Disconnect from a remote node
-    async fn disconnect(&self, node_id: PeerId) -> Result<(), NetworkError> {
-        Ok(())
-    }
-
-    /// Check if connected to a specific node
-    fn is_connected(&self, node_id: PeerId) -> bool {
-        false
-    }
-
-    /// Send a message to a remote node
-    async fn send_message(&self, _message: NetworkMessage) -> Result<(), NetworkError> {
-        // Default implementation returns error - requires override in concrete types
-        Err(NetworkError::TransportError(
-            "send_message not implemented for this base transport".to_string(),
-        ))
-    }
-
-    /// Register a message handler for incoming messages
-    fn register_message_handler(&self, handler: MessageHandler) -> Result<()> {
-        let mut message_handler = match self.message_handler.try_write() {
-            Ok(guard) => guard,
-            Err(_) => {
-                return Err(
-                    anyhow::Error::msg("Failed to acquire write lock for message handler").into(),
-                )
-            }
-        };
-        *message_handler = Some(handler);
-        Ok(())
-    }
-
-    // Connection callback is now a required parameter during construction
-
-    /// Send a service request to a remote node
-    async fn send_request(&self, message: NetworkMessage) -> Result<NetworkMessage, NetworkError> {
-        Err(NetworkError::TransportError("Not implemented".to_string()))
-    }
-
-    /// Handle an incoming network message
-    async fn handle_message(&self, message: NetworkMessage) -> Result<(), NetworkError> {
-        // Default implementation does nothing - requires override in concrete types
-        self.logger.warn(format!("Base NetworkTransport::handle_message called for message type '{}', but does not implement handling.", message.message_type));
-        Ok(())
-    }
-
-    /// Start node discovery process
-    async fn start_discovery(&self) -> Result<(), NetworkError> {
-        Ok(())
-    }
-
-    /// Stop node discovery process
-    async fn stop_discovery(&self) -> Result<(), NetworkError> {
-        Ok(())
-    }
-
-    /// Register a discovered node
-    async fn connect_node(
-        &self,
-        peer_info: PeerInfo,
-        local_node: NodeInfo,
-    ) -> Result<(), NetworkError> {
-        Ok(())
-    }
-
-    /// Get all discovered nodes
-    fn get_discovered_nodes(&self) -> Vec<PeerId> {
-        Vec::new()
-    }
-
-    /// Set the node discovery mechanism
-    fn set_node_discovery(&self, discovery: Box<dyn NodeDiscovery>) -> Result<()> {
-        let mut node_discovery = match self.node_discovery.try_write() {
-            Ok(guard) => guard,
-            Err(_) => {
-                return Err(
-                    anyhow::Error::msg("Failed to acquire write lock for node discovery").into(),
-                )
-            }
-        };
-        *node_discovery = Some(discovery);
-        Ok(())
-    }
-
-    /// Complete a pending request
-    fn complete_pending_request(
-        &self,
-        correlation_id: String,
-        response: NetworkMessage,
-    ) -> Result<(), NetworkError> {
-        // This is a synchronous method that needs to be implemented for each concrete transport
-        // For the base implementation, we just return Ok
-        Ok(())
-    }
-}
+ 

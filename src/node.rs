@@ -11,21 +11,21 @@ use chrono;
 use env_logger;
 use rcgen;
 use runar_common::logging::{Component, Logger};
-use runar_common::types::schemas::{ActionMetadata, EventMetadata, FieldSchema, SchemaDataType, ServiceMetadata};
+use runar_common::types::schemas::{ActionMetadata, ServiceMetadata};
 use runar_common::types::{ArcValueType, SerializerRegistry};
 use rustls;
 use rustls::{Certificate, PrivateKey};
-use serde_json;
+// use serde_json;
 use socket2;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::future::Future;
-use std::io::Read;
+// use std::io::Read;
 use std::net::SocketAddr;
  
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use tokio::sync::{oneshot, RwLock};
 use uuid::Uuid;
 
@@ -34,7 +34,7 @@ use crate::network::discovery::{
     DiscoveryOptions, MulticastDiscovery, NodeDiscovery, NodeInfo, DEFAULT_MULTICAST_ADDR,
 };
 use crate::network::transport::{
-    ConnectionCallback, MessageCallback, MessageHandler, NetworkError, NetworkMessage, NetworkMessagePayloadItem,
+    ConnectionCallback, MessageCallback, NetworkMessage, NetworkMessagePayloadItem, NetworkError,
     NetworkTransport, PeerId, QuicTransport, QuicTransportOptions,
 };
 use crate::routing::TopicPath;
@@ -422,7 +422,7 @@ impl NetworkConfig {
             QuicTransportOptions::new().with_verify_certificates(validate_certificates);
 
         // Generate self-signed certificates if none are provided
-        if quic_options.certificates.is_none() && quic_options.cert_path.is_none() {
+        if quic_options.certificates().is_none() && quic_options.cert_path().is_none() {
             match generate_self_signed_cert() {
                 Ok((cert, key)) => {
                     quic_options = quic_options
@@ -1019,25 +1019,22 @@ impl Node {
                     // Clone the NetworkConfig to avoid reference issues
                     let owned_config = network_config.clone();
 
-                    // Create a new QuicTransport with a placeholder connection callback
-                    // This will be replaced later by the Node's actual connection callback
-                    let logger_clone = self.logger.clone();
-                    // Create a ConnectionCallback directly
-                    let placeholder_callback: ConnectionCallback = Arc::new(move |peer_id: PeerId, is_connected: bool, _node_info: Option<NodeInfo>| -> BoxFuture<'static, Result<()>> {
-                        let logger = logger_clone.clone();
-                        Box::pin(async move {
-                            logger.debug(format!("Placeholder callback: Peer {} is {}", 
-                                peer_id, if is_connected { "connected" } else { "disconnected" }));
-                            Ok(())
-                        })
-                    });
+                    // Get the relevant configuration options for creating the QUIC transport
                     
+                    // Get the bind address from the transport options
+                    let bind_addr: SocketAddr = owned_config.transport_options.bind_address;
+                    
+                    // Get the QUIC options or return an error if not available
+                    let quic_options = network_config.quic_options.clone()
+                        .ok_or_else(|| anyhow!("QUIC options not provided"))?;
+                    
+                    // Create the QUIC transport with the correct parameters
                     let transport = QuicTransport::new(
                         node_id, 
-                        owned_config, 
+                        bind_addr,
+                        quic_options,
                         self.logger.clone(),
-                        placeholder_callback,
-                    );
+                    ).map_err(|e| anyhow!("Failed to create QUIC transport: {}", e))?;
 
                     self.logger.debug("QUIC transport created");
                     Ok(Box::new(transport))
@@ -1101,7 +1098,7 @@ impl Node {
         if let Some(transport) = transport.as_ref() {
             // Store the discovered node using the transport
             if let Ok(_) = transport
-                .connect_node(peer_info.clone(), local_node_info)
+                .connect_peer(peer_info.clone(), local_node_info)
                 .await
             {
                 self.logger
@@ -1782,7 +1779,7 @@ impl Node {
                     let response_handler = {
                         let pending_map = pending_map.clone();
                         let logger = logger.clone();
-                        Box::new(move |response: NetworkMessage| {
+                        Box::new(move |response: NetworkMessage| -> Result<(), NetworkError> {
                             // Clone the required response data before moving it into the tokio::spawn
                             let pending_map = pending_map.clone();
                             let logger = logger.clone();
@@ -1866,12 +1863,13 @@ impl Node {
                                 });
                             }
 
+                            // Convert anyhow errors to NetworkError
                             Ok(())
-                        }) as MessageHandler
+                        }) as Box<dyn Fn(NetworkMessage) -> Result<(), NetworkError> + Send + Sync + 'static>
                     };
 
-                    // Register our handler
-                    if let Err(e) = transport_guard.register_message_handler(response_handler) {
+                    // Register our handler and await the async result
+                    if let Err(e) = transport_guard.register_message_handler(response_handler).await {
                         logger.error(format!("Failed to register message handler: {}", e));
                         return Err(anyhow!("Failed to register message handler: {}", e));
                     }

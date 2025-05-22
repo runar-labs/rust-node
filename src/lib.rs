@@ -99,7 +99,7 @@ pub use routing::TopicPath;
 // Re-export the main types from the network module
 pub use network::{
     DiscoveryOptions, NetworkMessage, NetworkMessageType, NetworkTransport, NodeDiscovery,
-    NodeInfo, PeerId, TransportFactory, TransportOptions,
+    NodeInfo, PeerId, TransportOptions,
 };
 // Re-export peer registry types from transport
 pub use network::transport::{PeerEntry, PeerRegistry, PeerStatus};

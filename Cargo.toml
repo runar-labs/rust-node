@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0"
-async-trait = "0.1"
+async-trait = { workspace = true }
 tokio = { version = "1.28", features = ["full"] }
 uuid = { version = "1.3", features = ["v4"] }
 log = "0.4"
@@ -21,6 +21,7 @@ runar_common = { path = "../rust-common" }
 
 # Network dependencies
 quinn = "0.10.1"
+bytes = "1.4.0"
 socket2 = "0.5.3"
 rustls = { version = "0.21.0", features = ["dangerous_configuration"] }
 rustls-pemfile = "1.0.3"
@@ -28,6 +29,7 @@ rcgen = "0.11.1"
 bincode = "1.3.3"
 futures-util = "0.3.28"
 tokio-tungstenite = { version = "0.18", features = ["rustls-tls-native-roots"] }
+webpki-roots = "0.25.0"  # For system root certificates
 
 # For the example
 tokio-stream = "0.1.14"
