@@ -20,6 +20,10 @@ use crate::fixtures::math_service::MathService;
 /// using the network layer with actual Node instances.
 #[cfg(test)]
 mod remote_action_tests {
+    use runar_node::network::transport::SkipServerVerification;
+
+    use crate::network::quic_transport_test::generate_test_certificates;
+
     use super::*;
 
     /// Test for remote action calls between two nodes
@@ -44,9 +48,19 @@ mod remote_action_tests {
         let math_service2 = MathService::new("math2", "math2");
 
 
+        let (certs_a, key_a) = generate_test_certificates();
+        let options_a = QuicTransportOptions::new()
+            .with_certificates(certs_a)
+            .with_private_key(key_a)
+            .with_verify_certificates(false)
+            .with_certificate_verifier(Arc::new(SkipServerVerification {}))
+            .with_keep_alive_interval(Duration::from_secs(1))
+            .with_connection_idle_timeout(Duration::from_secs(60))
+            .with_stream_idle_timeout(Duration::from_secs(30));
+
         // Create node configurations with network enabled
         let node1_config = NodeConfig::new("node1", "test")
-            .with_network_config(NetworkConfig::with_quic(false)
+            .with_network_config(NetworkConfig::with_quic(options_a)
             .with_multicast_discovery());
 
         logger.info(format!("Node1 config: {}", node1_config));
@@ -57,8 +71,20 @@ mod remote_action_tests {
         node1.start().await?;
         //after node 1 starts and use the port .. next node will use the next available port
 
+
+        let (certs_b, key_b) = generate_test_certificates();
+        let options_b = QuicTransportOptions::new()
+            .with_certificates(certs_b)
+            .with_private_key(key_b)
+            .with_verify_certificates(false)
+            .with_certificate_verifier(Arc::new(SkipServerVerification {}))
+            .with_keep_alive_interval(Duration::from_secs(1))
+            .with_connection_idle_timeout(Duration::from_secs(60))
+            .with_stream_idle_timeout(Duration::from_secs(30));
+
+
         let node2_config = NodeConfig::new("node2", "test")
-            .with_network_config(NetworkConfig::with_quic(false).with_multicast_discovery());
+            .with_network_config(NetworkConfig::with_quic(options_b).with_multicast_discovery());
 
         logger.info(format!("Node2 config: {}", node2_config));
           

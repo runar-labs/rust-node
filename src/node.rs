@@ -416,27 +416,7 @@ impl NetworkConfig {
     /// - Auto port selection
     /// - Localhost binding
     /// - Secure defaults for connection handling
-    pub fn with_quic(validate_certificates: bool) -> Self {
-        // Default QUIC configuration
-        let mut quic_options =
-            QuicTransportOptions::new().with_verify_certificates(validate_certificates);
-
-        // Generate self-signed certificates if none are provided
-        if quic_options.certificates().is_none() && quic_options.cert_path().is_none() {
-            match generate_self_signed_cert() {
-                Ok((cert, key)) => {
-                    quic_options = quic_options
-                        .with_certificates(vec![cert])
-                        .with_private_key(key);
-                }
-                Err(e) => {
-                    // Using static logging since we don't have a logger instance here
-                    log::error!("Failed to generate self-signed certificate: {}", e);
-                    // Continue without certs, will fail later when actually used
-                }
-            }
-        }
-
+    pub fn with_quic(quic_options: QuicTransportOptions) -> Self {
         Self {
             load_balancer: Arc::new(RoundRobinLoadBalancer::new()),
             transport_type: TransportType::Quic,
