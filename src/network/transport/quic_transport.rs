@@ -30,26 +30,6 @@ use tokio::task::JoinHandle;
 // Quinn uses rustls internally but we need to reference specific rustls types
 use rustls;
 
-/// Custom certificate verifier that skips verification for testing
-/// 
-/// INTENTION: Allow connections without certificate verification in test environments
-struct SkipServerVerification {}
-
-impl rustls::client::ServerCertVerifier for SkipServerVerification {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &rustls::Certificate,
-        _intermediates: &[rustls::Certificate],
-        _server_name: &rustls::ServerName,
-        _scts: &mut dyn Iterator<Item = &[u8]>,
-        _ocsp_response: &[u8],
-        _now: std::time::SystemTime,
-    ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
-        // Skip verification and return success
-        Ok(rustls::client::ServerCertVerified::assertion())
-    }
-}
-
 
 use super::{
     ConnectionPool, NetworkError, NetworkMessage, NetworkTransport, PeerId, PeerState
@@ -106,7 +86,7 @@ pub struct QuicTransport {
 // This function is no longer needed as we've integrated its functionality directly into create_quinn_configs
 
 /// QUIC-specific transport options
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct QuicTransportOptions {
     verify_certificates: bool,
     keep_alive_interval: Duration,
@@ -119,8 +99,25 @@ pub struct QuicTransportOptions {
     private_key: Option<rustls::PrivateKey>,
     /// Optional path to certificate file
     cert_path: Option<String>,
+    // Custom certificate verifier for client connections
+    certificate_verifier: Option<Arc<dyn rustls::client::ServerCertVerifier + Send + Sync>>,
 }
 
+impl fmt::Debug for QuicTransportOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("QuicTransportOptions")
+            .field("verify_certificates", &self.verify_certificates)
+            .field("keep_alive_interval", &self.keep_alive_interval)
+            .field("connection_idle_timeout", &self.connection_idle_timeout)
+            .field("stream_idle_timeout", &self.stream_idle_timeout)
+            .field("max_idle_streams_per_peer", &self.max_idle_streams_per_peer)
+            .field("certificates", &self.certificates)
+            .field("private_key", &self.private_key)
+            .field("cert_path", &self.cert_path)
+            .field("certificate_verifier", &"<certificate verifier>")
+            .finish()
+    }
+}
 
 /// Helper function to generate self-signed certificates for testing
 ///
@@ -210,6 +207,24 @@ impl QuicTransportOptions {
         self
     }
     
+    /// Builder: Set a custom certificate verifier for client connections
+    ///
+    /// INTENTION: Allow custom certificate verification logic, primarily for testing
+    /// 
+    /// # Example
+    /// ```rust
+    /// let verifier = Arc::new(CustomVerifier {});
+    /// let opts = QuicTransportOptions::new().with_certificate_verifier(verifier);
+    /// ```
+    pub fn with_certificate_verifier(mut self, verifier: Arc<dyn rustls::client::ServerCertVerifier + Send + Sync>) -> Self {
+        self.certificate_verifier = Some(verifier);
+        self
+    }
+    
+    pub fn certificate_verifier(&self) -> Option<&Arc<dyn rustls::client::ServerCertVerifier + Send + Sync>> {
+        self.certificate_verifier.as_ref()
+    }
+    
     pub fn certificates(&self) -> Option<&Vec<rustls::Certificate>> {
         self.certificates.as_ref()
     }
@@ -234,6 +249,7 @@ impl Default for QuicTransportOptions {
             certificates: None,
             private_key: None,
             cert_path: None,
+            certificate_verifier: None,
         }
     }
 }
@@ -328,8 +344,12 @@ impl QuicTransportImpl {
         // Convert to Arc for sharing between configs
         let transport_config = Arc::new(transport_config);
         
-        // Generate a self-signed certificate for testing
-        let (cert_chain, priv_key) = self.generate_self_signed_cert();
+        // Get certificates from options
+        let (cert_chain, priv_key) = match (self.options.certificates(), self.options.private_key()) {
+            (Some(certs), Some(key)) => (certs.clone(), key.clone()),
+            _ => return Err(NetworkError::ConfigurationError(
+                "Certificates and private key must be provided in QuicTransportOptions".to_string()))
+        };
         
         // Create server config using Quinn's API
         let mut server_crypto = rustls::ServerConfig::builder()
@@ -345,11 +365,44 @@ impl QuicTransportImpl {
         let mut server_config = ServerConfig::with_crypto(Arc::new(server_crypto));
         
         // Create a client crypto configuration
-        let mut client_crypto = rustls::ClientConfig::builder()
-            .with_safe_defaults()
-            .with_custom_certificate_verifier(Arc::new(SkipServerVerification {}))
-            .with_client_auth_cert(cert_chain.clone(), priv_key.clone())
-            .map_err(|e| NetworkError::ConfigurationError(format!("Failed to create client crypto config: {}", e)))?;
+        let client_crypto_builder = rustls::ClientConfig::builder()
+            .with_safe_defaults();
+            
+        // Use custom certificate verifier if provided, otherwise use default verification
+        let client_crypto = if let Some(verifier) = self.options.certificate_verifier() {
+            client_crypto_builder
+                .with_custom_certificate_verifier(verifier.clone())
+                .with_client_auth_cert(cert_chain.clone(), priv_key.clone())
+        } else if !self.options.verify_certificates {
+            // If verification is disabled but no custom verifier is provided,
+            // we need to create a simple verifier that accepts all certificates
+            // This is only for testing and should not be used in production
+            let mut root_store = rustls::RootCertStore::empty();
+            // Add our self-signed cert to the root store
+            for cert in cert_chain.iter() {
+                root_store.add(cert).map_err(|e| NetworkError::ConfigurationError(
+                    format!("Failed to add certificate to root store: {}", e)))?
+            }
+            
+            // With no-verify mode, we still need to provide certificates but we'll accept any
+            client_crypto_builder
+                .with_root_certificates(root_store)
+                .with_client_auth_cert(cert_chain.clone(), priv_key.clone())
+        } else {
+            // Use default verification with provided certificates
+            let mut root_store = rustls::RootCertStore::empty();
+            for cert in cert_chain.iter() {
+                root_store.add(cert).map_err(|e| NetworkError::ConfigurationError(
+                    format!("Failed to add certificate to root store: {}", e)))?
+            }
+            
+            client_crypto_builder
+                .with_root_certificates(root_store)
+                .with_client_auth_cert(cert_chain.clone(), priv_key.clone())
+        }
+        .map_err(|e| NetworkError::ConfigurationError(format!("Failed to create client crypto config: {}", e)))?;
+        
+        let mut client_crypto = client_crypto;
         
         // Set ALPN protocols for the client
         client_crypto.alpn_protocols = vec![b"quic-transport".to_vec()];
@@ -366,53 +419,9 @@ impl QuicTransportImpl {
     
 
     
-    /// Generate a self-signed certificate for testing
-    ///
-    /// INTENTION: Create a certificate for secure connections in test environments
-    fn generate_self_signed_cert(self: &Arc<Self>) -> (Vec<rustls::Certificate>, rustls::PrivateKey) {
-        // Create certificate parameters with sensible defaults
-        let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()]);
-        
-        // Set the certificate to be valid for a reasonable time (for testing)
-        params.not_before = rcgen::date_time_ymd(2020, 1, 1);
-        params.not_after = rcgen::date_time_ymd(2030, 1, 1);
-        
-        // Generate the certificate with our parameters
-        let cert = rcgen::Certificate::from_params(params)
-            .expect("Failed to generate certificate");
-            
-        // Get the DER encoded certificate and private key
-        let cert_der = cert.serialize_der().expect("Failed to serialize certificate");
-        let key_der = cert.serialize_private_key_der();
-        
-        // Convert to rustls types with explicit namespace qualification
-        let rustls_cert = rustls::Certificate(cert_der);
-        let rustls_key = rustls::PrivateKey(key_der);
-        
-        (vec![rustls_cert], rustls_key)
-    }
+    // Certificate generation has been moved to the test file
     
-    /// Create test certificates for use in test environments
-    ///
-    /// INTENTION: Generate a self-signed certificate for testing purposes
-    #[cfg(test)]
-    fn create_test_certificates(self: &Arc<Self>) -> Result<(Vec<rustls::Certificate>, rustls::PrivateKey), NetworkError> {
-        // Use rcgen to generate a self-signed certificate
-        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
-            .map_err(|e| NetworkError::ConfigurationError(format!("Failed to generate certificate: {}", e)))?;
-        
-        // Serialize the certificate to DER format
-        let cert_der = cert.serialize_der()
-            .map_err(|e| NetworkError::ConfigurationError(format!("Failed to serialize certificate: {}", e)))?;
-        let key_der = cert.serialize_private_key_der();
-        
-        // Convert to rustls types with explicit namespace
-        let rustls_cert = rustls::Certificate(cert_der);
-        let rustls_key = rustls::PrivateKey(key_der);
-        
-        // Return a vector of certificates as required by rustls API
-        Ok((vec![rustls_cert], rustls_key))
-    }
+    // Test certificate generation has been moved to the test file
     
     // The server-side TLS configuration is now handled in create_quinn_configs
     

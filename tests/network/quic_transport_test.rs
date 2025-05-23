@@ -1,7 +1,8 @@
 use std::sync::Arc;
 use std::net::SocketAddr;
 use std::time::Duration;
-
+use std::time::SystemTime;
+use std::error::Error;
 use tokio::sync::mpsc;
 use rcgen;
 use rustls;
@@ -15,6 +16,26 @@ use runar_node::network::transport::{
 };
 use runar_node::network::discovery::multicast_discovery::PeerInfo;
 use runar_node::network::discovery::NodeInfo;
+
+/// Custom certificate verifier that skips verification for testing
+/// 
+/// INTENTION: Allow connections without certificate verification in test environments
+struct SkipServerVerification {}
+
+impl rustls::client::ServerCertVerifier for SkipServerVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::Certificate,
+        _intermediates: &[rustls::Certificate],
+        _server_name: &rustls::ServerName,
+        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _ocsp_response: &[u8],
+        _now: SystemTime,
+    ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
+        // Skip verification and return success
+        Ok(rustls::client::ServerCertVerified::assertion())
+    }
+}
 
 /// Helper function to generate self-signed certificates for testing
 /// 
@@ -66,6 +87,8 @@ impl TestLogger {
     }
 }
 
+
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_quic_transport_connection_end_to_end() {
     // Create two transport instances for testing
@@ -107,28 +130,33 @@ async fn test_quic_transport_connection_end_to_end() {
     logger_a.info(&format!("Setting up test with Node A (ID: {}, Address: {})", node_a_id, node_a_addr));
     logger_b.info(&format!("Setting up test with Node B (ID: {}, Address: {})", node_b_id, node_b_addr));
     
-    // Create options for both transports with more permissive timeouts using the builder pattern
-    let options_a = QuicTransportOptions::new()
-        .with_verify_certificates(false)
-        .with_max_idle_streams_per_peer(10)
-        .with_keep_alive_interval(Duration::from_secs(1))  // More frequent keep-alive
-        .with_connection_idle_timeout(Duration::from_secs(60))  // Longer timeout
-        .with_stream_idle_timeout(Duration::from_secs(30));
-    
-    let options_b = QuicTransportOptions::new()
-        .with_verify_certificates(false)
-        .with_max_idle_streams_per_peer(10)
-        .with_keep_alive_interval(Duration::from_secs(1))  // More frequent keep-alive
-        .with_connection_idle_timeout(Duration::from_secs(60))  // Longer timeout
-        .with_stream_idle_timeout(Duration::from_secs(30));
-    
     // Create the transport instances with proper Logger type
     // Get a runar_common::Logger for each transport
     let common_logger_a = CommonLogger::new_root(Component::Network, "node-a");
     let common_logger_b = CommonLogger::new_root(Component::Network, "node-b");
     
+    // Create options for both transports with test certificates and verification disabled
+    let (certs_a, key_a) = generate_test_certificates();
+    let options_a = QuicTransportOptions::new()
+        .with_certificates(certs_a)
+        .with_private_key(key_a)
+        .with_verify_certificates(false)
+        .with_certificate_verifier(Arc::new(SkipServerVerification {}))
+        .with_keep_alive_interval(Duration::from_secs(1))
+        .with_connection_idle_timeout(Duration::from_secs(60))
+        .with_stream_idle_timeout(Duration::from_secs(30));
+    
+    let (certs_b, key_b) = generate_test_certificates();
+    let options_b = QuicTransportOptions::new()
+        .with_certificates(certs_b)
+        .with_private_key(key_b)
+        .with_verify_certificates(false)
+        .with_certificate_verifier(Arc::new(SkipServerVerification {}))
+        .with_keep_alive_interval(Duration::from_secs(1))
+        .with_connection_idle_timeout(Duration::from_secs(60))
+        .with_stream_idle_timeout(Duration::from_secs(30));
+    
     // Create the transport instances
-    // Use QuicTransport instead of QuicTransportImpl directly
     let transport_a = Arc::new(QuicTransport::new(
         node_a_id.clone(),
         node_a_addr,
