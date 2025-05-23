@@ -30,7 +30,7 @@ pub struct PeerState {
     pub stream_pool: StreamPool,
     pub connection: Mutex<Option<quinn::Connection>>,
     pub last_activity: Mutex<std::time::Instant>,
-    pub logger: Logger,
+    pub logger: Arc<Logger>,
     pub status_tx: mpsc::Sender<bool>,
     pub status_rx: Mutex<mpsc::Receiver<bool>>,
     /// Optional node information received during handshake
@@ -41,7 +41,7 @@ impl PeerState {
     /// Create a new PeerState with the specified peer ID and address
     ///
     /// INTENTION: Initialize a new peer state with the given parameters.
-    pub fn new(peer_id: PeerId, address: String, max_idle_streams: usize, logger: Logger) -> Self {
+    pub fn new(peer_id: PeerId, address: String, max_idle_streams: usize, logger: Arc<Logger>) -> Self {
         let (status_tx, status_rx) = mpsc::channel(10);
         Self {
             peer_id,

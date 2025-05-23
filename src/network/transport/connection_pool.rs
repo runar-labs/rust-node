@@ -41,7 +41,7 @@ impl ConnectionPool {
         peer_id: PeerId,
         address: String,
         max_idle_streams: usize,
-        logger: Logger
+        logger: Arc<Logger>
     ) -> Arc<PeerState> {
         if let Some(existing) = self.peers.get(&peer_id) {
             existing.clone()

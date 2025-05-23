@@ -55,7 +55,7 @@ struct QuicTransportImpl {
     endpoint: Mutex<Option<Endpoint>>,
     connection_pool: Arc<ConnectionPool>,
     options: QuicTransportOptions,
-    logger: Logger,
+    logger: Arc<Logger>,
     message_handlers: Arc<StdRwLock<Vec<Box<dyn Fn(NetworkMessage) -> Result<(), NetworkError> + Send + Sync + 'static>>>>,
 }
 
@@ -293,7 +293,7 @@ impl QuicTransportImpl {
             endpoint: Mutex::new(None),
             connection_pool,
             options,
-            logger,
+            logger:Arc::new(logger),
             message_handlers: Arc::new(StdRwLock::new(Vec::new())),
         })
     }
@@ -845,13 +845,13 @@ impl QuicTransportImpl {
         
         // Special handling for handshake messages
         if message.message_type == "NODE_INFO_HANDSHAKE" {
-            self.logger.info(&format!("Received handshake message from {}", message.source));
+            self.logger.debug(&format!("Received handshake message from {}", message.source));
             
             // Extract the node info from the message
             if let Some(payload) = message.payloads.first() {
                 match bincode::deserialize::<NodeInfo>(&payload.value_bytes) {
                     Ok(peer_node_info) => {
-                        self.logger.info(&format!("Received node info from {}: {:?}", message.source, peer_node_info));
+                        self.logger.debug(&format!("Received node info from {}: {:?}", message.source, peer_node_info));
                         
                         // Store the node info in the peer state
                         if let Some(peer_state) = self.connection_pool.get_peer(&message.source) {
@@ -883,7 +883,7 @@ impl QuicTransportImpl {
                             
                             // Send the response
                             self.send_message(response, &Arc::new(AtomicBool::new(true))).await?;
-                            self.logger.info(&format!("Sent handshake response to {}", message.source));
+                            self.logger.debug(&format!("Sent handshake response to {}", message.source));
                         }
                     },
                     Err(e) => {
@@ -892,6 +892,8 @@ impl QuicTransportImpl {
                 }
             }
             return Ok(());
+        } else {
+            self.logger.debug(&format!("Received message from {} with type: {}", message.source, message.message_type)); 
         }
         
         // Get a read lock on the handlers

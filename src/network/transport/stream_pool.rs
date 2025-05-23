@@ -2,6 +2,8 @@
 //!
 //! INTENTION: Handles stream reuse, lifecycle, and timeouts for QUIC transport.
 
+use std::sync::Arc;
+
 use tokio::sync::RwLock;
 use runar_common::logging::Logger;
 use crate::network::transport::NetworkError;
@@ -17,14 +19,14 @@ use crate::network::transport::NetworkError;
 pub struct StreamPool {
     pub idle_streams: RwLock<Vec<quinn::SendStream>>,
     pub max_idle_streams: usize,
-    pub logger: Logger,
+    pub logger: Arc<Logger>,
 }
 
 impl StreamPool {
     /// Create a new StreamPool with the specified maximum idle streams
     ///
     /// INTENTION: Initialize a stream pool with a capacity for idle streams reuse.
-    pub fn new(max_idle_streams: usize, logger: Logger) -> Self {
+    pub fn new(max_idle_streams: usize, logger: Arc<Logger>) -> Self {
         Self {
             idle_streams: RwLock::new(Vec::with_capacity(max_idle_streams)),
             max_idle_streams,
