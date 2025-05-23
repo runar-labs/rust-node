@@ -57,37 +57,19 @@ use super::{
 // Import PeerInfo and NodeInfo consistently with the module structure
 use crate::network::discovery::multicast_discovery::PeerInfo;
 use crate::network::discovery::NodeInfo;
- 
-/// For backward compatibility with existing code
-struct PeerConnection {
-    peer_id: PeerId,
-    address: String,
-}
-
-impl PeerConnection {
-    fn new(peer_id: PeerId, address: String) -> Self {
-        Self { peer_id, address }
-    }
-}
-
-impl fmt::Debug for PeerConnection {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PeerConnection")
-            .field("peer_id", &self.peer_id)
-            .field("address", &self.address)
-            .finish()
-    }
-}
-
+  
 /// QuicTransportImpl - Core implementation of QUIC transport
 ///
 /// INTENTION: This component is the core implementation of the QUIC transport,
-/// managing connections and stream handling. It contains all the functional logic.
+/// managing connections and stream handling. It contains all the protocol-specific logic.
 ///
 /// ARCHITECTURAL BOUNDARIES:
-/// - Only accessed by QuicTransport (public API wrapper)
-/// - Manages ConnectionPool instance
-/// - Handles core transport functionality
+/// - Only accessed by QuicTransport (public API wrapper) through Arc
+/// - Never cloned directly, only the Arc is cloned
+/// - Manages ConnectionPool instance and peer states
+/// - Handles protocol-specific logic and connection management
+/// - Does not manage threads, tasks, or public API surface
+/// - Returns task handles to QuicTransport for lifecycle management
 struct QuicTransportImpl {
     node_id: PeerId,
     bind_addr: SocketAddr,
@@ -96,10 +78,7 @@ struct QuicTransportImpl {
     connection_pool: Arc<ConnectionPool>,
     options: QuicTransportOptions,
     logger: Logger,
-    running: Arc<AtomicBool>,
     message_handlers: Arc<StdRwLock<Vec<Box<dyn Fn(NetworkMessage) -> Result<(), NetworkError> + Send + Sync + 'static>>>>,
-    // Background tasks for connection handling and message processing
-    background_tasks: Mutex<Vec<JoinHandle<()>>>,
 }
 
 /// Main QUIC transport implementation - Public API
@@ -109,14 +88,19 @@ struct QuicTransportImpl {
 ///
 /// ARCHITECTURAL BOUNDARIES:
 /// - Exposes NetworkTransport trait to external callers
-/// - Delegates all functionality to QuicTransportImpl
+/// - Delegates protocol functionality to QuicTransportImpl
 /// - Manages the lifecycle of the implementation
+/// - Responsible for thread/task management
 pub struct QuicTransport {
     // Internal implementation containing the actual logic
     inner: Arc<QuicTransportImpl>,
     // Keep logger and node_id at this level for compatibility
     logger: Logger,
     node_id: PeerId,
+    // Background tasks for connection handling and message processing
+    background_tasks: Mutex<Vec<JoinHandle<()>>>,
+    // Track if the transport is running
+    running: Arc<AtomicBool>,
 }
 
 // This function is no longer needed as we've integrated its functionality directly into create_quinn_configs
@@ -263,7 +247,6 @@ impl fmt::Debug for QuicTransportImpl {
             .field("bind_addr", &self.bind_addr)
             .field("endpoint", &"<mutex>") // Can't access Mutex contents in fmt
             .field("options", &self.options)
-            .field("running", &self.running.load(Ordering::Relaxed))
             .finish()
     }
 }
@@ -297,16 +280,14 @@ impl QuicTransportImpl {
             connection_pool,
             options,
             logger,
-            running: Arc::new(AtomicBool::new(false)),
             message_handlers: Arc::new(StdRwLock::new(Vec::new())),
-            background_tasks: Mutex::new(Vec::new()),
         })
     }
     
     /// Configure and create a QUIC endpoint
     ///
     /// INTENTION: Set up the QUIC endpoint with appropriate TLS and transport settings.
-    async fn configure_endpoint(&self) -> Result<Endpoint, NetworkError> {
+    async fn configure_endpoint(self: &Arc<Self>) -> Result<Endpoint, NetworkError> {
         // Configure TLS for the endpoint
         let (server_config, client_config) = self.create_quinn_configs()?;
         
@@ -324,7 +305,7 @@ impl QuicTransportImpl {
     /// Create QUIC server and client configurations
     ///
     /// INTENTION: Set up the TLS and transport configurations for QUIC connections.
-    fn create_quinn_configs(&self) -> Result<(ServerConfig, ClientConfig), NetworkError> {
+    fn create_quinn_configs(self: &Arc<Self>) -> Result<(ServerConfig, ClientConfig), NetworkError> {
         // INTENTION: Create a transport config with desired parameters from our options
         let mut transport_config = TransportConfig::default();
         
@@ -388,7 +369,7 @@ impl QuicTransportImpl {
     /// Generate a self-signed certificate for testing
     ///
     /// INTENTION: Create a certificate for secure connections in test environments
-    fn generate_self_signed_cert(&self) -> (Vec<rustls::Certificate>, rustls::PrivateKey) {
+    fn generate_self_signed_cert(self: &Arc<Self>) -> (Vec<rustls::Certificate>, rustls::PrivateKey) {
         // Create certificate parameters with sensible defaults
         let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()]);
         
@@ -415,7 +396,7 @@ impl QuicTransportImpl {
     ///
     /// INTENTION: Generate a self-signed certificate for testing purposes
     #[cfg(test)]
-    fn create_test_certificates(&self) -> Result<(Vec<rustls::Certificate>, rustls::PrivateKey), NetworkError> {
+    fn create_test_certificates(self: &Arc<Self>) -> Result<(Vec<rustls::Certificate>, rustls::PrivateKey), NetworkError> {
         // Use rcgen to generate a self-signed certificate
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
             .map_err(|e| NetworkError::ConfigurationError(format!("Failed to generate certificate: {}", e)))?;
@@ -442,8 +423,8 @@ impl QuicTransportImpl {
     /// Start the QUIC transport
     ///
     /// INTENTION: Initialize the endpoint and start accepting connections.
-    async fn start(&self) -> Result<(), NetworkError> {
-        if self.running.load(Ordering::Relaxed) {
+    async fn start(self: &Arc<Self>, running: &Arc<AtomicBool>, background_tasks: &Mutex<Vec<JoinHandle<()>>>) -> Result<(), NetworkError> {
+        if running.load(Ordering::Relaxed) {
             return Ok(());
         }
         
@@ -466,21 +447,21 @@ impl QuicTransportImpl {
         self.logger.info(&format!("Endpoint created successfully with server and client configs"));
         
         // Store the endpoint in our state using proper interior mutability pattern
-        // INTENTION: Replace unsafe pointer casting with a safe alternative
         let mut endpoint_guard = self.endpoint.lock().await;
         *endpoint_guard = Some(endpoint.clone());
         
         // Spawn a task to accept incoming connections
-        let self_clone = Arc::new(self.clone());
+        let inner_arc = self.clone();
+        let running_clone = running.clone();
         let task = tokio::spawn(async move {
-            self_clone.accept_connections(endpoint).await;
+            inner_arc.accept_connections(endpoint, running_clone).await;
         });
         
         // Store the task handle
-        let mut tasks = self.background_tasks.lock().await;
+        let mut tasks = background_tasks.lock().await;
         tasks.push(task);
         
-        self.running.store(true, Ordering::Relaxed);
+        running.store(true, Ordering::Relaxed);
         self.logger.info("QUIC transport started successfully");
         Ok(())
     }
@@ -488,18 +469,23 @@ impl QuicTransportImpl {
     /// Accept incoming connections
     ///
     /// INTENTION: Listen for and handle incoming QUIC connections.
-    async fn accept_connections(&self, endpoint: Endpoint) {
+    async fn accept_connections(self: &Arc<Self>, endpoint: Endpoint, running: Arc<AtomicBool>) {
         self.logger.info("Accepting incoming connections");
         
-        while self.running.load(Ordering::Relaxed) {
+        while running.load(Ordering::Relaxed) {
             match endpoint.accept().await {
                 Some(connecting) => {
-                    let self_clone = self.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = self_clone.handle_new_connection(connecting).await {
-                            self_clone.logger.error(&format!("Error handling connection: {}", e));
+                    // Process the connection in a separate task
+                    let inner_arc = self.clone();
+                    let logger = self.logger.clone();
+                    let _ = tokio::spawn(async move {
+                        match inner_arc.handle_new_connection(connecting).await {
+                            Ok(_) => {}, // Task handle is returned but not stored here
+                            Err(e) => logger.error(&format!("Error handling connection: {}", e)),
                         }
                     });
+                    // Note: We're not storing these task handles since they're short-lived
+                    // and will complete when the connection is established
                 },
                 None => {
                     // Endpoint is closed
@@ -513,12 +499,12 @@ impl QuicTransportImpl {
     /// Stop the QUIC transport
     ///
     /// INTENTION: Gracefully shut down the transport and clean up resources.
-    async fn stop(&self) -> Result<(), NetworkError> {
-        if !self.running.load(Ordering::Relaxed) {
+    async fn stop(self: &Arc<Self>, running: &Arc<AtomicBool>, background_tasks: &Mutex<Vec<JoinHandle<()>>>) -> Result<(), NetworkError> {
+        if !running.load(Ordering::Relaxed) {
             return Ok(());
         }
         
-        self.running.store(false, Ordering::Relaxed);
+        running.store(false, Ordering::Relaxed);
         
         // Close the endpoint - using proper Mutex access pattern
         let endpoint_guard = self.endpoint.lock().await;
@@ -527,7 +513,7 @@ impl QuicTransportImpl {
         }
         
         // Wait for background tasks to complete
-        let mut tasks = self.background_tasks.lock().await;
+        let mut tasks = background_tasks.lock().await;
         for task in tasks.drain(..) {
             // We don't care about the result, just wait for it to finish
             let _ = task.await;
@@ -540,8 +526,8 @@ impl QuicTransportImpl {
     /// Disconnect from a peer
     ///
     /// INTENTION: Properly clean up resources when disconnecting from a peer.
-    async fn disconnect(&self, peer_id: PeerId) -> Result<(), NetworkError> {
-        if !self.running.load(Ordering::Relaxed) {
+    async fn disconnect(self: &Arc<Self>, peer_id: PeerId, running: &Arc<AtomicBool>) -> Result<(), NetworkError> {
+        if !running.load(Ordering::Relaxed) {
             return Err(NetworkError::TransportError("Transport not running".to_string()));
         }
         
@@ -552,7 +538,7 @@ impl QuicTransportImpl {
     /// Check if connected to a specific peer
     ///
     /// INTENTION: Determine if there's an active connection to the specified peer.
-    fn is_connected(&self, peer_id: PeerId) -> bool {
+    fn is_connected(self: &Arc<Self>, peer_id: PeerId) -> bool {
         // We need to use block_in_place because this is a sync function
         // but we need to perform async operations
         tokio::task::block_in_place(move || {
@@ -565,8 +551,8 @@ impl QuicTransportImpl {
     /// Send a message to a peer
     ///
     /// INTENTION: Serialize and send a message to a specified peer.
-    async fn send_message(&self, message: NetworkMessage) -> Result<(), NetworkError> {
-        if !self.running.load(Ordering::Relaxed) {
+    async fn send_message(self: &Arc<Self>, message: NetworkMessage, running: &Arc<AtomicBool>) -> Result<(), NetworkError> {
+        if !running.load(Ordering::Relaxed) {
             return Err(NetworkError::TransportError("Transport not running".to_string()));
         }
         
@@ -611,11 +597,12 @@ impl QuicTransportImpl {
     ///
     /// INTENTION: Establish a connection with a peer discovered via the discovery mechanism.
     async fn connect_peer(
-        &self,
+        self: &Arc<Self>,
         discovery_msg: PeerInfo,
         _local_node: NodeInfo, // Mark as unused with underscore prefix
-    ) -> Result<(), NetworkError> {
-        if !self.running.load(Ordering::Relaxed) {
+        running: &Arc<AtomicBool>,
+    ) -> Result<JoinHandle<()>, NetworkError> {
+        if !running.load(Ordering::Relaxed) {
             return Err(NetworkError::TransportError("Transport not running".to_string()));
         }
         
@@ -629,7 +616,8 @@ impl QuicTransportImpl {
         // Check if we're already connected to this peer
         if self.connection_pool.is_peer_connected(&peer_id).await {
             self.logger.debug(&format!("Already connected to peer {}", peer_id));
-            return Ok(());
+            // Create a dummy task that does nothing since we're already connected
+            return Ok(tokio::spawn(async {}));
         }
         
         // Get the peer's address from the discovery message
@@ -682,14 +670,14 @@ impl QuicTransportImpl {
                         // Set the connection in the peer state
                         peer_state.set_connection(connection).await;
                         
-                        // Start a task to receive incoming messages
-                        self.spawn_message_receiver(peer_id.clone(), peer_state.clone());
+                        // Start a task to receive incoming messages and return the task handle
+                        let task = self.spawn_message_receiver(peer_id.clone(), peer_state.clone());
                         
                         // Verify the connection is properly registered
                         let is_connected = self.connection_pool.is_peer_connected(&peer_id).await;
                         self.logger.info(&format!("Connection verification for {}: {}", peer_id, is_connected));
                         
-                        Ok(())
+                        Ok(task)
                     },
                     Err(e) => {
                         self.logger.error(&format!("Failed to connect to peer {}: {}", peer_id, e));
@@ -701,13 +689,13 @@ impl QuicTransportImpl {
         }
     }
     
-    fn get_local_address(&self) -> String {
+    fn get_local_address(self: &Arc<Self>) -> String {
         self.bind_addr.to_string()
     }
     
     
     async fn register_message_handler(
-        &self,
+        self: &Arc<Self>,
         handler: Box<dyn Fn(NetworkMessage) -> Result<(), NetworkError> + Send + Sync + 'static>,
     ) -> Result<(), NetworkError> {
         // Get a write lock and push the handler
@@ -723,7 +711,7 @@ impl QuicTransportImpl {
     /// Process an incoming message
     ///
     /// INTENTION: Route an incoming message to registered handlers.
-    async fn process_incoming_message(&self, message: NetworkMessage) -> Result<(), NetworkError> {
+    async fn process_incoming_message(self: &Arc<Self>, message: NetworkMessage) -> Result<(), NetworkError> {
         self.logger.debug(&format!("Processing message from {}", message.source));
         
         // Get a read lock on the handlers
@@ -745,9 +733,9 @@ impl QuicTransportImpl {
     ///
     /// INTENTION: Process an incoming connection request and set up the connection state.
     async fn handle_new_connection(
-        &self,
+        self: &Arc<Self>,
         conn: quinn::Connecting,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<JoinHandle<()>, Box<dyn std::error::Error + Send + Sync>> {
         self.logger.debug("Handling new incoming connection");
         
         // Wait for the connection to be established
@@ -776,17 +764,21 @@ impl QuicTransportImpl {
             *conn_guard = Some(connection);
         }
 
-        // Spawn a task to receive incoming messages
-        self.spawn_message_receiver(peer_id.clone(), peer_state.clone());
-
-        Ok(())
+        // Spawn a task to receive incoming messages and return the task handle
+        let task = self.spawn_message_receiver(peer_id.clone(), peer_state.clone());
+        
+        // Return the task handle so the caller can store it in background_tasks
+        Ok(task)
     }
 
 
-fn spawn_message_receiver(&self, peer_id: PeerId, peer_state: Arc<PeerState>) {
-    let self_clone = self.clone();
+fn spawn_message_receiver(self: &Arc<Self>, peer_id: PeerId, peer_state: Arc<PeerState>) -> JoinHandle<()> {
+    // Clone the Arc<Self> to move into the task
+    let inner_arc = self.clone();
+    let peer_id_clone = peer_id.clone();
+    let logger = self.logger.clone();
 
-    let task = tokio::spawn(async move {
+    tokio::spawn(async move {
         loop {
             // Get the connection from the peer state
             let connection = {
@@ -799,18 +791,18 @@ fn spawn_message_receiver(&self, peer_id: PeerId, peer_state: Arc<PeerState>) {
                 match connection.accept_uni().await {
                     Ok(stream) => {
                         // Process the incoming message
-                        if let Err(e) = self_clone.receive_message(peer_id.clone(), stream).await {
-                            self_clone.logger.error(&format!("Error receiving message from {}: {}", peer_id, e));
+                        if let Err(e) = inner_arc.receive_message(peer_id_clone.clone(), stream).await {
+                            logger.error(&format!("Error receiving message from {}: {}", peer_id_clone, e));
                         }
                     },
                     Err(quinn::ConnectionError::ApplicationClosed { .. }) => {
                         // Connection closed by the peer, exit the loop
-                        self_clone.logger.info(&format!("Connection closed by peer {}", peer_id));
+                        logger.info(&format!("Connection closed by peer {}", peer_id_clone));
                         break;
                     },
                     Err(e) => {
                         // Other connection error
-                        self_clone.logger.error(&format!("Connection error from {}: {}", peer_id, e));
+                        logger.error(&format!("Connection error from {}: {}", peer_id_clone, e));
                         break;
                     }
                 }
@@ -819,13 +811,12 @@ fn spawn_message_receiver(&self, peer_id: PeerId, peer_state: Arc<PeerState>) {
                 break;
             }
         }
-    }) ; // <-- Close the async block and tokio::spawn call
-    // Optionally, you may want to store the JoinHandle if tracking tasks
+    })
 }
 
     /// Receive a message from a peer over a QUIC stream
     /// INTENTION: Read, deserialize, and dispatch the message to registered handlers.
-    async fn receive_message(&self, peer_id: PeerId, mut stream: quinn::RecvStream) -> Result<(), NetworkError> {
+    async fn receive_message(self: &Arc<Self>, peer_id: PeerId, mut stream: quinn::RecvStream) -> Result<(), NetworkError> {
         use tokio::io::AsyncReadExt;
         
         // Read the 4-byte length prefix
@@ -856,37 +847,22 @@ fn spawn_message_receiver(&self, peer_id: PeerId, peer_state: Arc<PeerState>) {
         Ok(())
     }
 
-    /// Clone implementation for QuicTransportImpl
-    ///
-    /// INTENTION: Allow cloning of QuicTransportImpl for use in async tasks.
-    fn clone(&self) -> Self {
-        Self {
-            node_id: self.node_id.clone(),
-            bind_addr: self.bind_addr,
-            // Clone the Mutex itself, not its contents
-            endpoint: Mutex::new(None), // Initialize as None, will be set if needed
-            connection_pool: self.connection_pool.clone(),
-            options: self.options.clone(),
-            logger: self.logger.clone(),
-            running: self.running.clone(),
-            message_handlers: self.message_handlers.clone(),
-            background_tasks: Mutex::new(Vec::new()),
-        }
-    }
+    // Clone implementation removed as per architectural refactoring
+    // QuicTransportImpl should not be cloned directly, only accessed through Arc
 }
 
 #[async_trait]
 impl NetworkTransport for QuicTransport {
     async fn start(&self) -> Result<(), NetworkError> {
-        self.inner.start().await
+        self.inner.start(&self.running, &self.background_tasks).await
     }
     
     async fn stop(&self) -> Result<(), NetworkError> {
-        self.inner.stop().await
+        self.inner.stop(&self.running, &self.background_tasks).await
     }
     
     async fn disconnect(&self, peer_id: PeerId) -> Result<(), NetworkError> {
-        self.inner.disconnect(peer_id).await
+        self.inner.disconnect(peer_id, &self.running).await
     }
     
     fn is_connected(&self, peer_id: PeerId) -> bool {
@@ -894,15 +870,24 @@ impl NetworkTransport for QuicTransport {
     }
     
     async fn send_message(&self, message: NetworkMessage) -> Result<(), NetworkError> {
-        self.inner.send_message(message).await
+        self.inner.send_message(message, &self.running).await
     }
     
     async fn connect_peer(
         &self,
         discovery_msg: PeerInfo,
-        _local_node: NodeInfo, // Mark as unused with underscore prefix
+        local_node: NodeInfo,
     ) -> Result<(), NetworkError> {
-        self.inner.connect_peer(discovery_msg, _local_node).await
+        // Call the inner implementation which returns a task handle
+        match self.inner.connect_peer(discovery_msg, local_node, &self.running).await {
+            Ok(task) => {
+                // Store the task handle for proper lifecycle management
+                let mut tasks = self.background_tasks.lock().await;
+                tasks.push(task);
+                Ok(())
+            },
+            Err(e) => Err(e),
+        }
     }
     
     fn get_local_address(&self) -> String {
@@ -922,6 +907,10 @@ impl QuicTransport {
     ///
     /// INTENTION: Create a new QuicTransport with the given node ID, bind address,
     /// options, and logger. This is the primary constructor for QuicTransport.
+    /// 
+    /// This implementation follows the architectural design where QuicTransport is responsible
+    /// for thread/task management and lifecycle, while delegating protocol-specific logic to
+    /// the QuicTransportImpl which is held in an Arc.
     pub fn new(
         node_id: PeerId,
         bind_addr: SocketAddr,
@@ -931,11 +920,13 @@ impl QuicTransport {
         // Create the inner implementation
         let inner = QuicTransportImpl::new(node_id.clone(), bind_addr, options, logger.clone())?;
         
-        // Create and return the public API wrapper
+        // Create and return the public API wrapper with proper task management
         Ok(Self {
             inner: Arc::new(inner),
             logger,
             node_id,
+            background_tasks: Mutex::new(Vec::new()),
+            running: Arc::new(AtomicBool::new(false)),
         })
     }
 }
