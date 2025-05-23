@@ -85,7 +85,7 @@ async fn test_quic_transport_connection_end_to_end() {
     // Create node info for both nodes
     let node_a_info = NodeInfo {
         peer_id: node_a_id.clone(),
-        network_ids: vec!["test-network".to_string()],
+        network_ids: vec!["default".to_string()],  // Use "default" to match what QuicTransport uses internally
         addresses: vec![node_a_addr.to_string()],
         capabilities: capabilities.clone(),
         last_seen: std::time::SystemTime::now(),
@@ -93,7 +93,7 @@ async fn test_quic_transport_connection_end_to_end() {
     
     let node_b_info = NodeInfo {
         peer_id: node_b_id.clone(),
-        network_ids: vec!["test-network".to_string()],
+        network_ids: vec!["default".to_string()],  // Use "default" to match what QuicTransport uses internally
         addresses: vec![node_b_addr.to_string()],
         capabilities: capabilities.clone(),
         last_seen: std::time::SystemTime::now(),
@@ -193,9 +193,14 @@ async fn test_quic_transport_connection_end_to_end() {
             let peer_b_info_clone = peer_b_info.clone();
             let node_a_info_clone = node_a_info.clone();
             match transport_a.connect_peer(peer_b_info_clone, node_a_info_clone).await {
-                Ok(_) => {
+                Ok(peer_node_info) => {
                     a_to_b_connected = true;
                     println!("Successfully connected A to B");
+                    
+                    // Validate the returned peer node info
+                    assert_eq!(peer_node_info.peer_id, node_b_id, "Peer ID in returned NodeInfo doesn't match expected node B ID");
+                    assert_eq!(peer_node_info.network_ids, node_b_info.network_ids, "Network IDs in returned NodeInfo don't match");
+                    assert!(!peer_node_info.addresses.is_empty(), "Addresses in returned NodeInfo should not be empty");
                 },
                 Err(e) => println!("Failed to connect A to B: {}", e),
             }
@@ -208,9 +213,14 @@ async fn test_quic_transport_connection_end_to_end() {
             let peer_a_info_clone = peer_a_info.clone();
             let node_b_info_clone = node_b_info.clone();
             match transport_b.connect_peer(peer_a_info_clone, node_b_info_clone).await {
-                Ok(_) => {
+                Ok(peer_node_info) => {
                     b_to_a_connected = true;
                     println!("Successfully connected B to A");
+                    
+                    // Validate the returned peer node info
+                    assert_eq!(peer_node_info.peer_id, node_a_id, "Peer ID in returned NodeInfo doesn't match expected node A ID");
+                    assert_eq!(peer_node_info.network_ids, node_a_info.network_ids, "Network IDs in returned NodeInfo don't match");
+                    assert!(!peer_node_info.addresses.is_empty(), "Addresses in returned NodeInfo should not be empty");
                 },
                 Err(e) => println!("Failed to connect B to A: {}", e),
             }
