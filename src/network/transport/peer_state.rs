@@ -8,6 +8,7 @@ use tokio::sync::{Mutex, mpsc};
 use tokio::sync::RwLock;
 use runar_common::logging::Logger;
 use crate::network::transport::{StreamPool, NetworkError, PeerId};
+use crate::network::discovery::NodeInfo;
 
 /// PeerState - Manages the state of a connection to a remote peer
 ///
@@ -32,6 +33,8 @@ pub struct PeerState {
     pub logger: Logger,
     pub status_tx: mpsc::Sender<bool>,
     pub status_rx: Mutex<mpsc::Receiver<bool>>,
+    /// Optional node information received during handshake
+    pub node_info: RwLock<Option<NodeInfo>>,
 }
 
 impl PeerState {
@@ -49,7 +52,17 @@ impl PeerState {
             logger,
             status_tx,
             status_rx: Mutex::new(status_rx),
+            node_info: RwLock::new(None),
         }
+    }
+    
+    /// Set the node info for this peer
+    ///
+    /// INTENTION: Store the node information received during handshake.
+    pub async fn set_node_info(&self, node_info: NodeInfo) {
+        let mut info = self.node_info.write().await;
+        *info = Some(node_info);
+        self.logger.info(&format!("Node info set for peer {}", self.peer_id));
     }
     /// Set the connection for this peer
     ///

@@ -67,7 +67,7 @@ async fn test_quic_transport_connection_end_to_end() {
     // Create two transport instances for testing
     let logger_a = Arc::new(Logger::new_root(Component::Network, "transporter-a"));
     let logger_b = Arc::new(Logger::new_root(Component::Network, "transporter-b"));
-    
+
     // Create node info for both nodes with proper PeerId type
     let node_a_id_str = "node-a".to_string();
     let node_b_id_str = "node-b".to_string();
@@ -244,39 +244,39 @@ async fn test_quic_transport_connection_end_to_end() {
     assert!(b_connected_to_a, "Node A not connected to Node B");
     
     // Test sending a message from A to B
-    if a_to_b_connected {
-        println!("Testing message sending from A to B");
-        let test_message = NetworkMessage {
-            source: node_a_id.clone(),
-            destination: node_b_id.clone(),
-            payloads: vec![NetworkMessagePayloadItem {
-                path: "test/path".to_string(),
-                value_bytes: vec![1, 2, 3, 4],
-                correlation_id: "test-123".to_string(),
-            }],
-            message_type: "TEST_MESSAGE".to_string(),
-        };
-        
-        // Send message from A to B
-        transport_a.send_message(test_message.clone()).await
-            .expect("Failed to send message from A to B");
-        
-        // Wait for the message to be received with timeout
-        let received_message = tokio::time::timeout(
-            Duration::from_secs(5),
-            rx_b.recv()
-        ).await
-            .expect("Timeout waiting for message")
-            .expect("Failed to receive message");
-        
-        // Verify message contents
-        assert_eq!(received_message.source, node_a_id);
-        assert_eq!(received_message.destination, node_b_id);
-        assert_eq!(received_message.payloads.len(), 1);
-        assert_eq!(received_message.payloads[0].path, "test/path");
-        
-        println!("Message successfully received by B from A");
-    }
+    
+    println!("Testing message sending from A to B");
+    let test_message = NetworkMessage {
+        source: node_a_id.clone(),
+        destination: node_b_id.clone(),
+        payloads: vec![NetworkMessagePayloadItem {
+            path: "".to_string(),
+            value_bytes: vec![1, 2, 3, 4],
+            correlation_id: "test-123".to_string(),
+        }],
+        message_type: "TEST_MESSAGE".to_string(),
+    };
+    
+    // Send message from A to B
+    transport_a.send_message(test_message.clone()).await
+        .expect("Failed to send message from A to B");
+    
+    // Wait for the message to be received with timeout
+    let received_message = tokio::time::timeout(
+        Duration::from_secs(5),
+        rx_b.recv()
+    ).await
+        .expect("Timeout waiting for message")
+        .expect("Failed to receive message");
+    
+    // Verify message contents
+    assert_eq!(received_message.source, node_a_id);
+    assert_eq!(received_message.destination, node_b_id);
+    assert_eq!(received_message.payloads.len(), 1);
+    assert_eq!(received_message.payloads[0].path, "");
+    
+    println!("Message successfully received by B from A");
+
     
     // Clean up
     println!("Stopping transports");

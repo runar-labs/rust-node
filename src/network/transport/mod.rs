@@ -331,11 +331,13 @@ pub trait NetworkTransport: Send + Sync {
     async fn send_message(&self, message: NetworkMessage) -> Result<(), NetworkError>;
 
     /// connect to a discovered node
+    /// 
+    /// Returns the NodeInfo of the connected peer after successful handshake
     async fn connect_peer(
         &self,
         discovery_msg: PeerInfo,
         local_node: NodeInfo,
-    ) -> Result<(), NetworkError>;
+    ) -> Result<NodeInfo, NetworkError>;
     
     /// Get the local address this transport is bound to as a string
     fn get_local_address(&self) -> String;

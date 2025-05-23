@@ -8,14 +8,12 @@
 //! - ConnectionPool: Managing active connections and their lifecycle
 //! - StreamPool: Managing stream reuse and resource cleanup
 
-use std::collections::HashMap;
 use std::fmt;
 use std::net::{SocketAddr, IpAddr, Ipv4Addr};
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use std::time::SystemTime;
-use dashmap::DashMap; // For concurrent peer map
 
 
 use async_trait::async_trait;
@@ -23,7 +21,7 @@ use bincode;
 use quinn::{self, Endpoint, TransportConfig};
 use quinn::{ServerConfig, ClientConfig};
 use runar_common::logging::Logger;
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 // Import rustls explicitly - these types need clear namespacing to avoid conflicts with quinn's types
@@ -32,7 +30,7 @@ use rustls;
 
 
 use super::{
-    ConnectionPool, NetworkError, NetworkMessage, NetworkTransport, PeerId, PeerState
+    ConnectionPool, NetworkError, NetworkMessage, NetworkMessagePayloadItem, NetworkTransport, PeerId, PeerState
 };
 // Import PeerInfo and NodeInfo consistently with the module structure
 use crate::network::discovery::multicast_discovery::PeerInfo;
@@ -602,104 +600,226 @@ impl QuicTransportImpl {
         Ok(())
     }
     
-    /// Connect to a peer using discovery information
+    /// Connect to a peer using the provided discovery message
     ///
-    /// INTENTION: Establish a connection with a peer discovered via the discovery mechanism.
+    /// INTENTION: Establish a connection to a remote peer using the provided discovery information.
+    /// This method will attempt to connect to each address in the discovery message until one succeeds.
+    /// Returns a task handle for the message receiver.
     async fn connect_peer(
         self: &Arc<Self>,
         discovery_msg: PeerInfo,
-        _local_node: NodeInfo, // Mark as unused with underscore prefix
         running: &Arc<AtomicBool>,
     ) -> Result<JoinHandle<()>, NetworkError> {
         if !running.load(Ordering::Relaxed) {
             return Err(NetworkError::TransportError("Transport not running".to_string()));
         }
         
-        // Get the peer ID based on the public_key from PeerInfo
-        // This is a simplification for testing - in production we'd have a more robust
-        // mechanism for deriving peer IDs from public keys
-        let peer_id = PeerId::new(discovery_msg.public_key.clone());
+        // Ensure we have at least one address to try
+        if discovery_msg.addresses.is_empty() {
+            return Err(NetworkError::ConnectionError("No addresses found for peer".to_string()));
+        }
         
-        self.logger.info(&format!("Attempting to connect to peer {} with addresses: {:?}", peer_id, discovery_msg.addresses));
+        // Get the peer ID based on the public_key from PeerInfo
+        let peer_id = PeerId::new(discovery_msg.public_key.clone());
         
         // Check if we're already connected to this peer
         if self.connection_pool.is_peer_connected(&peer_id).await {
-            self.logger.debug(&format!("Already connected to peer {}", peer_id));
-            // Create a dummy task that does nothing since we're already connected
-            return Ok(tokio::spawn(async {}));
+            self.logger.info(&format!("Already connected to peer {}", peer_id));
+            
+            // Return a dummy task that does nothing
+            let task = tokio::spawn(async {});
+            return Ok(task);
         }
-        
-        // Get the peer's address from the discovery message
-        let peer_addr = match discovery_msg.addresses.first() {
-            Some(addr) => addr,
-            None => return Err(NetworkError::ConnectionError("No address found for peer".to_string())),
-        };
-        
-        // Parse the address
-        let socket_addr = match peer_addr.parse::<SocketAddr>() {
-            Ok(addr) => addr,
-            Err(e) => return Err(NetworkError::ConnectionError(format!("Invalid address: {}", e))),
-        };
         
         // Get the endpoint
-        let endpoint_guard = self.endpoint.lock().await;
-        let endpoint = match &*endpoint_guard {
+        let endpoint = match self.endpoint.lock().await.as_ref() {
             Some(endpoint) => endpoint.clone(),
-            None => return Err(NetworkError::ConnectionError("Endpoint not initialized".to_string())),
+            None => return Err(NetworkError::TransportError("Transport not initialized".to_string())),
         };
-        drop(endpoint_guard); // Release the lock as early as possible
         
-        // Connect to the peer
-        self.logger.info(&format!("Connecting to peer {} at {}", peer_id, socket_addr));
+        // Try each address in the discovery message
+        let mut last_error = None;
         
-        // Print detailed connection information for debugging
-        self.logger.info(&format!("Detailed connection attempt - Local node: {}, Remote peer: {}, Socket: {}", 
-                                 self.node_id, peer_id, socket_addr));
-        
-        // Create a new connection to the peer
-        // For testing, we use "localhost" as the server name to avoid certificate validation issues
-        // In production, we would use the peer_id or a proper domain name
-        let connect_result = endpoint.connect(socket_addr, "localhost");
-        
-        match connect_result {
-            Ok(connecting) => {
-                // Wait for the connection to be established
-                match connecting.await {
-                    Ok(connection) => {
-                        self.logger.info(&format!("Connected to peer {} at {}", peer_id, socket_addr));
-                        
-                        // Get or create the peer state
-                        let peer_state = self.connection_pool.get_or_create_peer(
-                            peer_id.clone(),
-                            peer_addr.clone(),
-                            self.options.max_idle_streams_per_peer,
-                            self.logger.clone(),
-                        );
-                        
-                        // Set the connection in the peer state
-                        peer_state.set_connection(connection).await;
-                        
-                        // Start a task to receive incoming messages and return the task handle
-                        let task = self.spawn_message_receiver(peer_id.clone(), peer_state.clone());
-                        
-                        // Verify the connection is properly registered
-                        let is_connected = self.connection_pool.is_peer_connected(&peer_id).await;
-                        self.logger.info(&format!("Connection verification for {}: {}", peer_id, is_connected));
-                        
-                        Ok(task)
-                    },
-                    Err(e) => {
-                        self.logger.error(&format!("Failed to connect to peer {}: {}", peer_id, e));
-                        Err(NetworkError::ConnectionError(format!("Failed to establish connection: {}", e)))
-                    }
+        for peer_addr in &discovery_msg.addresses {
+            // Parse the socket address
+            let socket_addr = match peer_addr.parse::<SocketAddr>() {
+                Ok(addr) => addr,
+                Err(e) => {
+                    self.logger.warn(&format!("Invalid address {}: {}", peer_addr, e));
+                    last_error = Some(NetworkError::ConnectionError(format!("Invalid address {}: {}", peer_addr, e)));
+                    continue; // Try the next address
                 }
-            },
-            Err(e) => Err(NetworkError::ConnectionError(format!("Failed to initiate connection: {}", e))),
+            };
+            
+            // Connect to the peer
+            self.logger.info(&format!("Connecting to peer {} at {}", peer_id, socket_addr));
+            
+            // Print detailed connection information for debugging
+            self.logger.info(&format!("Detailed connection attempt - Local node: {}, Remote peer: {}, Socket: {}", 
+                                       self.node_id, peer_id, socket_addr));
+            
+            // Create a new connection to the peer
+            // For testing, we use "localhost" as the server name to avoid certificate validation issues
+            // In production, we would use the peer_id or a proper domain name
+            let connect_result = endpoint.connect(socket_addr, "localhost");
+            
+            match connect_result {
+                Ok(connecting) => {
+                    // Wait for the connection to be established
+                    match connecting.await {
+                        Ok(connection) => {
+                            self.logger.info(&format!("Connected to peer {} at {}", peer_id, socket_addr));
+                            
+                            // Get or create the peer state
+                            let peer_state = self.connection_pool.get_or_create_peer(
+                                peer_id.clone(),
+                                peer_addr.clone(),
+                                self.options.max_idle_streams_per_peer,
+                                self.logger.clone(),
+                            );
+                            
+                            // Set the connection in the peer state
+                            peer_state.set_connection(connection).await;
+                            
+                            // Successfully connected to this address
+                            
+                            // Start a task to receive incoming messages
+                            let task = self.spawn_message_receiver(peer_id.clone(), peer_state.clone());
+                            
+                            // Verify the connection is properly registered
+                            let is_connected = self.connection_pool.is_peer_connected(&peer_id).await;
+                            self.logger.info(&format!("Connection verification for {}: {}", peer_id, is_connected));
+                            
+                            return Ok(task);
+                        },
+                        Err(e) => {
+                            self.logger.warn(&format!("Failed to connect to peer {} at {}: {}", peer_id, socket_addr, e));
+                            last_error = Some(NetworkError::ConnectionError(format!("Failed to establish connection to {}: {}", socket_addr, e)));
+                            // Continue to the next address
+                        }
+                    }
+                },
+                Err(e) => {
+                    self.logger.warn(&format!("Failed to initiate connection to peer {} at {}: {}", peer_id, socket_addr, e));
+                    last_error = Some(NetworkError::ConnectionError(format!("Failed to initiate connection to {}: {}", socket_addr, e)));
+                    // Continue to the next address
+                }
+            }
         }
+        
+        // If we get here, all connection attempts failed
+        Err(last_error.unwrap_or_else(|| NetworkError::ConnectionError(format!("Failed to connect to peer {} on any address", peer_id))))
     }
     
     fn get_local_address(self: &Arc<Self>) -> String {
         self.bind_addr.to_string()
+    }
+    
+    /// Perform handshake with a peer after connection is established
+    ///
+    /// INTENTION: Exchange node information with the peer to complete the connection setup.
+    /// This is called after a successful connection to exchange node information.
+    /// Returns the peer's NodeInfo after successful handshake.
+    async fn handshake_peer(
+        self: &Arc<Self>,
+        discovery_msg: PeerInfo,
+        local_node: NodeInfo,
+        running: &Arc<AtomicBool>,
+    ) -> Result<NodeInfo, NetworkError> {
+        if !running.load(Ordering::Relaxed) {
+            return Err(NetworkError::TransportError("Transport not running".to_string()));
+        }
+        
+        // Get the peer ID based on the public_key from PeerInfo
+        let peer_id = PeerId::new(discovery_msg.public_key.clone());
+        
+        self.logger.info(&format!("Starting handshake with peer {}", peer_id));
+        
+        // Check if we're connected to this peer
+        if !self.connection_pool.is_peer_connected(&peer_id).await {
+            return Err(NetworkError::ConnectionError(format!("Not connected to peer {}, cannot perform handshake", peer_id)));
+        }
+        
+        // Create a handshake message containing our node info
+        let handshake_message = NetworkMessage {
+            source: self.node_id.clone(),
+            destination: peer_id.clone(),
+            message_type: "NODE_INFO_HANDSHAKE".to_string(),
+            payloads: vec![NetworkMessagePayloadItem {
+                path: "".to_string(),  
+                value_bytes: bincode::serialize(&local_node)
+                    .map_err(|e| NetworkError::MessageError(format!("Failed to serialize node info: {}", e)))?,
+                correlation_id: format!("handshake-{}-{}", self.node_id, SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_millis()),
+            }],
+        };
+        
+        // Create a channel for receiving the handshake response
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<NetworkMessage>(1);
+        
+        // Register a temporary message handler for the handshake response
+        let peer_id_clone = peer_id.clone();
+        let handler_tx = tx.clone();
+        let error_logger = Arc::new(self.logger.clone()); 
+        let handler = Box::new(move |msg: NetworkMessage| -> Result<(), NetworkError> {
+            let error_logger = error_logger.clone();
+            if msg.source == peer_id_clone && msg.message_type == "NODE_INFO_HANDSHAKE_RESPONSE" {
+                // Send the message to our channel
+                let tx = handler_tx.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = tx.send(msg).await {
+                        // This is not a critical error, just log it
+                        error_logger.warn(&format!("Failed to send handshake response to channel: {}", e)); 
+                    }
+                });
+            }
+            Ok(())
+        });
+        
+        // Register the handler
+        self.register_message_handler(handler).await?;
+        
+        // Send the handshake message
+        self.send_message(handshake_message, running).await?;
+        self.logger.info(&format!("Sent handshake message to peer {}", peer_id));
+        
+        // Wait for the handshake response with a timeout
+        let response = match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
+            Ok(Some(response)) => {
+                self.logger.info(&format!("Received handshake response from peer {}", peer_id));
+                response
+            },
+            Ok(None) => {
+                return Err(NetworkError::ConnectionError(format!("Handshake channel closed before receiving response from peer {}", peer_id)));
+            },
+            Err(_) => {
+                return Err(NetworkError::ConnectionError(format!("Timeout waiting for handshake response from peer {}", peer_id)));
+            }
+        };
+        
+        // Process the handshake response
+        if response.message_type == "NODE_INFO_HANDSHAKE_RESPONSE" {
+            if let Some(payload) = response.payloads.first() {
+                match bincode::deserialize::<NodeInfo>(&payload.value_bytes) {
+                    Ok(peer_node_info) => {
+                        self.logger.info(&format!("Handshake completed with peer {}, received node info: {:?}", 
+                                                peer_id, peer_node_info));
+                        
+                        // Update peer state with the node info
+                        if let Some(state) = self.connection_pool.get_peer(&peer_id) {
+                            state.set_node_info(peer_node_info.clone()).await;
+                        }
+                        
+                        // Return the peer's node info
+                        return Ok(peer_node_info);
+                    },
+                    Err(e) => {
+                        return Err(NetworkError::MessageError(format!("Failed to deserialize peer node info: {}", e)));
+                    }
+                }
+            }
+        }
+        
+        Err(NetworkError::MessageError(format!("Received unexpected message type during handshake: {}", response.message_type)))
     }
     
     
@@ -720,8 +840,59 @@ impl QuicTransportImpl {
     /// Process an incoming message
     ///
     /// INTENTION: Route an incoming message to registered handlers.
-    async fn process_incoming_message(self: &Arc<Self>, message: NetworkMessage) -> Result<(), NetworkError> {
-        self.logger.debug(&format!("Processing message from {}", message.source));
+    async fn process_incoming_message(self: &Arc<Self>, mut message: NetworkMessage) -> Result<(), NetworkError> {
+        self.logger.debug(&format!("Processing message from {}, type: {}", message.source, message.message_type));
+        
+        // Special handling for handshake messages
+        if message.message_type == "NODE_INFO_HANDSHAKE" {
+            self.logger.info(&format!("Received handshake message from {}", message.source));
+            
+            // Extract the node info from the message
+            if let Some(payload) = message.payloads.first() {
+                match bincode::deserialize::<NodeInfo>(&payload.value_bytes) {
+                    Ok(peer_node_info) => {
+                        self.logger.info(&format!("Received node info from {}: {:?}", message.source, peer_node_info));
+                        
+                        // Store the node info in the peer state
+                        if let Some(peer_state) = self.connection_pool.get_peer(&message.source) {
+                            peer_state.set_node_info(peer_node_info.clone()).await;
+                            
+                            // Create a response message with our node info
+                            // For simplicity, we'll create a minimal NodeInfo with just our ID
+                            let local_node_info = NodeInfo {
+                                peer_id: self.node_id.clone(),
+                                network_ids: vec!["default".to_string()],
+                                addresses: vec![self.bind_addr.to_string()],
+                                capabilities: vec![],
+                                last_seen: std::time::SystemTime::now(),
+                            };
+                            
+                            // Create the response message
+                            let response = NetworkMessage {
+                                source: self.node_id.clone(),
+                                destination: message.source.clone(),
+                                message_type: "NODE_INFO_HANDSHAKE_RESPONSE".to_string(),
+                                payloads: vec![NetworkMessagePayloadItem {
+                                    // Preserve the original path from the request
+                                    path: payload.path.clone(),
+                                    value_bytes: bincode::serialize(&local_node_info)
+                                        .map_err(|e| NetworkError::MessageError(format!("Failed to serialize node info: {}", e)))?,
+                                    correlation_id: payload.correlation_id.clone(),
+                                }],
+                            };
+                            
+                            // Send the response
+                            self.send_message(response, &Arc::new(AtomicBool::new(true))).await?;
+                            self.logger.info(&format!("Sent handshake response to {}", message.source));
+                        }
+                    },
+                    Err(e) => {
+                        self.logger.error(&format!("Failed to deserialize node info from {}: {}", message.source, e));
+                    }
+                }
+            }
+            return Ok(());
+        }
         
         // Get a read lock on the handlers
         match self.message_handlers.read() {
@@ -826,31 +997,72 @@ fn spawn_message_receiver(self: &Arc<Self>, peer_id: PeerId, peer_state: Arc<Pee
     /// Receive a message from a peer over a QUIC stream
     /// INTENTION: Read, deserialize, and dispatch the message to registered handlers.
     async fn receive_message(self: &Arc<Self>, peer_id: PeerId, mut stream: quinn::RecvStream) -> Result<(), NetworkError> {
-        use tokio::io::AsyncReadExt;
-        
         // Read the 4-byte length prefix
         let mut len_buf = [0u8; 4];
-        stream.read_exact(&mut len_buf).await.map_err(|e| {
-            self.logger.error(&format!("Failed to read message length from {}: {}", peer_id, e));
-            NetworkError::MessageError(format!("Failed to read message length: {}", e))
-        })?;
+        
+        // Read bytes one by one since we can't use AsyncReadExt
+        for i in 0..4 {
+            match stream.read_chunk(1, false).await {
+                Ok(Some(chunk)) => {
+                    if !chunk.bytes.is_empty() {
+                        len_buf[i] = chunk.bytes[0];
+                    } else {
+                        return Err(NetworkError::MessageError("Empty chunk received".to_string()));
+                    }
+                },
+                Ok(None) => return Err(NetworkError::MessageError("Stream closed prematurely".to_string())),
+                Err(e) => {
+                    self.logger.error(&format!("Failed to read message length from {}: {}", peer_id, e));
+                    return Err(NetworkError::MessageError(format!("Failed to read message length: {}", e)));
+                }
+            }
+        }
+        
         let msg_len = u32::from_be_bytes(len_buf) as usize;
 
         // Read the message bytes
-        let mut data = vec![0u8; msg_len];
-        stream.read_exact(&mut data).await.map_err(|e| {
-            self.logger.error(&format!("Failed to read message from {}: {}", peer_id, e));
-            NetworkError::MessageError(format!("Failed to read message: {}", e))
-        })?;
+        let mut data = Vec::with_capacity(msg_len);
+        let mut remaining = msg_len;
+        
+        while remaining > 0 {
+            match stream.read_chunk(remaining.min(1024), false).await {
+                Ok(Some(chunk)) => {
+                    if !chunk.bytes.is_empty() {
+                        data.extend_from_slice(&chunk.bytes);
+                        remaining -= chunk.bytes.len();
+                    } else {
+                        break; // No more data
+                    }
+                },
+                Ok(None) => break, // Stream closed
+                Err(e) => {
+                    self.logger.error(&format!("Failed to read message from {}: {}", peer_id, e));
+                    return Err(NetworkError::MessageError(format!("Failed to read message: {}", e)));
+                }
+            }
+        }
+        
+        if data.len() != msg_len {
+            return Err(NetworkError::MessageError(
+                format!("Incomplete message: expected {} bytes, got {}", msg_len, data.len())
+            ));
+        }
 
         // Deserialize the message
-        let mut message: NetworkMessage = match bincode::deserialize(&data) {
+        let message: NetworkMessage = match bincode::deserialize(&data) {
             Ok(msg) => msg,
             Err(e) => {
                 self.logger.error(&format!("Failed to deserialize message from {}: {}", peer_id, e));
                 return Err(NetworkError::MessageError(format!("Failed to deserialize message: {}", e)));
             }
         };
+        
+        // Log the received message details for debugging
+        if !message.payloads.is_empty() {
+            self.logger.debug(&format!("Received message from {} with path: {}", 
+                                      peer_id, message.payloads[0].path));
+        }
+        
         // Dispatch to handlers
         self.process_incoming_message(message).await?;
         Ok(())
@@ -886,14 +1098,26 @@ impl NetworkTransport for QuicTransport {
         &self,
         discovery_msg: PeerInfo,
         local_node: NodeInfo,
-    ) -> Result<(), NetworkError> {
+    ) -> Result<NodeInfo, NetworkError> {
         // Call the inner implementation which returns a task handle
-        match self.inner.connect_peer(discovery_msg, local_node, &self.running).await {
+        match self.inner.connect_peer(discovery_msg.clone(), &self.running).await {
             Ok(task) => {
                 // Store the task handle for proper lifecycle management
                 let mut tasks = self.background_tasks.lock().await;
                 tasks.push(task);
-                Ok(())
+                
+                // After connection is established, start the handshake process
+                // Send the node info to the peer and wait for the response
+                match self.inner.handshake_peer(discovery_msg, local_node, &self.running).await {
+                    Ok(peer_node_info) => {
+                        // Return the peer's node info
+                        Ok(peer_node_info)
+                    },
+                    Err(e) => {
+                        self.logger.error(&format!("Handshake failed after successful connection: {}", e));
+                        Err(e)
+                    }
+                }
             },
             Err(e) => Err(e),
         }
