@@ -545,14 +545,8 @@ impl QuicTransportImpl {
     /// Check if connected to a specific peer
     ///
     /// INTENTION: Determine if there's an active connection to the specified peer.
-    fn is_connected(self: &Arc<Self>, peer_id: PeerId) -> bool {
-        // We need to use block_in_place because this is a sync function
-        // but we need to perform async operations
-        tokio::task::block_in_place(move || {
-            tokio::runtime::Handle::current().block_on(async {
-                self.connection_pool.is_peer_connected(&peer_id).await
-            })
-        })
+    async fn is_connected(self: &Arc<Self>, peer_id: PeerId) -> bool {
+        self.connection_pool.is_peer_connected(&peer_id).await
     }
     
     /// Send a message to a peer
@@ -1088,8 +1082,8 @@ impl NetworkTransport for QuicTransport {
         self.inner.disconnect(peer_id, &self.running).await
     }
     
-    fn is_connected(&self, peer_id: PeerId) -> bool {
-        self.inner.is_connected(peer_id)
+    async fn is_connected(&self, peer_id: PeerId) -> bool {
+        self.inner.is_connected(peer_id).await
     }
     
     async fn send_message(&self, message: NetworkMessage) -> Result<(), NetworkError> {

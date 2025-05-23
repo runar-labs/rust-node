@@ -325,7 +325,7 @@ pub trait NetworkTransport: Send + Sync {
     async fn disconnect(&self, node_id: PeerId) -> Result<(), NetworkError>;
 
     /// Check if connected to a specific node
-    fn is_connected(&self, node_id: PeerId) -> bool;
+    async fn is_connected(&self, node_id: PeerId) -> bool;
 
     /// Send a message to a remote node
     async fn send_message(&self, message: NetworkMessage) -> Result<(), NetworkError>;

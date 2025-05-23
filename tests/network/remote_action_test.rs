@@ -25,7 +25,7 @@ mod remote_action_tests {
     use crate::network::quic_transport_test::generate_test_certificates;
 
     use super::*;
-
+ 
     /// Test for remote action calls between two nodes
     ///
     /// INTENTION: Create two Node instances with network enabled, they should discover and connect to each other

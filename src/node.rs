@@ -1071,17 +1071,31 @@ impl Node {
 
         let transport = self.network_transport.read().await;
         if let Some(transport) = transport.as_ref() {
-            // Store the discovered node using the transport
-            if let Ok(_) = transport
+            // Check if the transporter is already connected to this peer
+            let is_already_connected = transport.is_connected(PeerId::new(peer_public_key.clone())).await;
+            
+            if is_already_connected {
+                self.logger.info(format!(
+                    "Already connected to node: {}, ignoring discovery event", 
+                    peer_public_key
+                ));
+                return Ok(());
+            }
+
+            // Not connected yet, so connect to the peer
+            if let Ok(peer_node_info) = transport
                 .connect_peer(peer_info.clone(), local_node_info)
                 .await
             {
                 self.logger
-                    .info(format!("connected to node: {} - will", peer_public_key));
- 
+                    .info(format!("Connected to node: {}", peer_public_key));
+                
+                self.process_remote_capabilities(peer_node_info).await?;
+
+                return Ok(());
             } else {
                 self.logger.warn(format!(
-                    "Failed to add node to registry: {}",
+                    "Failed to connect to peer: {}",
                     peer_public_key
                 ));
             }

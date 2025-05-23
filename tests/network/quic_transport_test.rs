@@ -239,8 +239,8 @@ async fn test_quic_transport_connection_end_to_end() {
     println!("Final connection status - A->B: {}, B->A: {}", a_to_b_connected, b_to_a_connected);
     
     // Verify connections by checking if peers are connected
-    let a_connected_to_b = transport_a.is_connected(node_b_id.clone());
-    let b_connected_to_a = transport_b.is_connected(node_a_id.clone());
+    let a_connected_to_b = transport_a.is_connected(node_b_id.clone()).await;
+    let b_connected_to_a = transport_b.is_connected(node_a_id.clone()).await;
     
     println!("Transport A connected to B: {}", a_connected_to_b);
     println!("Transport B connected to A: {}", b_connected_to_a);
