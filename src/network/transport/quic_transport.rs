@@ -15,6 +15,8 @@ use std::sync::{Arc, RwLock as StdRwLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use std::time::SystemTime;
+use dashmap::DashMap; // For concurrent peer map
+
 
 use async_trait::async_trait;
 use bincode;
@@ -50,315 +52,12 @@ impl rustls::client::ServerCertVerifier for SkipServerVerification {
 
 
 use super::{
-    NetworkError, NetworkMessage, NetworkTransport, PeerId,
+    ConnectionPool, NetworkError, NetworkMessage, NetworkTransport, PeerId, PeerState
 };
 // Import PeerInfo and NodeInfo consistently with the module structure
 use crate::network::discovery::multicast_discovery::PeerInfo;
 use crate::network::discovery::NodeInfo;
-
-/// PeerState - Manages the state of a connection to a remote peer
-///
-/// INTENTION: This component tracks the state of individual peer connections,
-/// manages stream pools, and handles connection health.
-///
-/// ARCHITECTURAL BOUNDARIES:
-/// - Only accessed by ConnectionPool and QuicTransportImpl
-/// - Manages its own StreamPool instance
-/// - Handles connection lifecycle for a single peer
-struct PeerState {
-    peer_id: PeerId,
-    address: String,
-    stream_pool: StreamPool,
-    connection: Option<quinn::Connection>,
-    last_activity: std::time::Instant,
-    logger: Logger,
-    // Channel for notifying about connection status changes
-    status_tx: mpsc::Sender<bool>,
-    status_rx: Mutex<mpsc::Receiver<bool>>,
-}
-
-impl PeerState {
-    /// Create a new PeerState with the specified peer ID and address
-    ///
-    /// INTENTION: Initialize a new peer state with the given parameters.
-    fn new(peer_id: PeerId, address: String, max_idle_streams: usize, logger: Logger) -> Self {
-        let (status_tx, status_rx) = mpsc::channel(10);
-        
-        Self {
-            peer_id,
-            address,
-            stream_pool: StreamPool::new(max_idle_streams, logger.clone()),
-            connection: None,
-            last_activity: std::time::Instant::now(),
-            logger,
-            status_tx,
-            status_rx: Mutex::new(status_rx),
-        }
-    }
-    
-    /// Set the connection for this peer
-    ///
-    /// INTENTION: Establish a connection to the peer and update the state.
-    async fn set_connection(&mut self, connection: quinn::Connection) {
-        self.connection = Some(connection);
-        self.last_activity = std::time::Instant::now();
-        
-        // Notify about connection established
-        let _ = self.status_tx.send(true).await;
-        self.logger.info(&format!("Connection established with peer {}", self.peer_id));
-    }
-    
-    /// Check if peer is connected
-    ///
-    /// INTENTION: Determine if there's an active connection to the peer.
-    fn is_connected(&self) -> bool {
-        self.connection.is_some()
-    }
-    
-    /// Get a stream for sending messages to this peer
-    ///
-    /// INTENTION: Obtain a QUIC stream for sending data to this peer.
-    async fn get_send_stream(&self) -> Result<quinn::SendStream, NetworkError> {
-        // Try to get an idle stream from the pool first
-        if let Some(stream) = self.stream_pool.get_idle_stream().await {
-            return Ok(stream);
-        }
-        
-        // Create a new stream if there are no idle streams available
-        if let Some(conn) = &self.connection {
-            match conn.open_uni().await {
-                Ok(stream) => {
-                    self.logger.debug(&format!("Opened new stream to peer {}", self.peer_id));
-                    Ok(stream)
-                },
-                Err(e) => {
-                    self.logger.error(&format!("Failed to open stream to peer {}: {}", self.peer_id, e));
-                    Err(NetworkError::ConnectionError(format!("Failed to open stream: {}", e)))
-                }
-            }
-        } else {
-            Err(NetworkError::ConnectionError("Not connected to peer".to_string()))
-        }
-    }
-    
-    /// Return a stream to the pool for reuse
-    ///
-    /// INTENTION: Recycle streams to avoid the overhead of creating new ones.
-    async fn return_stream(&self, stream: quinn::SendStream) -> Result<(), NetworkError> {
-        self.stream_pool.return_stream(stream).await
-    }
-    
-    /// Update the last activity timestamp
-    ///
-    /// INTENTION: Track when the peer was last active for connection management.
-    fn update_activity(&mut self) {
-        self.last_activity = std::time::Instant::now();
-    }
-    
-    /// Close the connection to this peer
-    ///
-    /// INTENTION: Properly clean up resources when disconnecting from a peer.
-    async fn close_connection(&mut self) -> Result<(), NetworkError> {
-        if let Some(conn) = self.connection.take() {
-            conn.close(0u32.into(), b"Connection closed by peer");
-            let _ = self.status_tx.send(false).await;
-            self.logger.info(&format!("Connection closed with peer {}", self.peer_id));
-        }
-        
-        // Clear all streams in the pool
-        self.stream_pool.clear().await;
-        
-        Ok(())
-    }
-}
-
-impl fmt::Debug for PeerState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PeerState")
-            .field("peer_id", &self.peer_id)
-            .field("address", &self.address)
-            .field("connection", &self.connection.is_some())
-            .field("last_activity", &self.last_activity)
-            .finish()
-    }
-}
-
-/// StreamPool - Manages the reuse of QUIC streams
-///
-/// INTENTION: This component manages stream reuse, implements stream lifecycle,
-/// and handles stream timeouts.
-///
-/// ARCHITECTURAL BOUNDARIES:
-/// - Only accessed by PeerState
-/// - Manages creation, reuse, and cleanup of streams
-struct StreamPool {
-    idle_streams: RwLock<Vec<quinn::SendStream>>,
-    max_idle_streams: usize,
-    logger: Logger,
-}
-
-impl StreamPool {
-    /// Create a new StreamPool with the specified maximum idle streams
-    ///
-    /// INTENTION: Initialize a stream pool with a capacity for idle streams reuse.
-    fn new(max_idle_streams: usize, logger: Logger) -> Self {
-        Self {
-            idle_streams: RwLock::new(Vec::with_capacity(max_idle_streams)),
-            max_idle_streams,
-            logger,
-        }
-    }
-    
-    /// Get an idle stream from the pool if available
-    ///
-    /// INTENTION: Reuse existing streams to avoid the overhead of creating new ones.
-    async fn get_idle_stream(&self) -> Option<quinn::SendStream> {
-        let mut streams = self.idle_streams.write().await;
-        streams.pop()
-    }
-    
-    /// Return a stream to the pool for future reuse
-    ///
-    /// INTENTION: Efficiently manage QUIC stream resources.
-    async fn return_stream(&self, stream: quinn::SendStream) -> Result<(), NetworkError> {
-        let mut streams = self.idle_streams.write().await;
-        
-        // Only keep up to max_idle_streams
-        if streams.len() < self.max_idle_streams {
-            streams.push(stream);
-            Ok(())
-        } else {
-            // Just let it drop if we have enough idle streams
-            Ok(())
-        }
-    }
-    
-    /// Clear all idle streams in the pool
-    ///
-    /// INTENTION: Clean up resources when shutting down or disconnecting.
-    async fn clear(&self) -> Result<(), NetworkError> {
-        let mut streams = self.idle_streams.write().await;
-        streams.clear();
-        Ok(())
-    }
-}
-
-impl fmt::Debug for StreamPool {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("StreamPool")
-            .field("max_idle_streams", &self.max_idle_streams)
-            .finish()
-    }
-}
-
-/// ConnectionPool - Manages active connections
-///
-/// INTENTION: This component manages active connections, handles connection reuse,
-/// and implements connection cleanup.
-///
-/// ARCHITECTURAL BOUNDARIES:
-/// - Only accessed by QuicTransportImpl
-/// - Manages PeerState instances
-/// - Handles connection lifecycle across all peers
-struct ConnectionPool {
-    peers: RwLock<HashMap<PeerId, Arc<Mutex<PeerState>>>>,
-    logger: Logger,
-}
-
-impl ConnectionPool {
-    /// Create a new ConnectionPool
-    ///
-    /// INTENTION: Initialize a pool for managing peer connections.
-    fn new(logger: Logger) -> Self {
-        Self {
-            peers: RwLock::new(HashMap::new()),
-            logger,
-        }
-    }
-    
-    /// Get or create a peer state for the given peer ID and address
-    ///
-    /// INTENTION: Ensure we have a PeerState object for each peer we interact with.
-    async fn get_or_create_peer(
-        &self, 
-        peer_id: PeerId, 
-        address: String, 
-        max_idle_streams: usize,
-        logger: Logger
-    ) -> Arc<Mutex<PeerState>> {
-        let mut peers = self.peers.write().await;
-        
-        if !peers.contains_key(&peer_id) {
-            // Create a new peer state if it doesn't exist
-            let peer_state = PeerState::new(peer_id.clone(), address, max_idle_streams, logger);
-            let peer_mutex = Arc::new(Mutex::new(peer_state));
-            peers.insert(peer_id.clone(), peer_mutex.clone());
-            peer_mutex
-        } else {
-            // Return the existing peer state
-            peers.get(&peer_id).unwrap().clone()
-        }
-    }
-    
-    /// Get an existing peer state if it exists
-    ///
-    /// INTENTION: Retrieve the state for a specific peer connection.
-    async fn get_peer(&self, peer_id: &PeerId) -> Option<Arc<Mutex<PeerState>>> {
-        let peers = self.peers.read().await;
-        peers.get(peer_id).cloned()
-    }
-    
-    /// Remove a peer from the connection pool
-    ///
-    /// INTENTION: Clean up resources when a peer is disconnected.
-    async fn remove_peer(&self, peer_id: &PeerId) -> Result<(), NetworkError> {
-        let mut peers = self.peers.write().await;
-        
-        if let Some(peer_mutex) = peers.remove(peer_id) {
-            // Close the connection before removing
-            let mut peer = peer_mutex.lock().await;
-            peer.close_connection().await?;
-        }
-        
-        Ok(())
-    }
-    
-    /// Check if a peer is connected
-    ///
-    /// INTENTION: Determine if we have an active connection to a specific peer.
-    async fn is_peer_connected(&self, peer_id: &PeerId) -> bool {
-        if let Some(peer_mutex) = self.get_peer(peer_id).await {
-            let peer = peer_mutex.lock().await;
-            peer.is_connected()
-        } else {
-            false
-        }
-    }
-    
-    /// Get all connected peers
-    ///
-    /// INTENTION: Provide information about all currently connected peers.
-    async fn get_connected_peers(&self) -> Vec<PeerId> {
-        let peers = self.peers.read().await;
-        let mut connected_peers = Vec::new();
-        
-        for (peer_id, peer_mutex) in peers.iter() {
-            let peer = peer_mutex.lock().await;
-            if peer.is_connected() {
-                connected_peers.push(peer_id.clone());
-            }
-        }
-        
-        connected_peers
-    }
-}
-
-impl fmt::Debug for ConnectionPool {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ConnectionPool").finish()
-    }
-}
-
+ 
 /// For backward compatibility with existing code
 struct PeerConnection {
     peer_id: PeerId,
@@ -438,10 +137,54 @@ pub struct QuicTransportOptions {
     cert_path: Option<String>,
 }
 
+
+/// Helper function to generate self-signed certificates for testing
+///
+/// INTENTION: Provide a consistent way to generate test certificates across test and core code, using explicit rustls namespaces to avoid type conflicts.
+pub(crate) fn generate_test_certificates() -> (Vec<rustls::Certificate>, rustls::PrivateKey) {
+    use rcgen;
+    use rustls;
+    // Create certificate parameters with default values
+    let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()]);
+    params.alg = &rcgen::PKCS_ECDSA_P256_SHA256;
+    params.not_before = rcgen::date_time_ymd(2023, 1, 1);
+    params.not_after = rcgen::date_time_ymd(2026, 1, 1);
+
+    let cert = rcgen::Certificate::from_params(params)
+        .expect("Failed to generate certificate");
+
+    // Get the DER encoded certificate and private key
+    let cert_der = cert.serialize_der().expect("Failed to serialize certificate");
+    let key_der = cert.serialize_private_key_der();
+
+    // Convert to rustls types with explicit namespace qualification
+    let rustls_cert = rustls::Certificate(cert_der);
+    let rustls_key = rustls::PrivateKey(key_der);
+
+    (vec![rustls_cert], rustls_key)
+}
+
 impl QuicTransportOptions {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Builder: Attach test certificates for use in test environments.
+    ///
+    /// In production, certificates must be provided by the node. In tests, this method
+    /// attaches self-signed certificates for convenience. This is a temporary measure.
+    ///
+    /// # Example
+    /// ```rust
+    /// let opts = QuicTransportOptions::new().with_test_certificates();
+    /// ```
+    pub fn with_test_certificates(mut self) -> Self {
+        let (certs, key) = generate_test_certificates();
+        self.certificates = Some(certs);
+        self.private_key = Some(key);
+        self
+    }
+
     
     pub fn with_verify_certificates(mut self, verify: bool) -> Self {
         self.verify_certificates = verify;
@@ -831,19 +574,18 @@ impl QuicTransportImpl {
         let peer_id = &message.destination;
         
         // Get the peer state
-        let peer_state = match self.connection_pool.get_peer(peer_id).await {
+        let peer_state = match self.connection_pool.get_peer(peer_id) {
             Some(state) => state,
             None => return Err(NetworkError::ConnectionError(format!("Peer {} not found", peer_id))),
         };
         
         // Check if the peer is connected
-        let peer = peer_state.lock().await;
-        if !peer.is_connected() {
+        if !peer_state.is_connected().await {
             return Err(NetworkError::ConnectionError(format!("Not connected to peer {}", peer_id)));
         }
         
         // Get a stream for sending the message
-        let mut stream = peer.get_send_stream().await?;
+        let mut stream = peer_state.get_send_stream().await?;
         
         // Serialize the message
         let data = bincode::serialize(&message)
@@ -935,15 +677,13 @@ impl QuicTransportImpl {
                             peer_addr.clone(),
                             self.options.max_idle_streams_per_peer,
                             self.logger.clone(),
-                        ).await;
+                        );
                         
                         // Set the connection in the peer state
-                        let mut peer = peer_state.lock().await;
-                        peer.set_connection(connection).await;
-                        drop(peer); // Explicitly drop the lock
+                        peer_state.set_connection(connection).await;
                         
                         // Start a task to receive incoming messages
-                        self.spawn_message_receiver(peer_id.clone(), peer_state.clone()).await;
+                        self.spawn_message_receiver(peer_id.clone(), peer_state.clone());
                         
                         // Verify the connection is properly registered
                         let is_connected = self.connection_pool.is_peer_connected(&peer_id).await;
@@ -1028,34 +768,33 @@ impl QuicTransportImpl {
             remote_addr.to_string(),
             self.options.max_idle_streams_per_peer,
             self.logger.clone(),
-        ).await;
-        
+        );
+
         // Set the connection in the peer state
-        let mut peer = peer_state.lock().await;
-        peer.set_connection(connection).await;
-        
+        {
+            let mut conn_guard = peer_state.connection.lock().await;
+            *conn_guard = Some(connection);
+        }
+
         // Spawn a task to receive incoming messages
-        self.spawn_message_receiver(peer_id.clone(), peer_state.clone()).await;
-        
+        self.spawn_message_receiver(peer_id.clone(), peer_state.clone());
+
         Ok(())
     }
-    
-    async fn spawn_message_receiver(&self, peer_id: PeerId, peer_state: Arc<Mutex<PeerState>>) {
-        let self_clone = self.clone();
-        
-        let task = tokio::spawn(async move {
-            loop {
-                // Get the connection from the peer state
-                let connection = {
-                    let peer = peer_state.lock().await;
-                    if let Some(conn) = &peer.connection {
-                        conn.clone()
-                    } else {
-                        // Connection is gone, exit the loop
-                        break;
-                    }
-                };
-                
+
+
+fn spawn_message_receiver(&self, peer_id: PeerId, peer_state: Arc<PeerState>) {
+    let self_clone = self.clone();
+
+    let task = tokio::spawn(async move {
+        loop {
+            // Get the connection from the peer state
+            let connection = {
+                let conn_guard = peer_state.connection.lock().await;
+                conn_guard.as_ref().cloned()
+            };
+
+            if let Some(connection) = connection {
                 // Accept an incoming stream
                 match connection.accept_uni().await {
                     Ok(stream) => {
@@ -1075,65 +814,48 @@ impl QuicTransportImpl {
                         break;
                     }
                 }
-            }
-            
-            // Connection is closed, clean up the peer state
-            let mut peer = peer_state.lock().await;
-            let _ = peer.close_connection().await;
-        });
-        
-        // Store the task handle
-        let mut tasks = self.background_tasks.lock().await;
-        tasks.push(task);
-    }
-    
-    /// Receive and process a message from a peer
-    ///
-    /// INTENTION: Handle the deserialization and processing of incoming messages.
-    async fn receive_message(&self, peer_id: PeerId, mut stream: quinn::RecvStream) -> Result<(), NetworkError> {
-        // Read the message length (4 bytes)
-        let mut len_bytes = [0u8; 4];
-        stream.read_exact(&mut len_bytes).await
-            .map_err(|e| NetworkError::MessageError(format!("Failed to read message length: {}", e)))?;
-        
-        let msg_len = u32::from_be_bytes(len_bytes) as usize;
-        
-        // Read the message data
-        let mut buffer = vec![0u8; msg_len];
-        stream.read_exact(&mut buffer).await
-            .map_err(|e| NetworkError::MessageError(format!("Failed to read message data: {}", e)))?;
-        
-        // Deserialize the message
-        let message: NetworkMessage = bincode::deserialize(&buffer)
-            .map_err(|e| NetworkError::MessageError(format!("Failed to deserialize message: {}", e)))?;
-        
-        // Log the received message details
-        self.logger.debug(&format!("Received message from {} (connected as {})", message.source, peer_id));
-        
-        // Process the message
-        self.process_incoming_message(message).await
-    }
-    
-    /// Get or establish a connection to a peer
-    ///
-    /// INTENTION: Ensure there's a valid connection to the specified peer.
-    async fn get_or_connect(
-        &self,
-        peer_id: &PeerId,
-    ) -> Result<Arc<PeerConnection>, NetworkError> {
-        // Check if we're already connected to this peer
-        if self.connection_pool.is_peer_connected(peer_id).await {
-            // Get the peer state
-            if let Some(peer_state) = self.connection_pool.get_peer(peer_id).await {
-                let peer = peer_state.lock().await;
-                return Ok(Arc::new(PeerConnection::new(peer_id.clone(), peer.address.clone())));
+            } else {
+                // Connection is gone, exit the loop
+                break;
             }
         }
+    }) ; // <-- Close the async block and tokio::spawn call
+    // Optionally, you may want to store the JoinHandle if tracking tasks
+}
+
+    /// Receive a message from a peer over a QUIC stream
+    /// INTENTION: Read, deserialize, and dispatch the message to registered handlers.
+    async fn receive_message(&self, peer_id: PeerId, mut stream: quinn::RecvStream) -> Result<(), NetworkError> {
+        use tokio::io::AsyncReadExt;
         
-        // We're not connected, so we can't get a connection
-        Err(NetworkError::ConnectionError(format!("Not connected to peer {}", peer_id)))
+        // Read the 4-byte length prefix
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).await.map_err(|e| {
+            self.logger.error(&format!("Failed to read message length from {}: {}", peer_id, e));
+            NetworkError::MessageError(format!("Failed to read message length: {}", e))
+        })?;
+        let msg_len = u32::from_be_bytes(len_buf) as usize;
+
+        // Read the message bytes
+        let mut data = vec![0u8; msg_len];
+        stream.read_exact(&mut data).await.map_err(|e| {
+            self.logger.error(&format!("Failed to read message from {}: {}", peer_id, e));
+            NetworkError::MessageError(format!("Failed to read message: {}", e))
+        })?;
+
+        // Deserialize the message
+        let mut message: NetworkMessage = match bincode::deserialize(&data) {
+            Ok(msg) => msg,
+            Err(e) => {
+                self.logger.error(&format!("Failed to deserialize message from {}: {}", peer_id, e));
+                return Err(NetworkError::MessageError(format!("Failed to deserialize message: {}", e)));
+            }
+        };
+        // Dispatch to handlers
+        self.process_incoming_message(message).await?;
+        Ok(())
     }
-    
+
     /// Clone implementation for QuicTransportImpl
     ///
     /// INTENTION: Allow cloning of QuicTransportImpl for use in async tasks.

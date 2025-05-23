@@ -1005,6 +1005,15 @@ impl Node {
     }
 
     /// Create a transport instance based on the transport type in the config
+    /// Create a transport instance based on the transport type in the config.
+    ///
+    /// INTENTION: Instantiate and return a boxed NetworkTransport implementation according to the
+    /// configuration. This function is responsible for enforcing the architectural boundary that
+    /// only transport-specific instantiation logic is present here. It does not leak implementation
+    /// details or handle non-transport concerns.
+    ///
+    /// ARCHITECTURAL BOUNDARIES: Only constructs and returns a transport instance. Does not mutate
+    /// other node state or perform side effects beyond instantiation.
     async fn create_transport(
         &self,
         network_config: &NetworkConfig,
@@ -1012,38 +1021,24 @@ impl Node {
     ) -> Result<Box<dyn NetworkTransport>> {
         match network_config.transport_type {
             TransportType::Quic => {
-                // If QUIC is specified, use the QUIC transport
-                if let Some(_quic_options) = &network_config.quic_options {
-                    self.logger.debug("Creating QUIC transport");
+                self.logger.debug("Creating QUIC transport");
 
-                    // Clone the NetworkConfig to avoid reference issues
-                    let owned_config = network_config.clone();
+                // Use bind address and options from config
+                let bind_addr = network_config.transport_options.bind_address;
+                let quic_options = network_config.quic_options.clone()
+                    .ok_or_else(|| anyhow!("QUIC options not provided"))?;
 
-                    // Get the relevant configuration options for creating the QUIC transport
-                    
-                    // Get the bind address from the transport options
-                    let bind_addr: SocketAddr = owned_config.transport_options.bind_address;
-                    
-                    // Get the QUIC options or return an error if not available
-                    let quic_options = network_config.quic_options.clone()
-                        .ok_or_else(|| anyhow!("QUIC options not provided"))?;
-                    
-                    // Create the QUIC transport with the correct parameters
-                    let transport = QuicTransport::new(
-                        node_id, 
-                        bind_addr,
-                        quic_options,
-                        self.logger.clone(),
-                    ).map_err(|e| anyhow!("Failed to create QUIC transport: {}", e))?;
+                let transport = QuicTransport::new(
+                    node_id,
+                    bind_addr,
+                    quic_options,
+                    self.logger.clone(),
+                ).map_err(|e| anyhow!("Failed to create QUIC transport: {}", e))?;
 
-                    self.logger.debug("QUIC transport created");
-                    Ok(Box::new(transport))
-                } else {
-                    return Err(anyhow!(
-                        "QUIC transport type specified but no QUIC options provided"
-                    ));
-                }
+                self.logger.debug("QUIC transport created");
+                Ok(Box::new(transport))
             }
+            // Add other transport types here as needed in the future
         }
     }
 

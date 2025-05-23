@@ -17,7 +17,54 @@ use thiserror::Error;
 
 // Internal module declarations
 pub mod peer_registry;
+pub mod connection_pool;
+pub mod peer_state;
+pub mod stream_pool;
 pub mod quic_transport;
+
+pub use connection_pool::ConnectionPool;
+pub use peer_state::PeerState;
+pub use stream_pool::StreamPool;
+
+// --- Moved from quic_transport.rs ---
+/// Custom certificate verifier that skips verification for testing
+///
+/// INTENTION: Allow connections without certificate verification in test environments
+pub struct SkipServerVerification {}
+
+impl rustls::client::ServerCertVerifier for SkipServerVerification {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::Certificate,
+        _intermediates: &[rustls::Certificate],
+        _server_name: &rustls::ServerName,
+        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _ocsp_response: &[u8],
+        _now: std::time::SystemTime,
+    ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::ServerCertVerified::assertion())
+    }
+}
+
+/// Helper function to generate self-signed certificates for testing
+///
+/// INTENTION: Provide a consistent way to generate test certificates across test and core code, using explicit rustls namespaces to avoid type conflicts.
+pub(crate) fn generate_test_certificates() -> (Vec<rustls::Certificate>, rustls::PrivateKey) {
+    use rcgen;
+    use rustls;
+    let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()]);
+    params.alg = &rcgen::PKCS_ECDSA_P256_SHA256;
+    params.not_before = rcgen::date_time_ymd(2023, 1, 1);
+    params.not_after = rcgen::date_time_ymd(2026, 1, 1);
+    let cert = rcgen::Certificate::from_params(params)
+        .expect("Failed to generate certificate");
+    let cert_der = cert.serialize_der().expect("Failed to serialize certificate");
+    let key_der = cert.serialize_private_key_der();
+    let rustls_cert = rustls::Certificate(cert_der);
+    let rustls_key = rustls::PrivateKey(key_der);
+    (vec![rustls_cert], rustls_key)
+}
+
 // Removed WebSocket module completely
 
 // Re-export types/traits from submodules or parent modules
