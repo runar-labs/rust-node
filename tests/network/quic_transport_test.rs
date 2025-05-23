@@ -2,16 +2,14 @@ use std::sync::Arc;
 use std::net::SocketAddr;
 use std::time::Duration;
 use std::time::SystemTime;
-use std::error::Error;
 use tokio::sync::mpsc;
 use rcgen;
 use rustls;
-
-use runar_common::logging::Logger as CommonLogger;
-use runar_common::logging::Component;
+use runar_common::logging::{Component, Logger};
+ 
 
 use runar_node::network::transport::{
-    NetworkError, NetworkMessage, NetworkMessagePayloadItem, NetworkTransport, PeerId,
+    NetworkMessage, NetworkMessagePayloadItem, NetworkTransport, PeerId,
     quic_transport::{QuicTransport, QuicTransportOptions},
 };
 use runar_node::network::discovery::multicast_discovery::PeerInfo;
@@ -64,36 +62,11 @@ pub fn generate_test_certificates() -> (Vec<rustls::Certificate>, rustls::Privat
     (vec![rustls_cert], rustls_key)
 }
 
-/// Simple logger implementation for testing
-struct TestLogger {
-    name: String,
-}
-
-impl TestLogger {
-    fn new(name: &str) -> Self {
-        Self { name: name.to_string() }
-    }
-    
-    fn info(&self, message: &str) {
-        println!("[{}] INFO: {}", self.name, message);
-    }
-    
-    fn error(&self, message: &str) {
-        println!("[{}] ERROR: {}", self.name, message);
-    }
-    
-    fn debug(&self, message: &str) {
-        println!("[{}] DEBUG: {}", self.name, message);
-    }
-}
-
-
-
 #[tokio::test(flavor = "multi_thread")]
 async fn test_quic_transport_connection_end_to_end() {
     // Create two transport instances for testing
-    let logger_a = Arc::new(TestLogger::new("TransportA"));
-    let logger_b = Arc::new(TestLogger::new("TransportB"));
+    let logger_a = Arc::new(Logger::new_root(Component::Network, "transporter-a"));
+    let logger_b = Arc::new(Logger::new_root(Component::Network, "transporter-b"));
     
     // Create node info for both nodes with proper PeerId type
     let node_a_id_str = "node-a".to_string();
@@ -132,8 +105,8 @@ async fn test_quic_transport_connection_end_to_end() {
     
     // Create the transport instances with proper Logger type
     // Get a runar_common::Logger for each transport
-    let common_logger_a = CommonLogger::new_root(Component::Network, "node-a");
-    let common_logger_b = CommonLogger::new_root(Component::Network, "node-b");
+    let common_logger_a = Logger::new_root(Component::Network, "node-a");
+    let common_logger_b = Logger::new_root(Component::Network, "node-b");
     
     // Create options for both transports with test certificates and verification disabled
     let (certs_a, key_a) = generate_test_certificates();
