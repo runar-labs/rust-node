@@ -57,6 +57,9 @@ struct QuicTransportImpl {
     options: QuicTransportOptions,
     logger: Arc<Logger>,
     message_handlers: Arc<StdRwLock<Vec<Box<dyn Fn(NetworkMessage) -> Result<(), NetworkError> + Send + Sync + 'static>>>>,
+    local_node: NodeInfo,
+    // Channel for sending peer node info updates
+    peer_node_info_sender: tokio::sync::broadcast::Sender<NodeInfo>,
 }
 
 /// Main QUIC transport implementation - Public API
@@ -279,22 +282,28 @@ impl QuicTransportImpl {
     ///
     /// INTENTION: Initialize the core implementation with the provided parameters.
     fn new(
-        node_id: PeerId,
+        local_node: NodeInfo,
         bind_addr: SocketAddr,
         options: QuicTransportOptions,
         logger: Logger,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let connection_pool = Arc::new(ConnectionPool::new(logger.clone()));
         
+        // Create a broadcast channel for peer node info updates
+        // The channel size determines how many messages can be buffered before lagging
+        let (peer_node_info_sender, _) = tokio::sync::broadcast::channel(32);
+         
         Ok(Self {
-            node_id,
+            node_id: local_node.peer_id.clone(),
             bind_addr,
             // Initialize with Mutex for proper interior mutability
             endpoint: Mutex::new(None),
             connection_pool,
             options,
-            logger:Arc::new(logger),
+            logger: Arc::new(logger),
             message_handlers: Arc::new(StdRwLock::new(Vec::new())),
+            local_node,
+            peer_node_info_sender,
         })
     }
     
@@ -593,7 +602,7 @@ impl QuicTransportImpl {
         self.logger.debug(&format!("Sent message to peer {}", peer_id));
         Ok(())
     }
-    
+     
     /// Connect to a peer using the provided discovery message
     ///
     /// INTENTION: Establish a connection to a remote peer using the provided discovery information.
@@ -713,13 +722,12 @@ impl QuicTransportImpl {
     ///
     /// INTENTION: Exchange node information with the peer to complete the connection setup.
     /// This is called after a successful connection to exchange node information.
-    /// Returns the peer's NodeInfo after successful handshake.
+    /// The peer's NodeInfo will be sent through the peer_node_info_sender channel.
     async fn handshake_peer(
         self: &Arc<Self>,
         discovery_msg: PeerInfo,
-        local_node: NodeInfo,
         running: &Arc<AtomicBool>,
-    ) -> Result<NodeInfo, NetworkError> {
+    ) -> Result<(), NetworkError> {
         if !running.load(Ordering::Relaxed) {
             return Err(NetworkError::TransportError("Transport not running".to_string()));
         }
@@ -743,81 +751,22 @@ impl QuicTransportImpl {
             message_type: "NODE_INFO_HANDSHAKE".to_string(),
             payloads: vec![NetworkMessagePayloadItem {
                 path: "".to_string(),  
-                value_bytes: bincode::serialize(&local_node)
+                value_bytes: bincode::serialize(&self.local_node)
                     .map_err(|e| NetworkError::MessageError(format!("Failed to serialize node info: {}", e)))?,
                 correlation_id,
             }],
         };
-        
-        // Create a channel for receiving the handshake response
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<NetworkMessage>(1);
-        
-        // Register a temporary message handler for the handshake response
-        let peer_id_clone = peer_id.clone();
-        let handler_tx = tx.clone();
-        let error_logger = Arc::new(self.logger.clone()); 
-        let handler = Box::new(move |msg: NetworkMessage| -> Result<(), NetworkError> {
-            let error_logger = error_logger.clone();
-            if msg.source == peer_id_clone && msg.message_type == "NODE_INFO_HANDSHAKE_RESPONSE" {
-                // Send the message to our channel
-                let tx = handler_tx.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = tx.send(msg).await {
-                        // This is not a critical error, just log it
-                        error_logger.warn(&format!("Failed to send handshake response to channel: {}", e)); 
-                    }
-                });
-            }
-            Ok(())
-        });
-        
-        // Register the handler
-        self.register_message_handler(handler).await?;
-        
+         
         // Send the handshake message
         self.send_message(handshake_message, running).await?;
         self.logger.info(&format!("Sent handshake message to peer {}", peer_id));
         
-        // Wait for the handshake response with a timeout
-        let response = match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
-            Ok(Some(response)) => {
-                self.logger.info(&format!("Received handshake response from peer {}", peer_id));
-                response
-            },
-            Ok(None) => {
-                return Err(NetworkError::ConnectionError(format!("Handshake channel closed before receiving response from peer {}", peer_id)));
-            },
-            Err(_) => {
-                return Err(NetworkError::ConnectionError(format!("Timeout waiting for handshake response from peer {}", peer_id)));
-            }
-        };
+        // The handshake response will be processed in process_incoming_message
+        // and the peer_node_info will be sent through the channel there
         
-        // Process the handshake response
-        if response.message_type == "NODE_INFO_HANDSHAKE_RESPONSE" {
-            if let Some(payload) = response.payloads.first() {
-                match bincode::deserialize::<NodeInfo>(&payload.value_bytes) {
-                    Ok(peer_node_info) => {
-                        self.logger.info(&format!("Handshake completed with peer {}, received node info: {:?}", 
-                                                peer_id, peer_node_info));
-                        
-                        // Update peer state with the node info
-                        if let Some(state) = self.connection_pool.get_peer(&peer_id) {
-                            state.set_node_info(peer_node_info.clone()).await;
-                        }
-                        
-                        // Return the peer's node info
-                        return Ok(peer_node_info);
-                    },
-                    Err(e) => {
-                        return Err(NetworkError::MessageError(format!("Failed to deserialize peer node info: {}", e)));
-                    }
-                }
-            }
-        }
-        
-        Err(NetworkError::MessageError(format!("Received unexpected message type during handshake: {}", response.message_type)))
+        // Return success - the actual NodeInfo will be sent via the channel
+        Ok(())
     }
-    
     
     async fn register_message_handler(
         self: &Arc<Self>,
@@ -840,7 +789,7 @@ impl QuicTransportImpl {
         self.logger.debug(&format!("Processing message from {}, type: {}", message.source, message.message_type));
         
         // Special handling for handshake messages
-        if message.message_type == "NODE_INFO_HANDSHAKE" {
+        if message.message_type == "NODE_INFO_HANDSHAKE" || message.message_type == "NODE_INFO_HANDSHAKE_RESPONSE" {
             self.logger.debug(&format!("Received handshake message from {}", message.source));
             
             // Extract the node info from the message
@@ -852,35 +801,30 @@ impl QuicTransportImpl {
                         // Store the node info in the peer state
                         if let Some(peer_state) = self.connection_pool.get_peer(&message.source) {
                             peer_state.set_node_info(peer_node_info.clone()).await;
-                            
-                            // Create a response message with our node info
-                            // For simplicity, we'll create a minimal NodeInfo with just our ID
-                            let local_node_info = NodeInfo {
-                                peer_id: self.node_id.clone(),
-                                network_ids: vec!["default".to_string()],
-                                addresses: vec![self.bind_addr.to_string()],
-                                services: vec![],
-                                last_seen: std::time::SystemTime::now(),
-                            };
-                            
-                            // Create the response message
-                            let response = NetworkMessage {
-                                source: self.node_id.clone(),
-                                destination: message.source.clone(),
-                                message_type: "NODE_INFO_HANDSHAKE_RESPONSE".to_string(),
-                                payloads: vec![NetworkMessagePayloadItem {
-                                    // Preserve the original path from the request
-                                    path: payload.path.clone(),
-                                    value_bytes: bincode::serialize(&local_node_info)
-                                        .map_err(|e| NetworkError::MessageError(format!("Failed to serialize node info: {}", e)))?,
-                                    correlation_id: payload.correlation_id.clone(),
-                                }],
-                            };
-                            
-                            // Send the response
-                            self.send_message(response, &Arc::new(AtomicBool::new(true))).await?;
-                            self.logger.debug(&format!("Sent handshake response to {}", message.source));
+
+                            if message.message_type == "NODE_INFO_HANDSHAKE" {
+                                // Create the response message
+                                let response = NetworkMessage {
+                                    source: self.node_id.clone(),
+                                    destination: message.source.clone(),
+                                    message_type: "NODE_INFO_HANDSHAKE_RESPONSE".to_string(),
+                                    payloads: vec![NetworkMessagePayloadItem {
+                                        // Preserve the original path from the request
+                                        path: payload.path.clone(),
+                                        value_bytes: bincode::serialize(&self.local_node)
+                                            .map_err(|e| NetworkError::MessageError(format!("Failed to serialize node info: {}", e)))?,
+                                        correlation_id: payload.correlation_id.clone(),
+                                    }],
+                                };
+                                
+                                // Send the response
+                                self.send_message(response, &Arc::new(AtomicBool::new(true))).await?;
+                                self.logger.debug(&format!("Sent handshake response to {}", message.source));
+                            }
                         }
+
+                         // Send to the channel - ignore errors if there are no subscribers
+                         let _ = self.peer_node_info_sender.send(peer_node_info);
                     },
                     Err(e) => {
                         self.logger.error(&format!("Failed to deserialize node info from {}: {}", message.source, e));
@@ -1094,9 +1038,9 @@ impl NetworkTransport for QuicTransport {
     
     async fn connect_peer(
         &self,
-        discovery_msg: PeerInfo,
-        local_node: NodeInfo,
-    ) -> Result<NodeInfo, NetworkError> {
+        discovery_msg: PeerInfo, 
+    ) -> Result<(), NetworkError> {
+ 
         // Call the inner implementation which returns a task handle
         match self.inner.connect_peer(discovery_msg.clone(), &self.running).await {
             Ok(task) => {
@@ -1106,10 +1050,9 @@ impl NetworkTransport for QuicTransport {
                 
                 // After connection is established, start the handshake process
                 // Send the node info to the peer and wait for the response
-                match self.inner.handshake_peer(discovery_msg, local_node, &self.running).await {
-                    Ok(peer_node_info) => {
-                        // Return the peer's node info
-                        Ok(peer_node_info)
+                match self.inner.handshake_peer(discovery_msg, &self.running).await {
+                    Ok(()) => {
+                        Ok(())
                     },
                     Err(e) => {
                         self.logger.error(&format!("Handshake failed after successful connection: {}", e));
@@ -1131,6 +1074,14 @@ impl NetworkTransport for QuicTransport {
     ) -> Result<(), NetworkError> {
         self.inner.register_message_handler(handler).await
     }
+    
+    /// Subscribe to peer node info updates
+    /// 
+    /// INTENTION: Allow callers to subscribe to peer node info updates when they are received
+    /// during handshakes. This is used by the Node to create RemoteService instances.
+    async fn subscribe_to_peer_node_info(&self) -> tokio::sync::broadcast::Receiver<NodeInfo> {
+        self.inner.peer_node_info_sender.subscribe()
+    }
 }
 
 impl QuicTransport {
@@ -1143,19 +1094,19 @@ impl QuicTransport {
     /// for thread/task management and lifecycle, while delegating protocol-specific logic to
     /// the QuicTransportImpl which is held in an Arc.
     pub fn new(
-        node_id: PeerId,
+        local_node_info: NodeInfo,
         bind_addr: SocketAddr,
         options: QuicTransportOptions,
         logger: Logger,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         // Create the inner implementation
-        let inner = QuicTransportImpl::new(node_id.clone(), bind_addr, options, logger.clone())?;
+        let inner = QuicTransportImpl::new(local_node_info.clone(), bind_addr, options, logger.clone())?;
         
         // Create and return the public API wrapper with proper task management
         Ok(Self {
             inner: Arc::new(inner),
             logger,
-            node_id,
+            node_id: local_node_info.peer_id.clone(),
             background_tasks: Mutex::new(Vec::new()),
             running: Arc::new(AtomicBool::new(false)),
         })

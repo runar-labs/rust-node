@@ -9,7 +9,7 @@ use runar_common::logging::{Component, Logger};
  
 
 use runar_node::network::transport::{
-    NetworkMessage, NetworkMessagePayloadItem, NetworkTransport, PeerId,
+    NetworkMessage, NetworkMessagePayloadItem, NetworkTransport, PeerId, NetworkError,
     quic_transport::{QuicTransport, QuicTransportOptions},
 };
 use runar_node::network::discovery::multicast_discovery::PeerInfo;
@@ -65,8 +65,8 @@ pub fn generate_test_certificates() -> (Vec<rustls::Certificate>, rustls::Privat
 #[tokio::test(flavor = "multi_thread")]
 async fn test_quic_transport_connection_end_to_end() {
     // Create two transport instances for testing
-    let logger_a = Arc::new(Logger::new_root(Component::Network, "transporter-a"));
-    let logger_b = Arc::new(Logger::new_root(Component::Network, "transporter-b"));
+    let logger_a = Logger::new_root(Component::Network, "transporter-a");
+    let logger_b = Logger::new_root(Component::Network, "transporter-b");
 
     // Create node info for both nodes with proper PeerId type
     let node_a_id_str = "node-a".to_string();
@@ -105,102 +105,130 @@ async fn test_quic_transport_connection_end_to_end() {
     
     // Create the transport instances with proper Logger type
     // Get a runar_common::Logger for each transport
-    let common_logger_a = Logger::new_root(Component::Network, "node-a");
-    let common_logger_b = Logger::new_root(Component::Network, "node-b");
+    // let common_logger_a = Logger::new_root(Component::Network, "node-a");
+    // let common_logger_b = Logger::new_root(Component::Network, "node-b");
     
-    // Create options for both transports with test certificates and verification disabled
+    // Create peer info for discovery simulation
+    let peer_a_info = PeerInfo {
+        public_key: node_a_id.public_key.clone(),
+        addresses: vec![node_a_addr.to_string()],
+    };
+    
+    let peer_b_info = PeerInfo {
+        public_key: node_b_id.public_key.clone(),
+        addresses: vec![node_b_addr.to_string()],
+    };
+    
+    // Generate test certificates for both nodes
     let (certs_a, key_a) = generate_test_certificates();
+    let (certs_b, key_b) = generate_test_certificates();
+    
+    // Create transport options with test certificates
     let options_a = QuicTransportOptions::new()
         .with_certificates(certs_a)
         .with_private_key(key_a)
         .with_verify_certificates(false)
-        .with_certificate_verifier(Arc::new(SkipServerVerification {}))
-        .with_keep_alive_interval(Duration::from_secs(1))
-        .with_connection_idle_timeout(Duration::from_secs(60))
-        .with_stream_idle_timeout(Duration::from_secs(30));
-    
-    let (certs_b, key_b) = generate_test_certificates();
+        .with_certificate_verifier(Arc::new(SkipServerVerification {}));
+        
     let options_b = QuicTransportOptions::new()
         .with_certificates(certs_b)
         .with_private_key(key_b)
         .with_verify_certificates(false)
-        .with_certificate_verifier(Arc::new(SkipServerVerification {}))
-        .with_keep_alive_interval(Duration::from_secs(1))
-        .with_connection_idle_timeout(Duration::from_secs(60))
-        .with_stream_idle_timeout(Duration::from_secs(30));
+        .with_certificate_verifier(Arc::new(SkipServerVerification {}));
     
-    // Create the transport instances
-    let transport_a = Arc::new(QuicTransport::new(
-        node_a_id.clone(),
+    // Create message channels
+    let (tx_a, _rx_a) = mpsc::channel(100);
+    let (tx_b, mut rx_b) = mpsc::channel(100);
+    
+    // Create transport instances with the new API that takes NodeInfo
+    let transport_a = QuicTransport::new(
+        node_a_info.clone(),
         node_a_addr,
         options_a,
-        common_logger_a,
-    ).expect("Failed to create transport A"));
+        logger_a.clone(),
+    ).expect("Failed to create transport A");
     
-    let transport_b = Arc::new(QuicTransport::new(
-        node_b_id.clone(),
+    let transport_b = QuicTransport::new(
+        node_b_info.clone(),
         node_b_addr,
         options_b,
-        common_logger_b,
-    ).expect("Failed to create transport B"));
+        logger_b.clone(),
+    ).expect("Failed to create transport B");
     
-    // Start both transports
+    // Start the transports
     logger_a.info("Starting transport A");
     transport_a.start().await.expect("Failed to start transport A");
-    
     logger_b.info("Starting transport B");
     transport_b.start().await.expect("Failed to start transport B");
     
     // Give the transports a moment to initialize
     tokio::time::sleep(Duration::from_millis(500)).await;
     
-    // Create peer info for both nodes with correct fields
-    let peer_a_info = PeerInfo {
-        addresses: vec![node_a_addr.to_string()],
-        public_key: node_a_id_str.clone(), // Using node_id as public key for simplicity
-    };
+    // Register message handlers
+    transport_a.register_message_handler(Box::new(move |msg| {
+        let tx = tx_a.clone();
+        tokio::spawn(async move {
+            tx.send(msg).await.expect("Failed to forward message to channel");
+            Ok::<(), NetworkError>(())
+        });
+        Ok(())
+    })).await.expect("Failed to register message handler for A");
     
-    let peer_b_info = PeerInfo {
-        addresses: vec![node_b_addr.to_string()],
-        public_key: node_b_id_str.clone(), // Using node_id as public key for simplicity
-    };
-    
-    // Create message channels for testing
-    let (tx_b, mut rx_b) = mpsc::channel::<NetworkMessage>(10);
-    
-    // Register message handler for node B
     transport_b.register_message_handler(Box::new(move |msg| {
         let tx = tx_b.clone();
         tokio::spawn(async move {
-            let _ = tx.send(msg).await;
+            tx.send(msg).await.expect("Failed to forward message to channel");
+            Ok::<(), NetworkError>(())
         });
         Ok(())
-    })).await.expect("Failed to register handler for B");
+    })).await.expect("Failed to register message handler for B");
+    
+    // Subscribe to peer node info updates for both transports
+    let mut node_info_receiver_a = transport_a.subscribe_to_peer_node_info().await;
+    let mut node_info_receiver_b = transport_b.subscribe_to_peer_node_info().await;
     
     // Attempt to establish connections between the nodes
-    // We'll retry a few times to ensure the connections are established
-    let max_retries = 10;
+    let max_retries = 5;
     let mut a_to_b_connected = false;
     let mut b_to_a_connected = false;
     
-    for retry in 0..max_retries {
-        println!("Retry {}: A->B connected: {}, B->A connected: {}", retry, a_to_b_connected, b_to_a_connected);
-        
+    for retry in 1..=max_retries {
         // Try to connect A to B if not already connected
         if !a_to_b_connected {
             println!("Attempting to connect A to B (retry {})", retry);
             // Clone the peer info for each connection attempt
             let peer_b_info_clone = peer_b_info.clone();
-            let node_a_info_clone = node_a_info.clone();
-            match transport_a.connect_peer(peer_b_info_clone, node_a_info_clone).await {
-                Ok(peer_node_info) => {
+            match transport_a.connect_peer(peer_b_info_clone).await {
+                Ok::<(), NetworkError>(()) => {
                     a_to_b_connected = true;
                     println!("Successfully connected A to B");
                     
-                    // Validate the returned peer node info
-                    assert_eq!(peer_node_info.peer_id, node_b_id, "Peer ID in returned NodeInfo doesn't match expected node B ID");
-                    assert_eq!(peer_node_info.network_ids, node_b_info.network_ids, "Network IDs in returned NodeInfo don't match");
-                    assert!(!peer_node_info.addresses.is_empty(), "Addresses in returned NodeInfo should not be empty");
+                    // Receive the peer node info from the channel
+                    match tokio::time::timeout(Duration::from_secs(5), node_info_receiver_a.recv()).await {
+                        Ok(Ok(peer_node_info)) => {
+                            // Validate the received peer node info
+                            assert_eq!(peer_node_info.peer_id, node_b_id, "Peer ID in received NodeInfo doesn't match expected node B ID");
+                            assert_eq!(peer_node_info.network_ids, node_b_info.network_ids, "Network IDs in received NodeInfo don't match");
+                            assert_eq!(peer_node_info.services, node_b_info.services, "Services in received NodeInfo don't match");
+                            assert!(!peer_node_info.addresses.is_empty(), "Addresses in received NodeInfo should not be empty");
+                            
+                            // Validate that the addresses contain the expected address
+                            let expected_addr = node_b_addr.to_string();
+                            assert!(peer_node_info.addresses.contains(&expected_addr), 
+                                  "Addresses in received NodeInfo doesn't contain expected address: {}", expected_addr);
+                            
+                            // Validate last_seen is recent (within the last minute)
+                            let now = std::time::SystemTime::now();
+                            let one_minute_ago = now.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() - 60;
+                            let peer_last_seen = peer_node_info.last_seen.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+                            assert!(peer_last_seen >= one_minute_ago, 
+                                  "Last seen timestamp is too old: {:?}", peer_node_info.last_seen);
+                            
+                            println!("Successfully received and validated peer node info for B");
+                        },
+                        Ok(Err(e)) => println!("Failed to receive peer node info for B: {}", e),
+                        Err(_) => println!("Timeout waiting for peer node info for B"),
+                    }
                 },
                 Err(e) => println!("Failed to connect A to B: {}", e),
             }
@@ -211,16 +239,37 @@ async fn test_quic_transport_connection_end_to_end() {
             println!("Attempting to connect B to A (retry {})", retry);
             // Clone the peer info for each connection attempt
             let peer_a_info_clone = peer_a_info.clone();
-            let node_b_info_clone = node_b_info.clone();
-            match transport_b.connect_peer(peer_a_info_clone, node_b_info_clone).await {
-                Ok(peer_node_info) => {
+            match transport_b.connect_peer(peer_a_info_clone).await {
+                Ok::<(), NetworkError>(()) => {
                     b_to_a_connected = true;
                     println!("Successfully connected B to A");
                     
-                    // Validate the returned peer node info
-                    assert_eq!(peer_node_info.peer_id, node_a_id, "Peer ID in returned NodeInfo doesn't match expected node A ID");
-                    assert_eq!(peer_node_info.network_ids, node_a_info.network_ids, "Network IDs in returned NodeInfo don't match");
-                    assert!(!peer_node_info.addresses.is_empty(), "Addresses in returned NodeInfo should not be empty");
+                    // Receive the peer node info from the channel
+                    match tokio::time::timeout(Duration::from_secs(5), node_info_receiver_b.recv()).await {
+                        Ok(Ok(peer_node_info)) => {
+                            // Validate the received peer node info
+                            assert_eq!(peer_node_info.peer_id, node_a_id, "Peer ID in received NodeInfo doesn't match expected node A ID");
+                            assert_eq!(peer_node_info.network_ids, node_a_info.network_ids, "Network IDs in received NodeInfo don't match");
+                            assert_eq!(peer_node_info.services, node_a_info.services, "Services in received NodeInfo don't match");
+                            assert!(!peer_node_info.addresses.is_empty(), "Addresses in received NodeInfo should not be empty");
+                            
+                            // Validate that the addresses contain the expected address
+                            let expected_addr = node_a_addr.to_string();
+                            assert!(peer_node_info.addresses.contains(&expected_addr), 
+                                  "Addresses in received NodeInfo doesn't contain expected address: {}", expected_addr);
+                            
+                            // Validate last_seen is recent (within the last minute)
+                            let now = std::time::SystemTime::now();
+                            let one_minute_ago = now.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() - 60;
+                            let peer_last_seen = peer_node_info.last_seen.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+                            assert!(peer_last_seen >= one_minute_ago, 
+                                  "Last seen timestamp is too old: {:?}", peer_node_info.last_seen);
+                            
+                            println!("Successfully received and validated peer node info for A");
+                        },
+                        Ok(Err(e)) => println!("Failed to receive peer node info for A: {}", e),
+                        Err(_) => println!("Timeout waiting for peer node info for A"),
+                    }
                 },
                 Err(e) => println!("Failed to connect B to A: {}", e),
             }

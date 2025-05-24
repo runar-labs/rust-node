@@ -579,6 +579,64 @@ pub struct Node {
 
 // Implementation for Node
 impl Node {
+    /// Set up a listener for peer node info updates from the transport
+    ///
+    /// INTENTION: Subscribe to peer node info updates from the transport and process them
+    /// by creating RemoteService instances for each capability.
+    async fn setup_peer_node_info_listener(&self) -> Result<()> {
+        // Get the transport
+        let transport = self.network_transport.read().await;
+        if let Some(transport) = transport.as_ref() {
+            // Subscribe to peer node info updates directly using the Transport trait
+            let mut receiver = transport.subscribe_to_peer_node_info().await;
+            
+            // Clone what we need for the task
+            let node = self.clone();
+            let logger = self.logger.clone();
+            
+            // Spawn a task to listen for peer node info updates
+            tokio::spawn(async move {
+                logger.info("Started peer node info listener");
+                
+                loop {
+                    // The broadcast channel's recv() returns a Result, not an Option
+                    match receiver.recv().await {
+                        Ok(peer_node_info) => {
+                            logger.info(format!("Received peer node info from {}", peer_node_info.peer_id));
+                            
+                            // Process the peer node info
+                            if let Err(e) = node.process_remote_capabilities(peer_node_info).await {
+                                logger.error(format!("Failed to process remote capabilities: {}", e));
+                            }
+                        },
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            logger.info("Peer node info channel closed");
+                            break;
+                        },
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            logger.warn(format!("Peer node info receiver lagged, skipped {} messages", skipped));
+                            // Continue receiving messages
+                        }
+                    }
+                }
+                
+                logger.info("Peer node info listener stopped");
+            });
+            
+            self.logger.info("starting network transport layer...");
+            transport
+                .start()
+                .await
+                .map_err(|e| anyhow!("Failed to initialize transport: {}", e))?;
+            
+            return Ok(());
+        }
+        
+        // If we get here, we couldn't set up the listener
+        self.logger.warn("Could not set up peer node info listener");
+        Ok(())
+    }
+    
     /// Create a new Node with the given configuration
     ///
     /// INTENTION: Initialize a new Node with the specified configuration, setting up
@@ -906,20 +964,21 @@ impl Node {
             self.logger.info("Initializing network transport...");
 
             // Create network transport using the factory pattern based on transport_type
-            let node_identifier = self.peer_id.clone();
+            // let node_identifier = self.peer_id.clone();
             let transport = self
-                .create_transport(network_config, node_identifier)
+                .create_transport(network_config)
                 .await?;
-
-            self.logger.info("Initializing network transport layer...");
-            transport
-                .start()
-                .await
-                .map_err(|e| anyhow!("Failed to initialize transport: {}", e))?;
 
             // Store the transport
             let mut transport_guard = self.network_transport.write().await;
             *transport_guard = Some(transport);
+            //release lock
+            drop(transport_guard);
+            
+            
+            // Set up the peer node info listener
+            self.setup_peer_node_info_listener().await?;
+
         }
 
         // Initialize discovery if enabled
@@ -985,7 +1044,6 @@ impl Node {
     }
 
     /// Create a transport instance based on the transport type in the config
-    /// Create a transport instance based on the transport type in the config.
     ///
     /// INTENTION: Instantiate and return a boxed NetworkTransport implementation according to the
     /// configuration. This function is responsible for enforcing the architectural boundary that
@@ -997,8 +1055,10 @@ impl Node {
     async fn create_transport(
         &self,
         network_config: &NetworkConfig,
-        node_id: PeerId,
     ) -> Result<Box<dyn NetworkTransport>> {
+        // Get the local node info to pass to the transport
+        let local_node_info = self.get_local_node_info().await?;
+        
         match network_config.transport_type {
             TransportType::Quic => {
                 self.logger.debug("Creating QUIC transport");
@@ -1009,7 +1069,7 @@ impl Node {
                     .ok_or_else(|| anyhow!("QUIC options not provided"))?;
 
                 let transport = QuicTransport::new(
-                    node_id,
+                    local_node_info,
                     bind_addr,
                     quic_options,
                     self.logger.clone(),
@@ -1083,21 +1143,20 @@ impl Node {
             }
 
             // Not connected yet, so connect to the peer
-            if let Ok(peer_node_info) = transport
-                .connect_peer(peer_info.clone(), local_node_info)
-                .await
-            {
-                self.logger
-                    .info(format!("Connected to node: {}", peer_public_key));
-                
-                self.process_remote_capabilities(peer_node_info).await?;
-
-                return Ok(());
-            } else {
-                self.logger.warn(format!(
-                    "Failed to connect to peer: {}",
-                    peer_public_key
-                ));
+            // The peer node info will be received through the peer_node_info_channel
+            match transport.connect_peer(peer_info.clone()).await {
+                Ok(()) => {
+                    self.logger.info(format!("Connected to node: {}", peer_public_key));
+                    // Note: Peer node info is sent through the peer_node_info_channel
+                    // and will be processed by the peer_node_info_listener task
+                    return Ok(());
+                },
+                Err(e) => {
+                    self.logger.warn(format!(
+                        "Failed to connect to peer {}: {}",
+                        peer_public_key, e
+                    ));
+                }
             }
         } else {
             self.logger
@@ -2340,34 +2399,34 @@ impl RegistryDelegate for Node {
     }
 }
 /// Implementation of discovery listener that forwards node information to Node
-struct NodeDiscoveryListener {
-    logger: Logger,
-    transport: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>,
-}
+// struct NodeDiscoveryListener {
+//     logger: Logger,
+//     transport: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>,
+// }
 
-impl NodeDiscoveryListener {
-    fn new(logger: Logger, transport: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>) -> Self {
-        Self { logger, transport }
-    }
+// impl NodeDiscoveryListener {
+//     fn new(logger: Logger, transport: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>) -> Self {
+//         Self { logger, transport }
+//     }
 
-    async fn handle_discovered_node(&self, discovery_msg: PeerInfo) -> Result<()> {
-        self.logger.info(format!(
-            "Discovery listener found node: {}",
-            discovery_msg.public_key
-        ));
+//     async fn handle_discovered_node(&self, discovery_msg: PeerInfo) -> Result<()> {
+//         self.logger.info(format!(
+//             "Discovery listener found node: {}",
+//             discovery_msg.public_key
+//         ));
 
-        // For now, just log discovery events
-        // The actual connection logic will be handled by the Node
-        self.logger.info(format!(
-            "Node discovery event for: {}",
-            discovery_msg.public_key
-        ));
+//         // For now, just log discovery events
+//         // The actual connection logic will be handled by the Node
+//         self.logger.info(format!(
+//             "Node discovery event for: {}",
+//             discovery_msg.public_key
+//         ));
 
-        // We'll implement proper connection logic elsewhere to avoid the
-        // linter errors related to mutability and type mismatches
-        Ok(())
-    }
-}
+//         // We'll implement proper connection logic elsewhere to avoid the
+//         // linter errors related to mutability and type mismatches
+//         Ok(())
+//     }
+// }
 
 // Implement Clone for Node
 impl Clone for Node {

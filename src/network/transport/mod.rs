@@ -336,8 +336,7 @@ pub trait NetworkTransport: Send + Sync {
     async fn connect_peer(
         &self,
         discovery_msg: PeerInfo,
-        local_node: NodeInfo,
-    ) -> Result<NodeInfo, NetworkError>;
+    ) -> Result<(), NetworkError>;
     
     /// Get the local address this transport is bound to as a string
     fn get_local_address(&self) -> String;
@@ -347,6 +346,12 @@ pub trait NetworkTransport: Send + Sync {
         &self,
         handler: Box<dyn Fn(NetworkMessage) -> Result<(), NetworkError> + Send + Sync + 'static>,
     ) -> Result<(), NetworkError>;
+    
+    /// Subscribe to peer node info updates
+    /// 
+    /// INTENTION: Allow callers to subscribe to peer node info updates when they are received
+    /// during handshakes. This is used by the Node to create RemoteService instances.
+    async fn subscribe_to_peer_node_info(&self) -> tokio::sync::broadcast::Receiver<NodeInfo>;
 }
 
 /// Error type for network operations
