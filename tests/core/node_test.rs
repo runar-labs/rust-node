@@ -129,7 +129,7 @@ async fn test_node_request() {
 
         // Make a request to the math service's add action
         let response = node.request("math/add", params).await.unwrap();
-        if let Some(value) = response.data {
+        if let Some(mut value) = response.data {
             // For ArcValueType, we need to use as_type to extract the value
             let result: f64 = value.as_type().unwrap();
             assert_eq!(result, 8.0);
@@ -228,7 +228,7 @@ async fn test_node_events() {
 
         // Create a handler function for subscription
         // Note: Using the full handler signature with Arc<EventContext> for the node API
-        let handler = move |_ctx: Arc<EventContext>, data: ArcValueType| {
+        let handler = move |_ctx: Arc<EventContext>, mut data: ArcValueType| {
             println!("Received event data: {:?}", data);
 
             // Verify the data matches what we published

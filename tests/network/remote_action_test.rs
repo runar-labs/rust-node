@@ -107,7 +107,7 @@ mod remote_action_tests {
         
         // Use the proper network path format - with network ID for remote actions
         let response = node2.request("math1/add", add_params).await?;
-        if let Some(result_value) = response.data {
+        if let Some(mut result_value) = response.data {
             let result: f64 = result_value.as_type()?;
             assert_eq!(result, 8.0);
             logger.info(format!("Add operation succeeded: 5 + 3 = {}", result));
@@ -123,7 +123,7 @@ mod remote_action_tests {
         });
         
         let response = node1.request("math2/multiply", multiply_params).await?;
-        if let Some(result_value) = response.data {
+        if let Some(mut result_value) = response.data {
             let result: f64 = result_value.as_type()?;
             assert_eq!(result, 28.0);
             logger.info(format!("Multiply operation succeeded: 4 * 7 = {}", result));

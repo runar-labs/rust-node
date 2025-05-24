@@ -205,6 +205,11 @@ impl RemoteService {
                     .await
                     .insert(request_id.clone(), tx);
 
+
+                // we need to add the serializer register to the node .. so we can use here for serialization
+                // let mut registry = SerializerRegistry::new();
+                // let payload_bytes = 
+
                 // Create the network message
                 let message = NetworkMessage {
                     source: service_clone.local_node_id.clone(),

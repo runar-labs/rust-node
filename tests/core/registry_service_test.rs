@@ -49,7 +49,7 @@ async fn test_registry_service_list_services() {
         assert_eq!(response.status, 200, "Registry service request failed: {:?}", response);
         
         // Parse the response to verify it contains our registered services
-        if let Some(value) = response.data {
+        if let Some(mut value) = response.data {
             let services = value.as_list_ref::<ArcValueType>().expect("Expected array response from registry service");
             // The services list should contain at least the math service and the registry service itself
             assert!(services.len() >= 2, "Expected at least 2 services, got {}", services.len());

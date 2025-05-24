@@ -94,7 +94,8 @@ fn test_network_message_serialization() -> Result<()> {
     assert_eq!(deserialized.payloads[0].correlation_id, "correlation-456");
     
     // Deserialize the value bytes back to ArcValueType
-    let mut deserialized_value = registry.deserialize_value(Arc::from(deserialized.payloads[0].value_bytes.clone()))?;
+    let bytes:Arc<[u8]> = Arc::from(deserialized.payloads[0].value_bytes.clone());
+    let mut deserialized_value = registry.deserialize_value(bytes)?;
     let number_value: f64 = deserialized_value.as_type()?;
     assert_eq!(number_value, 42.0);
     
@@ -124,7 +125,8 @@ fn test_struct_serialization_in_network_message() -> Result<()> {
     let arc_value = ArcValueType::from_struct(original.clone());
     
     // Create a SerializerRegistry for serialization
-    let registry = SerializerRegistry::with_defaults();
+    let mut registry = SerializerRegistry::with_defaults();
+    registry.register::<TestStruct>()?;
     
     // Serialize the ArcValueType
     let value_bytes = registry.serialize_value(&arc_value)?;
@@ -209,7 +211,10 @@ fn test_multiple_struct_types_in_message() -> Result<()> {
     
     // Create payloads with different struct types using ArcValueType
     // Create a SerializerRegistry for serialization
-    let registry = SerializerRegistry::with_defaults();
+    let mut registry = SerializerRegistry::with_defaults();
+    registry.register::<UserData>()?;
+    registry.register::<ProductData>()?;
+    
     
     // Create ArcValueType for user data
     let user_arc_value = ArcValueType::from_struct(user.clone());
@@ -287,7 +292,8 @@ fn test_various_types_in_network_messages() -> Result<()> {
     let test_array = vec![1, 2, 3, 4, 5];
     
     // Create a SerializerRegistry for serialization
-    let registry = SerializerRegistry::with_defaults();
+    let mut registry = SerializerRegistry::with_defaults();
+    registry.register::<TestStruct>()?;
     
     // Create payload items for each type using ArcValueType
     // Struct payload
