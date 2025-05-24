@@ -492,7 +492,7 @@ impl ServiceRegistry {
         // store in local_events_by_service
         {
             let mut events = self.local_events_by_service.write().await;
-            let matches = events.find_matches(topic_path);
+            let matches = events.find_matches(&source_service_path);
 
             if matches.is_empty() {
                 // No existing events for this service
@@ -847,7 +847,7 @@ impl ServiceRegistry {
                             let mut updated_subscriptions = Vec::new();
                             let items = match_item.handler.clone();
                             for event_path in items {
-                                if event_path.as_str() == topic_path.as_str() {
+                                if event_path.eq(&topic_path) {
                                     continue;
                                 }
                                 updated_subscriptions.push(event_path);
