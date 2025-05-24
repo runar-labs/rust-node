@@ -12,7 +12,7 @@ use env_logger;
 use rcgen;
 use runar_common::logging::{Component, Logger};
 use runar_common::types::schemas::{ActionMetadata, ServiceMetadata};
-use runar_common::types::{ArcValueType, SerializerRegistry};
+use runar_common::types::{ArcValueType, EventMetadata, SerializerRegistry};
 use rustls;
 use rustls::{Certificate, PrivateKey};
 // use serde_json;
@@ -2105,72 +2105,75 @@ impl Node {
         let topic_string = topic.into();
         self.logger
             .debug(format!("Subscribing to topic: {}", topic_string));
-        let options = SubscriptionOptions::default();
-        let service_path = TopicPath::new("TODO-ADD-SERVICE-PATH", &self.network_id)
-            .map_err(|e| anyhow!("Invalid service path for subscribe_with_options: {}", e))?;
+
         // Convert topic String to TopicPath and callback Box to Arc
         let topic_path = TopicPath::new(&topic_string, &self.network_id)
             .map_err(|e| anyhow!("Invalid topic string for subscribe: {}", e))?;
+        
+        let metadata = EventMetadata{path:topic_path.as_str().to_string(), description: "".to_string(), data_schema: None};
+        
         self.service_registry
-            .register_local_event_subscription(&service_path, &topic_path, callback.into(), options)
+            .register_local_event_subscription(&topic_path, callback.into(), Some(metadata))
             .await
     }
 
-    async fn subscribe_with_options(
-        &self,
-        topic: impl Into<String>,
-        callback: Box<
-            dyn Fn(
-                    Arc<EventContext>,
-                    ArcValueType,
-                ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
-                + Send
-                + Sync,
-        >,
-        options: SubscriptionOptions,
-    ) -> Result<String> {
-        let topic_string = topic.into();
-        self.logger.debug(format!(
-            "Subscribing to topic with options: {}",
-            topic_string
-        ));
-        let service_path = TopicPath::new("TODO-ADD-SERVICE-PATH", &self.network_id)
-            .map_err(|e| anyhow!("Invalid service path for subscribe_with_options: {}", e))?;
-        // Convert topic String to TopicPath
-        let topic_path = TopicPath::new(&topic_string, &self.network_id)
-            .map_err(|e| anyhow!("Invalid topic string for subscribe_with_options: {}", e))?;
-        self.service_registry
-            .register_local_event_subscription(&service_path, &topic_path, callback.into(), options)
-            .await
-    }
+    // async fn subscribe_with_options(
+    //     &self,
+    //     topic: impl Into<String>,
+    //     callback: Box<
+    //         dyn Fn(
+    //                 Arc<EventContext>,
+    //                 ArcValueType,
+    //             ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
+    //             + Send
+    //             + Sync,
+    //     >,
+    //     options: SubscriptionOptions,
+    // ) -> Result<String> {
+    //     let topic_string = topic.into();
+    //     self.logger.debug(format!(
+    //         "Subscribing to topic with options: {}",
+    //         topic_string
+    //     ));
+    //     // Convert topic String to TopicPath
+    //     let topic_path = TopicPath::new(&topic_string, &self.network_id)
+    //         .map_err(|e| anyhow!("Invalid topic string for subscribe_with_options: {}", e))?;
+        
+    //     let metadata = EventMetadata{path:topic_path.as_str().to_string(), description: "".to_string(), data_schema: None};
+        
+        
+    //     self.service_registry
+    //         .register_local_event_subscription(&topic_path, callback.into(), Some(metadata))
+    //         .await
+    // }
 
-    async fn unsubscribe(&self, subscription_id: Option<&str>) -> Result<()> {
+    // async fn unsubscribe(&self, subscription_id: Option<&str>) -> Result<()> {
         // let topic_string = topic.into();
-        if let Some(id) = subscription_id {
-            self.logger
-                .debug(format!("Unsubscribing from  with ID: {}", id));
-            // Directly forward to service registry's method
-            let registry = self.service_registry.clone();
-            match registry.unsubscribe_local(id).await {
-                Ok(_) => {
-                    self.logger.debug(format!(
-                        "Successfully unsubscribed locally from   id {}",
-                        id
-                    ));
-                    Ok(())
-                }
-                Err(e) => {
-                    self.logger.error(format!(
-                        "Failed to unsubscribe locally from  with id {}: {}",
-                        id, e
-                    ));
-                    Err(anyhow!("Failed to unsubscribe locally: {}", e))
-                }
-            }
-        } else {
-            Err(anyhow!("Subscription ID is required"))
-        }
-    }
+    //     if let Some(id) = subscription_id {
+    //         self.logger
+    //             .debug(format!("Unsubscribing from  with ID: {}", id));
+    //         // Directly forward to service registry's method
+    //         let registry = self.service_registry.clone();
+    //         match registry.unsubscribe_local(id).await {
+    //             Ok(_) => {
+    //                 self.logger.debug(format!(
+    //                     "Successfully unsubscribed locally from   id {}",
+    //                     id
+    //                 ));
+    //                 Ok(())
+    //             }
+    //             Err(e) => {
+    //                 self.logger.error(format!(
+    //                     "Failed to unsubscribe locally from  with id {}: {}",
+    //                     id, e
+    //                 ));
+    //                 Err(anyhow!("Failed to unsubscribe locally: {}", e))
+    //             }
+    //         }
+    //     } else {
+    //         Err(anyhow!("Subscription ID is required"))
+    //     }
+    // }
 }
 
 #[async_trait]
@@ -2204,15 +2207,14 @@ impl NodeDelegate for Node {
                 + Sync,
         >,
     ) -> Result<String> {
-        // Delegate to our implementation with default options
-        let options = SubscriptionOptions::default();
         // Parse the topic string into a TopicPath
         let topic_path = TopicPath::new(&topic, &self.network_id)
-            .map_err(|e| anyhow!("Invalid topic string for subscribe: {}", e))?;
-        let service_path = TopicPath::new("TODO-ADD-SERVICE-PATH", &self.network_id)
-            .map_err(|e| anyhow!("Invalid service path for subscribe_with_options: {}", e))?;
+            .map_err(|e| anyhow!("Invalid topic string for subscribe: {}", e))?; 
+
+        let metadata = EventMetadata{path:topic_path.as_str().to_string(), description: "".to_string(), data_schema: None};
+
         self.service_registry
-            .register_local_event_subscription(&service_path, &topic_path, callback.into(), options)
+            .register_local_event_subscription( &topic_path, callback.into(), Some(metadata))
             .await
     }
 
@@ -2232,10 +2234,11 @@ impl NodeDelegate for Node {
         // Parse the topic string into a TopicPath
         let topic_path = TopicPath::new(&topic, &self.network_id)
             .map_err(|e| anyhow!("Invalid topic string for subscribe_with_options: {}", e))?;
-        let service_path = TopicPath::new("TODO-ADD-SERVICE-PATH", &self.network_id)
-            .map_err(|e| anyhow!("Invalid service path for subscribe_with_options: {}", e))?;
+
+        let metadata = EventMetadata{path:topic_path.as_str().to_string(), description: "".to_string(), data_schema: None};
+
         self.service_registry
-            .register_local_event_subscription(&service_path, &topic_path, callback.into(), options)
+            .register_local_event_subscription( &topic_path, callback.into(), Some(metadata))
             .await
     }
 
@@ -2272,16 +2275,10 @@ impl NodeDelegate for Node {
     /// This consolidates all node interactions through a single interface.
     async fn register_action_handler(
         &self,
-        path: String,
+        topic_path: TopicPath,
         handler: ActionHandler,
         metadata: Option<ActionMetadata>,
     ) -> Result<()> {
-        // Convert the string path to a TopicPath
-        let topic_path = match TopicPath::new(&path, &self.network_id) {
-            Ok(tp) => tp,
-            Err(e) => return Err(anyhow!("Invalid topic path: {}", e)),
-        };
-
         self.service_registry
             .register_local_action_handler(&topic_path, handler, metadata)
             .await

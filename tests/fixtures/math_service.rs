@@ -387,6 +387,11 @@ impl AbstractService for MathService {
             )
             .await?;
 
+        // context.subscribe("math/added", Box::new(move |ctx, value| {
+        //     ctx.info(format!("MathService received math/added event: {}", value));
+        //     Ok(())
+        // }));
+
         // Log successful initialization
         context.info("MathService initialized".to_string());
 

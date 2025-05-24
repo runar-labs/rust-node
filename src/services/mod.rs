@@ -189,7 +189,7 @@ impl LifecycleContext {
 
         // Call the delegate to register the action handler
         delegate
-            .register_action_handler(action_path, handler, None)
+            .register_action_handler(topic_path, handler, None)
             .await
     }
 
@@ -258,7 +258,7 @@ impl LifecycleContext {
 
         // Register the action with the provided options
         delegate
-            .register_action_handler(action_path, handler, Some(metadata))
+            .register_action_handler(topic_path, handler, Some(metadata))
             .await
     }
 
@@ -860,7 +860,7 @@ pub trait NodeDelegate: Send + Sync {
     /// INTENTION: Allow services to register handlers for actions through the NodeDelegate.
     async fn register_action_handler(
         &self,
-        path: String,
+        topic_path: TopicPath,
         handler: ActionHandler,
         metadata: Option<ActionMetadata>,
     ) -> Result<()>;

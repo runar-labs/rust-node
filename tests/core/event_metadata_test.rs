@@ -14,7 +14,7 @@ use runar_node::services::service_registry::ServiceRegistry;
 use runar_node::services::{EventContext, SubscriptionOptions};
 use runar_node::routing::TopicPath;
 use runar_common::logging::{Logger, Component};
-use runar_common::types::ArcValueType;
+use runar_common::types::{EventMetadata, ArcValueType};
 
 /// Test that verifies the get_events_metadata_by_subscriber method returns correct metadata for events
 /// 
@@ -61,24 +61,21 @@ async fn test_get_events_metadata_by_subscriber() {
         
         // Register the event subscriptions
         let temperature_subscription_id = registry.register_local_event_subscription(
-            &service_path,
             &temperature_event_path, 
             temperature_callback, 
-            SubscriptionOptions::default()
+            Some(EventMetadata{path:temperature_event_path.as_str().to_string(), description:"Temperature changed".to_string(), data_schema:None})
         ).await.unwrap();
         
         registry.register_local_event_subscription(
-            &service_path,
             &humidity_event_path, 
             humidity_callback, 
-            SubscriptionOptions::default()
+            Some(EventMetadata{path:humidity_event_path.as_str().to_string(), description:"Humidity changed".to_string(), data_schema:None})
         ).await.unwrap();
         
         registry.register_local_event_subscription(
-            &service_path,
             &pressure_event_path, 
             pressure_callback, 
-            SubscriptionOptions::default()
+            Some(EventMetadata{path:pressure_event_path.as_str().to_string(), description:"Pressure changed".to_string(), data_schema:None})
         ).await.unwrap();
         
         // Get the events metadata for the service using the subscriber-based approach

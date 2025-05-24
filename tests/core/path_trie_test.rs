@@ -10,7 +10,7 @@ mod tests {
         let mut trie = PathTrie::new();
         
         // Register a template pattern
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("services/{service_path}/state", "network1").unwrap(),
             "TEMPLATE"
         );
@@ -24,7 +24,7 @@ mod tests {
         // Test parameter extraction
         let matches_with_params = trie.find_matches(&topic);
         assert_eq!(matches_with_params.len(), 1);
-        assert_eq!(matches_with_params[0].handler, "TEMPLATE");
+        assert_eq!(matches_with_params[0].content, "TEMPLATE");
         assert_eq!(matches_with_params[0].params.get("service_path").unwrap(), "math");
         
         // Test with a different network
@@ -41,37 +41,37 @@ mod tests {
         let mut trie = PathTrie::new();
          
         // Simple template pattern
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("serviceA/action1", "network1").unwrap(),
             "serviceA/action1"
         );
         
         // Multiple template parameters
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("serviceA/action2", "network1").unwrap(),
             "serviceA/action2"
         );
         
         // Template at beginning
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("serviceA/action3", "network1").unwrap(),
             "serviceA/action3"
         );
         
         // Template at end
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("serviceB/action1", "network1").unwrap(),
             "serviceB/action1"
         );
         
         // Template in all positions
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("serviceB/action2", "network1").unwrap(),
             "serviceB/action2"
         );
         
         // Template with different network
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("serviceC/action1", "network2").unwrap(),
             "serviceC/action1"
         );
@@ -100,50 +100,50 @@ mod tests {
             let matches = trie.find_matches(&topic);
             
             // Find the match with the expected handler
-            let matching_result = matches.iter().find(|m| m.handler == expected_handler);
+            let matching_result = matches.iter().find(|m| m.content == expected_handler);
             assert!(matching_result.is_some(), "No match found with handler '{}' for {}", expected_handler, topic_str);
             let m = matching_result.unwrap();
             assert_eq!(m.params, expected_params, "Parameter mismatch for handler '{}'", expected_handler);
         }
         
         // Simple template pattern
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("services/{service_path}/state", "network1").unwrap(),
             "SIMPLE_TEMPLATE"
         );
         
         // Multiple template parameters
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("services/{service_path}/actions/{action}", "network1").unwrap(),
             "MULTI_PARAMS"
         );
         
         // Template at beginning
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("{type}/services/state", "network1").unwrap(),
             "START_TEMPLATE"
         );
         
         // Template at end
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("services/state/{param}", "network1").unwrap(),
             "END_TEMPLATE"
         );
         
         // Template in all positions
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("{a}/{b}/{c}", "network1").unwrap(),
             "ALL_TEMPLATES"
         );
         
         // Template with different network
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("services/{service_path}/state", "network2").unwrap(),
             "DIFF_NETWORK"
         );
         
         // With repeated template parameter name
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("services/{param}/actions/{param}", "network1").unwrap(),
             "REPEATED_PARAM"
         );
@@ -208,7 +208,7 @@ mod tests {
         let mut trie = PathTrie::new();
         
         // Register a wildcard pattern
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("services/*/state", "network1").unwrap(),
             "WILDCARD"
         );
@@ -231,37 +231,37 @@ mod tests {
         let mut trie = PathTrie::new();
         
         // Simple wildcard
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("services/*/state", "network1").unwrap(),
             "SIMPLE_WILDCARD"
         );
         
         // Multi-segment wildcard
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("services/>", "network1").unwrap(),
             "MULTI_WILDCARD"
         );
         
         // Wildcard at beginning
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("*/services/state", "network1").unwrap(),
             "START_WILDCARD"
         );
         
         // Wildcard at end
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("services/state/*", "network1").unwrap(),
             "END_WILDCARD"
         );
         
         // Multiple wildcards
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("services/*/actions/*", "network1").unwrap(),
             "MULTI_WILDCARDS"
         );
         
         // Wildcard with different network
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("services/*/state", "network2").unwrap(),
             "DIFF_NETWORK_WILDCARD"
         );
@@ -310,37 +310,37 @@ mod tests {
         let mut trie = PathTrie::new();
         
         // Template + wildcard
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("services/{service_path}/*/details", "network1").unwrap(),
             "TEMPLATE_THEN_WILDCARD"
         );
         
         // Wildcard + template
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("services/*/actions/{action}", "network1").unwrap(),
             "WILDCARD_THEN_TEMPLATE"
         );
         
         // Template + multi-wildcard
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("services/{service_path}/>", "network1").unwrap(),
             "TEMPLATE_THEN_MULTI"
         );
         
         // Multi-wildcard at end with template earlier
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("{type}/services/>", "network1").unwrap(),
             "MULTI_THEN_TEMPLATE"
         );
         
         // Complex mix of templates and wildcards
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("{type}/*/services/{name}/actions/*", "network1").unwrap(),
             "COMPLEX_MIX"
         );
         
         // Different network with same pattern
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("services/{service_path}/*/details", "network2").unwrap(),
             "DIFFERENT_NETWORK"
         );
@@ -389,44 +389,44 @@ mod tests {
         let mut trie = PathTrie::new();
         
         // Add same paths with different networks
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("services/math/state", "network1").unwrap(),
             "MATH_NETWORK1"
         );
         
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("services/math/state", "network2").unwrap(),
             "MATH_NETWORK2"
         );
         
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("services/auth/state", "network1").unwrap(),
             "AUTH_NETWORK1"
         );
         
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("services/auth/state", "network2").unwrap(),
             "AUTH_NETWORK2"
         );
         
         // Add template paths with different networks
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("services/{service}/events", "network1").unwrap(),
             "EVENTS_TEMPLATE_NETWORK1"
         );
         
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("services/{service}/events", "network2").unwrap(),
             "EVENTS_TEMPLATE_NETWORK2"
         );
         
         // Add wildcard paths with different networks
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("services/*/config", "network1").unwrap(),
             "CONFIG_WILDCARD_NETWORK1"
         );
         
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("services/*/config", "network2").unwrap(),
             "CONFIG_WILDCARD_NETWORK2"
         );
@@ -470,22 +470,22 @@ mod tests {
         let mut trie = PathTrie::new();
         
         // Add handlers for different networks
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("services/math/state", "network1").unwrap(),
             "MATH_NETWORK1"
         );
         
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("services/math/state", "network2").unwrap(),
             "MATH_NETWORK2"
         );
         
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("services/*/events", "network1").unwrap(),
             "EVENTS_WILDCARD_NETWORK1"
         );
         
-        trie.add_handler(
+        trie.add_content(
             TopicPath::new("services/{service}/config", "network2").unwrap(),
             "CONFIG_TEMPLATE_NETWORK2"
         );
@@ -494,24 +494,24 @@ mod tests {
         let topic1 = TopicPath::new("services/math/state", "network1").unwrap();
         let matches1 = trie.find_matches(&topic1);
         assert_eq!(matches1.len(), 1);
-        assert_eq!(matches1[0].handler, "MATH_NETWORK1");
+        assert_eq!(matches1[0].content, "MATH_NETWORK1");
         
         let topic2 = TopicPath::new("services/math/state", "network2").unwrap();
         let matches2 = trie.find_matches(&topic2);
         assert_eq!(matches2.len(), 1);
-        assert_eq!(matches2[0].handler, "MATH_NETWORK2");
+        assert_eq!(matches2[0].content, "MATH_NETWORK2");
         
         // Test wildcard matching with network isolation
         let topic3 = TopicPath::new("services/math/events", "network1").unwrap();
         let matches3 = trie.find_matches(&topic3);
         assert_eq!(matches3.len(), 1);
-        assert_eq!(matches3[0].handler, "EVENTS_WILDCARD_NETWORK1");
+        assert_eq!(matches3[0].content, "EVENTS_WILDCARD_NETWORK1");
         
         // Test template matching with parameter extraction
         let topic4 = TopicPath::new("services/math/config", "network2").unwrap();
         let matches4 = trie.find_matches(&topic4);
         assert_eq!(matches4.len(), 1);
-        assert_eq!(matches4[0].handler, "CONFIG_TEMPLATE_NETWORK2");
+        assert_eq!(matches4[0].content, "CONFIG_TEMPLATE_NETWORK2");
         assert_eq!(matches4[0].params.get("service").unwrap(), "math");
         
         // Test non-existent network

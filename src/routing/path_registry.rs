@@ -16,7 +16,7 @@ fn extract_param_name(segment: &str) -> String {
 #[derive(Clone)]
 pub struct PathTrieMatch<T: Clone> {
     /// The handler that matched the path
-    pub handler: T,
+    pub content: T,
     /// Parameters extracted from template segments
     pub params: HashMap<String, String>,
 }
@@ -28,8 +28,8 @@ pub struct PathTrieMatch<T: Clone> {
 /// registered for exact paths, template patterns, and wildcard patterns.
 #[derive(Clone)]
 pub struct PathTrie<T: Clone> {
-    /// Handlers for this exact path
-    handlers: Vec<T>,
+    /// Content for this exact path
+    content: Vec<T>,
     
     /// Child nodes for literal segments
     children: HashMap<String, PathTrie<T>>,
@@ -43,8 +43,8 @@ pub struct PathTrie<T: Clone> {
     /// Template parameter name at this level (if this is a template node)
     template_param_name: Option<String>,
     
-    /// Handlers for multi-wildcard (>) at this level
-    multi_wildcard_handlers: Vec<T>,
+    /// content for multi-wildcard (>) at this level
+    multi_wildcard: Vec<T>,
     
     /// Network-specific tries - the top level trie is keyed by network_id
     networks: HashMap<String, PathTrie<T>>,
@@ -60,18 +60,18 @@ impl<T: Clone> PathTrie<T> {
     /// Create a new empty path trie
     pub fn new() -> Self {
         PathTrie {
-            handlers: Vec::new(),
+            content: Vec::new(),
             children: HashMap::new(),
             wildcard_child: None,
             template_child: None,
             template_param_name: None,
-            multi_wildcard_handlers: Vec::new(),
+            multi_wildcard: Vec::new(),
             networks: HashMap::new(),
         }
     }
     
     /// Add a topic path and its handlers to the trie
-    pub fn add(&mut self, topic: TopicPath, handlers: Vec<T>) {
+    pub fn add(&mut self, topic: TopicPath, content_list: Vec<T>) {
         let network_id = topic.network_id();
         
         // Get or create network-specific trie
@@ -80,18 +80,18 @@ impl<T: Clone> PathTrie<T> {
             .or_insert_with(PathTrie::new);
             
         // Add to the network-specific trie
-        network_trie.add_internal(&topic.get_segments(), 0, handlers);
+        network_trie.add_internal(&topic.get_segments(), 0, content_list);
     }
     
     /// Add a single handler for a topic path
-    pub fn add_handler(&mut self, topic: TopicPath, handler: T) {
-        self.add(topic, vec![handler]);
+    pub fn add_content(&mut self, topic: TopicPath, content: T) {
+        self.add(topic, vec![content]);
     }
     
     /// Add handlers for a vector of topic paths
-    pub fn add_handlers(&mut self, topics: Vec<TopicPath>, handlers: Vec<T>) {
+    pub fn add_multi_content(&mut self, topics: Vec<TopicPath>, contents: Vec<T>) {
         for topic in topics {
-            self.add(topic, handlers.clone());
+            self.add(topic, contents.clone());
         }
     }
     
@@ -99,7 +99,7 @@ impl<T: Clone> PathTrie<T> {
     fn add_internal(&mut self, segments: &[String], index: usize, handlers: Vec<T>) {
         if index >= segments.len() {
             // We've reached the end of the path, add handlers here
-            self.handlers.extend(handlers);
+            self.content.extend(handlers);
             return;
         }
         
@@ -107,7 +107,7 @@ impl<T: Clone> PathTrie<T> {
         
         if segment == ">" {
             // Multi-wildcard - adds handlers here and matches everything below
-            self.multi_wildcard_handlers.extend(handlers);
+            self.multi_wildcard.extend(handlers);
         } else if segment == "*" {
             // Single wildcard - create/get wildcard child and continue
             if self.wildcard_child.is_none() {
@@ -182,9 +182,9 @@ impl<T: Clone> PathTrie<T> {
     fn collect_wildcard_matches(&self, pattern_segments: &[String], index: usize, results: &mut Vec<PathTrieMatch<T>>) {
         // If we've reached the end of the pattern, add all handlers at this level
         if index >= pattern_segments.len() {
-            for handler in &self.handlers {
+            for handler in &self.content {
                 results.push(PathTrieMatch {
-                    handler: handler.clone(),
+                    content: handler.clone(),
                     params: HashMap::new(), // No parameter extraction for wildcard searches
                 });
             }
@@ -224,17 +224,17 @@ impl<T: Clone> PathTrie<T> {
     /// Recursively collect all handlers from this node and all its children
     fn collect_all_handlers(&self, results: &mut Vec<PathTrieMatch<T>>) {
         // Add handlers at this level
-        for handler in &self.handlers {
+        for handler in &self.content {
             results.push(PathTrieMatch {
-                handler: handler.clone(),
+                content: handler.clone(),
                 params: HashMap::new(), // No parameter extraction for wildcard searches
             });
         }
         
         // Add multi-wildcard handlers
-        for handler in &self.multi_wildcard_handlers {
+        for handler in &self.multi_wildcard {
             results.push(PathTrieMatch {
-                handler: handler.clone(),
+                content: handler.clone(),
                 params: HashMap::new(),
             });
         }
@@ -259,9 +259,9 @@ impl<T: Clone> PathTrie<T> {
         if index >= segments.len() {
             // We've reached the end of the path
             // Add all handlers at this level with the current parameters
-            for handler in &self.handlers {
+            for handler in &self.content {
                 results.push(PathTrieMatch {
-                    handler: handler.clone(),
+                    content: handler.clone(),
                     params: current_params.clone(),
                 });
             }
@@ -269,9 +269,9 @@ impl<T: Clone> PathTrie<T> {
         }
         
         // Add any multi-wildcard handlers at this level
-        for handler in &self.multi_wildcard_handlers {
+        for handler in &self.multi_wildcard {
             results.push(PathTrieMatch {
-                handler: handler.clone(),
+                content: handler.clone(),
                 params: current_params.clone(),
             });
         }
@@ -321,7 +321,7 @@ impl<T: Clone> PathTrie<T> {
     pub fn find_handlers(&self, topic: &TopicPath) -> Vec<T> {
         self.find_matches(topic)
             .into_iter()
-            .map(|m| m.handler)
+            .map(|m| m.content)
             .collect()
     }
     
@@ -347,9 +347,9 @@ impl<T: Clone> PathTrie<T> {
     {
         if index >= segments.len() {
             // We've reached the end of the path
-            let initial_len = self.handlers.len();
-            self.handlers.retain(|h| !predicate(h));
-            return initial_len > self.handlers.len();
+            let initial_len = self.content.len();
+            self.content.retain(|h| !predicate(h));
+            return initial_len > self.content.len();
         }
         
         let segment = &segments[index];
@@ -357,9 +357,9 @@ impl<T: Clone> PathTrie<T> {
         
         if segment == ">" {
             // Multi-wildcard - remove from multi_wildcard_handlers
-            let initial_len = self.multi_wildcard_handlers.len();
-            self.multi_wildcard_handlers.retain(|h| !predicate(h));
-            removed = initial_len > self.multi_wildcard_handlers.len();
+            let initial_len = self.multi_wildcard.len();
+            self.multi_wildcard.retain(|h| !predicate(h));
+            removed = initial_len > self.multi_wildcard.len();
         } else if segment == "*" {
             // Single wildcard - delegate to wildcard child if it exists
             if let Some(child) = &mut self.wildcard_child {
@@ -382,8 +382,8 @@ impl<T: Clone> PathTrie<T> {
     
     /// Check if this trie is empty (has no handlers or children)
     pub fn is_empty(&self) -> bool {
-        self.handlers.is_empty() 
-            && self.multi_wildcard_handlers.is_empty()
+        self.content.is_empty() 
+            && self.multi_wildcard.is_empty()
             && self.children.is_empty()
             && self.wildcard_child.is_none()
             && self.template_child.is_none()
@@ -392,7 +392,7 @@ impl<T: Clone> PathTrie<T> {
     
     /// Get the count of handlers in this trie
     pub fn handler_count(&self) -> usize {
-        let mut count = self.handlers.len() + self.multi_wildcard_handlers.len();
+        let mut count = self.content.len() + self.multi_wildcard.len();
         
         // Count handlers in children
         for (_, child) in &self.children {

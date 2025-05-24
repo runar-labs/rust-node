@@ -300,17 +300,16 @@ mod service_registry_wildcard_tests {
         });
         
         // Subscribe to a pattern with a single-level wildcard
-        let service_topic = TopicPath::new("main:services", "default").expect("Valid pattern");
         let pattern1 = TopicPath::new("main:services/*/state", "default").expect("Valid pattern");
-        let _sub_id1 = registry.register_local_event_subscription(&service_topic, &pattern1, callback.clone(), SubscriptionOptions::default()).await?;
+        let _sub_id1 = registry.register_local_event_subscription(&pattern1, callback.clone(), None).await?;
         
         // Subscribe to a pattern with a multi-level wildcard
         let pattern2 = TopicPath::new("main:events/>", "default").expect("Valid pattern");
-        let _sub_id2 = registry.register_local_event_subscription(&service_topic, &pattern2, callback.clone(), SubscriptionOptions::default()).await?;
+        let _sub_id2 = registry.register_local_event_subscription(&pattern2, callback.clone(), None).await?;
         
         // Subscribe to a specific path to compare
         let specific_path = TopicPath::new("main:services/math/add", "default").expect("Valid path");
-        let _sub_id3 = registry.register_local_event_subscription(&service_topic, &specific_path, callback.clone(), SubscriptionOptions::default()).await?;
+        let _sub_id3 = registry.register_local_event_subscription(&specific_path, callback.clone(), None).await?;
         
         // Publish to various topics and check if they match
         
@@ -394,9 +393,8 @@ mod service_registry_wildcard_tests {
         });
         
         // Subscribe to a pattern with a wildcard
-        let service_topic = TopicPath::new("main:services", "default").expect("Valid pattern");
         let pattern = TopicPath::new("main:services/*/state", "default").expect("Valid pattern");
-        let sub_id = registry.register_local_event_subscription(&service_topic, &pattern, callback.clone(), SubscriptionOptions::default()).await?;
+        let sub_id = registry.register_local_event_subscription( &pattern, callback.clone(), None).await?;
         
         // Publish to a matching topic
         let topic = TopicPath::new("main:services/auth/state", "default").expect("Valid path");
@@ -447,10 +445,9 @@ mod service_registry_wildcard_tests {
         });
         
         // Subscribe both callbacks to the same wildcard pattern
-        let service_topic = TopicPath::new("main:services", "default").expect("Valid pattern"); 
         let pattern = TopicPath::new("main:events/>", "default").expect("Valid pattern");
-        let _sub_id1 = registry.register_local_event_subscription(&service_topic, &pattern, callback1, SubscriptionOptions::default()).await?;
-        let _sub_id2 = registry.register_local_event_subscription(&service_topic, &pattern, callback2, SubscriptionOptions::default()).await?;
+        let _sub_id1 = registry.register_local_event_subscription(&pattern, callback1, None).await?;
+        let _sub_id2 = registry.register_local_event_subscription(&pattern, callback2, None).await?;
         
         // Publish to a matching topic
         let topic = TopicPath::new("main:events/user/updated", "default").expect("Valid path");

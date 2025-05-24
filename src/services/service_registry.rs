@@ -135,16 +135,16 @@ impl std::fmt::Debug for ServiceEntry {
 pub struct ServiceRegistry {
     /// Local action handlers organized by path (using PathTrie instead of HashMap)
     /// Store both the handler and the original registration topic path for parameter extraction
-    local_action_handlers: RwLock<PathTrie<(ActionHandler, TopicPath)>>,
+    local_action_handlers: RwLock<PathTrie<(ActionHandler, TopicPath, Option<ActionMetadata>)>>,
 
     //reverse index where we store the events that a service listens to
-    local_events_by_service: RwLock<PathTrie<Vec<TopicPath>>>,
+    local_events_by_service: RwLock<PathTrie<Vec<EventMetadata>>>,
 
     /// Remote action handlers organized by path (using PathTrie instead of HashMap)
     remote_action_handlers: RwLock<PathTrie<Vec<ActionHandler>>>,
 
     /// Local event subscriptions (using PathTrie instead of WildcardSubscriptionRegistry)
-    local_event_subscriptions: RwLock<PathTrie<Vec<(String, EventCallback)>>>,
+    local_event_subscriptions: RwLock<PathTrie<Vec<(String, EventCallback, Option<EventMetadata>)>>>,
 
     /// Remote event subscriptions (using PathTrie instead of WildcardSubscriptionRegistry)
     remote_event_subscriptions: RwLock<PathTrie<Vec<(String, EventCallback)>>>,
@@ -253,7 +253,7 @@ impl ServiceRegistry {
         self.local_services
             .write()
             .await
-            .add_handler(service_topic.clone(), service);
+            .add_content(service_topic.clone(), service);
 
         self.update_service_state(&service_entry.service.path(), service_entry.service_state)
             .await?;
@@ -293,17 +293,17 @@ impl ServiceRegistry {
 
             if matches.is_empty() {
                 // No existing services for this topic
-                services.add_handler(service_topic, vec![service]);
+                services.add_content(service_topic, vec![service]);
             } else {
                 // Get the existing services for this topic
-                let mut existing_services = matches[0].handler.clone();
+                let mut existing_services = matches[0].content.clone();
 
                 // Check if this service is already registered
                 if !existing_services.iter().any(|s| s.path() == service.path()) {
                     existing_services.push(service);
 
                     // Update the services in the trie
-                    services.add_handler(service_topic, existing_services);
+                    services.add_content(service_topic, existing_services);
                 }
             }
         }
@@ -329,7 +329,7 @@ impl ServiceRegistry {
         self.local_action_handlers
             .write()
             .await
-            .add_handler(topic_path.clone(), (handler, topic_path.clone()));
+            .add_content(topic_path.clone(), (handler, topic_path.clone(), metadata));
 
         Ok(())
     }
@@ -355,14 +355,14 @@ impl ServiceRegistry {
 
             if matches.is_empty() {
                 // No handlers yet for this path
-                handlers_trie.add_handler(topic_path.clone(), vec![handler.clone()]);
+                handlers_trie.add_content(topic_path.clone(), vec![handler.clone()]);
             } else {
                 // Get existing handlers and add the new one
-                let mut existing_handlers = matches[0].handler.clone();
+                let mut existing_handlers = matches[0].content.clone();
                 existing_handlers.push(handler.clone());
 
                 // Update the handlers in the trie
-                handlers_trie.add_handler(topic_path.clone(), existing_handlers);
+                handlers_trie.add_content(topic_path.clone(), existing_handlers);
             }
         }
 
@@ -373,10 +373,10 @@ impl ServiceRegistry {
 
             if matches.is_empty() {
                 // No existing services for this topic
-                services.add_handler(topic_path.clone(), vec![remote_service]);
+                services.add_content(topic_path.clone(), vec![remote_service]);
             } else {
                 // Get the existing services for this topic
-                let mut existing_services = matches[0].handler.clone();
+                let mut existing_services = matches[0].content.clone();
 
                 // Check if this service is already registered
                 if !existing_services
@@ -386,7 +386,7 @@ impl ServiceRegistry {
                     existing_services.push(remote_service);
 
                     // Update the services in the trie
-                    services.add_handler(topic_path.clone(), existing_services);
+                    services.add_content(topic_path.clone(), existing_services);
                 }
             }
         }
@@ -406,7 +406,8 @@ impl ServiceRegistry {
         let matches = handlers_trie.find_matches(topic_path);
 
         if !matches.is_empty() {
-            Some(matches[0].handler.clone())
+            let (handler, topic_path, _metadata) = matches[0].content.clone();
+            return Some((handler, topic_path));
         } else {
             None
         }
@@ -420,7 +421,7 @@ impl ServiceRegistry {
         let matches = handlers_trie.find_matches(topic_path);
 
         if !matches.is_empty() {
-            matches[0].handler.clone()
+            matches[0].content.clone()
         } else {
             Vec::new()
         }
@@ -453,13 +454,11 @@ impl ServiceRegistry {
     /// INTENTION: Register a callback to be invoked when events are published locally.
     pub async fn register_local_event_subscription(
         &self,
-        source_service_path: &TopicPath,
         topic_path: &TopicPath,
         callback: EventCallback,
-        options: SubscriptionOptions,
+        metadata: Option<EventMetadata>,
     ) -> Result<String> {
         let subscription_id = Uuid::new_v4().to_string();
-        //TODO handle option
 
         // Store in local event subscriptions using PathTrie
         {
@@ -468,18 +467,18 @@ impl ServiceRegistry {
 
             if matches.is_empty() {
                 // No existing subscriptions for this topic
-                subscriptions.add_handler(
+                subscriptions.add_content(
                     topic_path.clone(),
-                    vec![(subscription_id.clone(), callback.clone())],
+                    vec![(subscription_id.clone(), callback.clone(), metadata.clone())],
                 );
             } else {
                 // Add to existing subscriptions
-                let mut updated_subscriptions = matches[0].handler.clone();
-                updated_subscriptions.push((subscription_id.clone(), callback.clone()));
+                let mut updated_subscriptions = matches[0].content.clone();
+                updated_subscriptions.push((subscription_id.clone(), callback.clone(), metadata.clone()));
 
                 // First remove the old handlers, then add the updated ones
                 subscriptions.remove_handler(topic_path, |_| true);
-                subscriptions.add_handler(topic_path.clone(), updated_subscriptions);
+                subscriptions.add_content(topic_path.clone(), updated_subscriptions);
             }
         }
 
@@ -489,33 +488,40 @@ impl ServiceRegistry {
             id_map.insert(subscription_id.clone(), topic_path.clone());
         }
 
-        // store in local_events_by_service
-        {
+        let service_topic = TopicPath::new(&topic_path.service_path(), &topic_path.network_id()).unwrap();
+        
+        // store metadata in local_events_by_service
+        if metadata.is_some() {
+            let metadata = metadata.unwrap();
+            
+            
+            
             let mut events = self.local_events_by_service.write().await;
-            let matches = events.find_matches(&source_service_path);
+            let matches = events.find_matches(&service_topic);
 
+            
             if matches.is_empty() {
                 // No existing events for this service
                 //add a vec with one item -> topic_path indexed by the source_service_path
-                events.add_handler(
-                    source_service_path.clone(),
-                    vec![topic_path.clone()],
+                events.add_content(
+                    service_topic.clone(),
+                    vec![metadata],
                 );
             } else {
                 // Add to existing events
-                let mut updated_events = matches[0].handler.clone();
-                updated_events.push(topic_path.clone());
+                let mut updated_events = matches[0].content.clone();
+                updated_events.push(metadata);
 
                 // First remove the old handlers, then add the updated ones
-                events.remove_handler(&source_service_path, |_| true);
-                events.add_handler(source_service_path.clone(), updated_events);
+                events.remove_handler(&service_topic, |_| true);
+                events.add_content(service_topic.clone(), updated_events);
             }
         }
 
         //store in subscription_id_to_service_topic_path
         {
             let mut id_map = self.subscription_id_to_service_topic_path.write().await;
-            id_map.insert(subscription_id.clone(), source_service_path.clone());
+            id_map.insert(subscription_id.clone(), service_topic.clone());
         }
         
 
@@ -539,18 +545,18 @@ impl ServiceRegistry {
 
             if matches.is_empty() {
                 // No existing subscriptions for this topic
-                subscriptions.add_handler(
+                subscriptions.add_content(
                     topic_path.clone(),
                     vec![(subscription_id.clone(), callback.clone())],
                 );
             } else {
                 // Add to existing subscriptions
-                let mut updated_subscriptions = matches[0].handler.clone();
+                let mut updated_subscriptions = matches[0].content.clone();
                 updated_subscriptions.push((subscription_id.clone(), callback.clone()));
 
                 // First remove the old handlers, then add the updated ones
                 subscriptions.remove_handler(topic_path, |_| true);
-                subscriptions.add_handler(topic_path.clone(), updated_subscriptions);
+                subscriptions.add_content(topic_path.clone(), updated_subscriptions);
             }
         }
 
@@ -573,12 +579,13 @@ impl ServiceRegistry {
         let subscriptions = self.local_event_subscriptions.read().await;
         let matches = subscriptions.find_matches(topic_path);
 
-        // Flatten all matches into a single vector
         let mut result = Vec::new();
         for match_item in matches {
-            result.extend(match_item.handler.clone());
+            // Each item in content is a (String, EventCallback, Option<EventMetadata>) tuple
+            for (subscription_id, callback, _metadata) in match_item.content.clone() {
+                result.push((subscription_id, callback));
+            }
         }
-
         result
     }
 
@@ -595,9 +602,11 @@ impl ServiceRegistry {
         // Flatten all matches into a single vector
         let mut result = Vec::new();
         for match_item in matches {
-            result.extend(match_item.handler.clone());
+            // Each item in content is already a (String, EventCallback) tuple
+            for (subscription_id, callback) in match_item.content.clone() {
+                result.push((subscription_id, callback));
+            }
         }
-
         result
     }
 
@@ -645,15 +654,11 @@ impl ServiceRegistry {
         
         for match_item in matches {
             // Extract the topic path from the match
-            let event_topic_list = &match_item.handler;
+            let event_topic_list = &match_item.content;
             
             //iterate event_topic_list
-            for event_topic in event_topic_list {
-                result.push(EventMetadata {
-                    path: event_topic.as_str().to_string(),
-                    description: format!("Event handler for {}", event_topic.action_path()),
-                    data_schema: None,  // We don't have schema information in the handler 
-                });
+            for event_metadata in event_topic_list {
+                result.push(event_metadata.clone());
             } 
         }
         
@@ -679,15 +684,10 @@ impl ServiceRegistry {
         
         for match_item in matches {
             // Extract the topic path from the match
-            let (_, topic_path) = &match_item.handler;
-            
-            // Create metadata for this action
-            result.push(ActionMetadata {
-                path: topic_path.as_str().to_string(),
-                description: format!("Action handler for {}", topic_path.action_path()),
-                input_schema: None,  // We don't have schema information in the handler
-                output_schema: None, // We don't have schema information in the handler
-            });
+            let (_, _, metadata) = &match_item.content;
+            if let Some(metadata) = metadata {
+                result.push(metadata.clone());
+            }
         }
         
         result
@@ -707,41 +707,41 @@ impl ServiceRegistry {
     ///
     /// INTENTION: Retrieve metadata for all events registered under a service path.
     /// This is useful for service discovery and introspection.
-    pub async fn get_events_metadata_internal(
-        &self,
-        search_path: &TopicPath,
-    ) -> Vec<EventMetadata> {
-        // Search in the events trie
-        let event_subscriptions = self.local_event_subscriptions.read().await;
-        let event_matches = event_subscriptions.find_matches(search_path);
+    // pub async fn get_events_metadata_internal(
+    //     &self,
+    //     search_path: &TopicPath,
+    // ) -> Vec<EventMetadata> {
+    //     // Search in the events trie
+    //     let event_subscriptions = self.local_event_subscriptions.read().await;
+    //     let event_matches = event_subscriptions.find_matches(search_path);
         
-        // Collect all events that match the service path
-        let mut result = Vec::new();
-        let mut seen_paths = HashSet::new();
+    //     // Collect all events that match the service path
+    //     let mut result = Vec::new();
+    //     let mut seen_paths = HashSet::new();
         
-        // For event subscriptions, we need to handle the Vec<(String, EventCallback)> structure
-        for match_item in event_matches {
-            // Each handler is a Vec of (subscription_id, callback) pairs
-            for (_, _callback) in &match_item.handler {
-                // We can use the match path since event handlers don't store the original topic path
-                let path_str = search_path.as_str().replace("/*", "");
+    //     // For event subscriptions, we need to handle the Vec<(String, EventCallback)> structure
+    //     for match_item in event_matches {
+    //         // Each handler is a Vec of (subscription_id, callback) pairs
+    //         for (_, _callback) in &match_item.handler {
+    //             // We can use the match path since event handlers don't store the original topic path
+    //             let path_str = search_path.as_str().replace("/*", "");
                 
-                // Only add each event path once, no need to add duplicates for multiple subscribers
-                if !seen_paths.contains(&path_str) {
-                    seen_paths.insert(path_str.clone());
+    //             // Only add each event path once, no need to add duplicates for multiple subscribers
+    //             if !seen_paths.contains(&path_str) {
+    //                 seen_paths.insert(path_str.clone());
                     
-                    // Create metadata for this event
-                    result.push(EventMetadata {
-                        path: path_str.clone(),
-                        description: format!("Event handler for {}", path_str),
-                        data_schema: None, // We don't have schema information in the handler
-                    });
-                }
-            }
-        }
+    //                 // Create metadata for this event
+    //                 result.push(EventMetadata {
+    //                     path: path_str.clone(),
+    //                     description: format!("Event handler for {}", path_str),
+    //                     data_schema: None, // We don't have schema information in the handler
+    //                 });
+    //             }
+    //         }
+    //     }
         
-        result
-    }
+    //     result
+    // }
 
     /// Helper method to get all network IDs from the registry
     /// 
@@ -796,9 +796,9 @@ impl ServiceRegistry {
                 let mut updated_subscriptions = Vec::new();
 
                 // Create a new list without the subscription we want to remove
-                for (id, callback) in matches[0].handler.clone() {
+                for (id, callback,metadata) in matches[0].content.clone() {
                     if id != subscription_id {
-                        updated_subscriptions.push((id, callback));
+                        updated_subscriptions.push((id, callback, metadata));
                     }
                 }
 
@@ -807,7 +807,7 @@ impl ServiceRegistry {
 
                 if !updated_subscriptions.is_empty() {
                     // If we still have subscriptions for this topic, add them back
-                    subscriptions.add_handler(topic_path.clone(), updated_subscriptions);
+                    subscriptions.add_content(topic_path.clone(), updated_subscriptions);
                 }
 
                 if removed {
@@ -844,17 +844,17 @@ impl ServiceRegistry {
                     let events_by_service = events.find_matches(&service_topic_path);
                     if !events_by_service.is_empty() {
                         for match_item in events_by_service {  
-                            let mut updated_subscriptions = Vec::new();
-                            let items = match_item.handler.clone();
-                            for event_path in items {
-                                if event_path.eq(&topic_path) {
+                            let mut updated_list = Vec::new();
+                            let items = match_item.content.clone();
+                            for event_metadata in items {
+                                if event_metadata.path == topic_path.as_str() {
                                     continue;
                                 }
-                                updated_subscriptions.push(event_path);
+                                updated_list.push(event_metadata);
                             }
                             events.remove_handler(&service_topic_path, |_| true);
-                            if !updated_subscriptions.is_empty() {
-                                events.add_handler(service_topic_path.clone(), updated_subscriptions);
+                            if !updated_list.is_empty() {
+                                events.add_content(service_topic_path.clone(), updated_list);
                             }
                         }
                     }
@@ -919,7 +919,7 @@ impl ServiceRegistry {
                 let mut updated_subscriptions = Vec::new();
 
                 // Create a new list without the subscription we want to remove
-                for (id, callback) in matches[0].handler.clone() {
+                for (id, callback) in matches[0].content.clone() {
                     if id != subscription_id {
                         updated_subscriptions.push((id, callback));
                     }
@@ -930,7 +930,7 @@ impl ServiceRegistry {
 
                 if !updated_subscriptions.is_empty() {
                     // If we still have subscriptions for this topic, add them back
-                    subscriptions.add_handler(topic_path.clone(), updated_subscriptions);
+                    subscriptions.add_content(topic_path.clone(), updated_subscriptions);
                 }
 
                 if removed {
@@ -1047,7 +1047,7 @@ impl crate::services::RegistryDelegate for ServiceRegistry {
         let matches = services.find_matches(topic_path);
 
         if !matches.is_empty() {
-            let service_entry = &matches[0].handler;
+            let service_entry = &matches[0].content;
             let service = service_entry.service.clone();
             let service_topic_path = TopicPath::new(
                 &service.path().to_string(),
@@ -1061,9 +1061,9 @@ impl crate::services::RegistryDelegate for ServiceRegistry {
             let actions = self.get_actions_metadata(&actions_search_path).await;
             
             // Get events metadata for this service - create a wildcard path
-            let events_wildcard_path = format!("{}/events/*", service_path);
+            let events_wildcard_path = format!("{}/*", service_path);
             let events_search_path = TopicPath::new(&events_wildcard_path, service_topic_path.network_id().as_str()).unwrap();
-            let events = self.get_events_metadata_internal(&events_search_path).await;
+            let events = self.get_events_metadata(&events_search_path).await;
 
             // Create metadata using individual getter methods
             return Some(ServiceMetadata {
