@@ -179,6 +179,7 @@ impl MulticastDiscovery {
         socket.set_reuse_address(true)?;
         
         // On some platforms, set_reuse_port may not be available, try it but don't fail if not
+        #[cfg(unix)]
         let _ = socket.set_reuse_port(true);
         
         // Set multicast TTL (how many network hops multicast packets can traverse)
