@@ -29,6 +29,7 @@ use uuid::Uuid;
 
 use crate::network::transport::PeerId;
 use crate::routing::{PathTrie, TopicPath};
+use std::str::FromStr;
 use crate::services::abstract_service::{AbstractService, ServiceState};
 use runar_common::types::schemas::{ActionMetadata, EventMetadata, ServiceMetadata};
 use crate::services::{
@@ -136,6 +137,9 @@ pub struct ServiceRegistry {
     /// Store both the handler and the original registration topic path for parameter extraction
     local_action_handlers: RwLock<PathTrie<(ActionHandler, TopicPath)>>,
 
+    //reverse index where we store the events that a service listens to
+    local_events_by_service: RwLock<PathTrie<Vec<TopicPath>>>,
+
     /// Remote action handlers organized by path (using PathTrie instead of HashMap)
     remote_action_handlers: RwLock<PathTrie<Vec<ActionHandler>>>,
 
@@ -149,9 +153,14 @@ pub struct ServiceRegistry {
     /// (Single HashMap for both local and remote subscriptions)
     subscription_id_to_topic_path: RwLock<HashMap<String, TopicPath>>,
 
+    /// Map subscription IDs back to the service TopicPath for efficient unsubscription
+    subscription_id_to_service_topic_path: RwLock<HashMap<String, TopicPath>>,
+
     /// Local services registry (using PathTrie instead of HashMap)
     local_services: RwLock<PathTrie<Arc<ServiceEntry>>>,
 
+    local_services_list: RwLock<HashMap<TopicPath, Arc<ServiceEntry>>>,
+    
     /// Remote services registry (using PathTrie instead of HashMap)
     remote_services: RwLock<PathTrie<Vec<Arc<RemoteService>>>>,
 
@@ -175,11 +184,14 @@ impl Clone for ServiceRegistry {
 
         ServiceRegistry {
             local_action_handlers: RwLock::new(PathTrie::new()),
+            local_events_by_service: RwLock::new(PathTrie::new()),
             remote_action_handlers: RwLock::new(PathTrie::new()),
             local_event_subscriptions: RwLock::new(PathTrie::new()),
             remote_event_subscriptions: RwLock::new(PathTrie::new()),
             subscription_id_to_topic_path: RwLock::new(HashMap::new()),
+            subscription_id_to_service_topic_path: RwLock::new(HashMap::new()),
             local_services: RwLock::new(PathTrie::new()),
+            local_services_list: RwLock::new(HashMap::new()),
             remote_services: RwLock::new(PathTrie::new()),
             remote_services_by_peer: RwLock::new(HashMap::new()),
             service_states_by_service_path: Arc::new(RwLock::new(HashMap::new())),
@@ -202,11 +214,14 @@ impl ServiceRegistry {
     pub fn new(logger: Logger) -> Self {
         Self {
             local_action_handlers: RwLock::new(PathTrie::new()),
+            local_events_by_service: RwLock::new(PathTrie::new()),
             remote_action_handlers: RwLock::new(PathTrie::new()),
             local_event_subscriptions: RwLock::new(PathTrie::new()),
             remote_event_subscriptions: RwLock::new(PathTrie::new()),
             subscription_id_to_topic_path: RwLock::new(HashMap::new()),
+            subscription_id_to_service_topic_path: RwLock::new(HashMap::new()),
             local_services: RwLock::new(PathTrie::new()),
+            local_services_list: RwLock::new(HashMap::new()),
             remote_services: RwLock::new(PathTrie::new()),
             remote_services_by_peer: RwLock::new(HashMap::new()),
             service_states_by_service_path: Arc::new(RwLock::new(HashMap::new())),
@@ -238,10 +253,15 @@ impl ServiceRegistry {
         self.local_services
             .write()
             .await
-            .add_handler(service_topic, service);
+            .add_handler(service_topic.clone(), service);
 
         self.update_service_state(&service_entry.service.path(), service_entry.service_state)
             .await?;
+
+        self.local_services_list
+            .write()
+            .await
+            .insert(service_topic, service_entry.clone());
 
         Ok(())
     }
@@ -433,6 +453,7 @@ impl ServiceRegistry {
     /// INTENTION: Register a callback to be invoked when events are published locally.
     pub async fn register_local_event_subscription(
         &self,
+        source_service_path: &TopicPath,
         topic_path: &TopicPath,
         callback: EventCallback,
         options: SubscriptionOptions,
@@ -467,6 +488,36 @@ impl ServiceRegistry {
             let mut id_map = self.subscription_id_to_topic_path.write().await;
             id_map.insert(subscription_id.clone(), topic_path.clone());
         }
+
+        // store in local_events_by_service
+        {
+            let mut events = self.local_events_by_service.write().await;
+            let matches = events.find_matches(topic_path);
+
+            if matches.is_empty() {
+                // No existing events for this service
+                //add a vec with one item -> topic_path indexed by the source_service_path
+                events.add_handler(
+                    source_service_path.clone(),
+                    vec![topic_path.clone()],
+                );
+            } else {
+                // Add to existing events
+                let mut updated_events = matches[0].handler.clone();
+                updated_events.push(topic_path.clone());
+
+                // First remove the old handlers, then add the updated ones
+                events.remove_handler(&source_service_path, |_| true);
+                events.add_handler(source_service_path.clone(), updated_events);
+            }
+        }
+
+        //store in subscription_id_to_service_topic_path
+        {
+            let mut id_map = self.subscription_id_to_service_topic_path.write().await;
+            id_map.insert(subscription_id.clone(), source_service_path.clone());
+        }
+        
 
         Ok(subscription_id)
     }
@@ -568,12 +619,78 @@ impl ServiceRegistry {
         Ok(())
     }
 
-    //FIX rename to get_all_service_states
     /// Get all service states
     ///
     /// INTENTION: Retrieve the current state of all services.
     pub async fn get_all_service_states(&self) -> HashMap<String, ServiceState> {
         self.service_states_by_service_path.read().await.clone()
+    }
+
+    
+    /// Get metadata for all events under a specific service path
+    ///
+    /// INTENTION: Retrieve metadata for all events registered under a service path.
+    /// This is useful for service discovery and introspection.
+    pub async fn get_events_metadata(
+        &self,
+        search_path: &TopicPath,
+    ) -> Vec<EventMetadata> {
+ 
+        // Search in the events trie local_event_handlers
+        let events = self.local_events_by_service.read().await;
+        let matches = events.find_matches(&search_path);
+        
+        // Collect all events that match the service path
+        let mut result = Vec::new();
+        
+        for match_item in matches {
+            // Extract the topic path from the match
+            let event_topic_list = &match_item.handler;
+            
+            //iterate event_topic_list
+            for event_topic in event_topic_list {
+                result.push(EventMetadata {
+                    path: event_topic.as_str().to_string(),
+                    description: format!("Event handler for {}", event_topic.action_path()),
+                    data_schema: None,  // We don't have schema information in the handler 
+                });
+            } 
+        }
+        
+        result
+    }
+    
+
+    /// Get metadata for all actions under a specific service path
+    ///
+    /// INTENTION: Retrieve metadata for all actions registered under a service path.
+    /// This is useful for service discovery and introspection.
+    pub async fn get_actions_metadata(
+        &self,
+        search_path: &TopicPath,
+    ) -> Vec<ActionMetadata> {
+ 
+        // Search in the actions trie local_action_handlers
+        let actions = self.local_action_handlers.read().await;
+        let matches = actions.find_matches(&search_path);
+        
+        // Collect all actions that match the service path
+        let mut result = Vec::new();
+        
+        for match_item in matches {
+            // Extract the topic path from the match
+            let (_, topic_path) = &match_item.handler;
+            
+            // Create metadata for this action
+            result.push(ActionMetadata {
+                path: topic_path.as_str().to_string(),
+                description: format!("Action handler for {}", topic_path.action_path()),
+                input_schema: None,  // We don't have schema information in the handler
+                output_schema: None, // We don't have schema information in the handler
+            });
+        }
+        
+        result
     }
 
     /// Get all local services
@@ -583,32 +700,74 @@ impl ServiceRegistry {
     /// starting, and stopping. This preserves the Node's responsibility for service
     /// lifecycle management while keeping the Registry focused on registration.
     pub async fn get_local_services(&self) -> HashMap<TopicPath, Arc<ServiceEntry>> {
-        let trie = self.local_services.read().await;
-
-        // Convert PathTrie results to the expected HashMap format
-        let mut result = HashMap::new();
-
-        //TODO improve search so we don need to passa dummy padn adn jusgt pass none tyo get all.       
-        // Use a dummy path to get all handlers - will be ignored in find_matches
-        // since we're getting all entries
-        let dummy_path = TopicPath::new_service("default", "dummy");
-
-        // Find matches will return all handlers in the trie
-        let services = trie.find_matches(&dummy_path);
-
-        // Group services by their topic path
-        for service_match in services {
-            let service = service_match.handler;
-            result.insert(service.service_topic.clone(), service);
+        self.local_services_list.read().await.clone()
+    }
+    
+    /// Get metadata for all events under a specific event path
+    ///
+    /// INTENTION: Retrieve metadata for all events registered under a service path.
+    /// This is useful for service discovery and introspection.
+    pub async fn get_events_metadata_internal(
+        &self,
+        search_path: &TopicPath,
+    ) -> Vec<EventMetadata> {
+        // Search in the events trie
+        let event_subscriptions = self.local_event_subscriptions.read().await;
+        let event_matches = event_subscriptions.find_matches(search_path);
+        
+        // Collect all events that match the service path
+        let mut result = Vec::new();
+        let mut seen_paths = HashSet::new();
+        
+        // For event subscriptions, we need to handle the Vec<(String, EventCallback)> structure
+        for match_item in event_matches {
+            // Each handler is a Vec of (subscription_id, callback) pairs
+            for (_, _callback) in &match_item.handler {
+                // We can use the match path since event handlers don't store the original topic path
+                let path_str = search_path.as_str().replace("/*", "");
+                
+                // Only add each event path once, no need to add duplicates for multiple subscribers
+                if !seen_paths.contains(&path_str) {
+                    seen_paths.insert(path_str.clone());
+                    
+                    // Create metadata for this event
+                    result.push(EventMetadata {
+                        path: path_str.clone(),
+                        description: format!("Event handler for {}", path_str),
+                        data_schema: None, // We don't have schema information in the handler
+                    });
+                }
+            }
         }
-
+        
         result
     }
 
-    /// Unsubscribe from an event subscription
-    ///
-    /// INTENTION: Remove a specific subscription by ID, providing a simpler API
-    /// that doesn't require the original topic.
+    /// Helper method to get all network IDs from the registry
+    /// 
+    /// INTENTION: Collect all unique network IDs from registered services
+    async fn get_all_network_ids(&self) -> Vec<String> {
+        // Start with the default network
+        let mut network_ids = vec!["default".to_string()];
+        
+        // Add network IDs from local services
+        let local_service_states = self.service_states_by_service_path.read().await;
+        
+        // Extract network IDs from service paths
+        for service_path in local_service_states.keys() {
+            // Try to parse the service path to extract the network ID
+            // Format is typically "network_id:service/path"
+            if let Some(network_id) = service_path.split(':').next() {
+                let network_id = network_id.to_string();
+                if !network_ids.contains(&network_id) && !network_id.is_empty() {
+                    network_ids.push(network_id);
+                }
+            }
+        }
+        
+        network_ids
+    }
+    
     pub async fn unsubscribe_local(&self, subscription_id: &str) -> Result<()> {
         self.logger.debug(format!(
             "Attempting to unsubscribe local subscription ID: {}",
@@ -663,13 +822,46 @@ impl ServiceRegistry {
                         topic_path.as_str(),
                         subscription_id
                     ));
-                    Ok(())
+                    
                 } else {
                     // This case might happen if the subscription was already removed concurrently
                     let msg = format!("Subscription handler not found for topic path {} and ID {}, although ID was mapped. Potential race condition?", topic_path.as_str(), subscription_id);
                     self.logger.warn(msg.clone());
-                    Err(anyhow!(msg))
+                    return Err(anyhow!(msg))
                 }
+
+                //remove from service topic path map
+                let service_topic_path = self.subscription_id_to_service_topic_path.read().await;
+                let service_topic_path = service_topic_path.get(subscription_id).cloned();
+        
+                if let Some(service_topic_path) = service_topic_path {
+                    self.logger.debug(format!(
+                        "Unsubscribing from service topic : {} at service path: {}",
+                        topic_path.as_str(),
+                        service_topic_path.as_str()
+                    ));
+                    let mut events = self.local_events_by_service.write().await;
+                    let events_by_service = events.find_matches(&service_topic_path);
+                    if !events_by_service.is_empty() {
+                        for match_item in events_by_service {  
+                            let mut updated_subscriptions = Vec::new();
+                            let items = match_item.handler.clone();
+                            for event_path in items {
+                                if event_path.as_str() == topic_path.as_str() {
+                                    continue;
+                                }
+                                updated_subscriptions.push(event_path);
+                            }
+                            events.remove_handler(&service_topic_path, |_| true);
+                            if !updated_subscriptions.is_empty() {
+                                events.add_handler(service_topic_path.clone(), updated_subscriptions);
+                            }
+                        }
+                    }
+                    
+
+                }
+                Ok(())
             } else {
                 // No subscriptions found for this topic
                 let msg = format!(
@@ -680,6 +872,8 @@ impl ServiceRegistry {
                 self.logger.warn(msg.clone());
                 Err(anyhow!(msg))
             }
+
+            
         } else {
             let msg = format!(
                 "No topic path found mapping to subscription ID: {}. Cannot unsubscribe.",
@@ -688,6 +882,9 @@ impl ServiceRegistry {
             self.logger.warn(msg.clone());
             Err(anyhow!(msg))
         }
+
+
+        
     }
 
     /// Unsubscribe from a remote event subscription using only the subscription ID.
@@ -825,7 +1022,22 @@ impl crate::services::RegistryDelegate for ServiceRegistry {
         self.service_states_by_service_path.read().await.clone()
     }
 
+
+    
+    // This method is now implemented as a public method above
+    async fn get_actions_metadata(
+        &self,
+        service_topic_path: &TopicPath,
+    ) -> Vec<ActionMetadata> {
+        // Delegate to the public implementation
+        self.get_actions_metadata(service_topic_path).await
+    }
+
+
     /// Get metadata for a specific service
+    ///
+    /// INTENTION: Retrieve comprehensive metadata for a service, including its actions and events.
+    /// This is useful for service discovery and introspection.
     async fn get_service_metadata(
         &self,
         topic_path: &TopicPath,
@@ -837,6 +1049,21 @@ impl crate::services::RegistryDelegate for ServiceRegistry {
         if !matches.is_empty() {
             let service_entry = &matches[0].handler;
             let service = service_entry.service.clone();
+            let service_topic_path = TopicPath::new(
+                &service.path().to_string(),
+                service.network_id().unwrap_or_default().as_str(),
+            ).unwrap();
+
+            // Get actions metadata for this service - create a wildcard path
+            let service_path = service_topic_path.service_path();
+            let actions_wildcard_path = format!("{}/*", service_path);
+            let actions_search_path = TopicPath::new(&actions_wildcard_path, service_topic_path.network_id().as_str()).unwrap();
+            let actions = self.get_actions_metadata(&actions_search_path).await;
+            
+            // Get events metadata for this service - create a wildcard path
+            let events_wildcard_path = format!("{}/events/*", service_path);
+            let events_search_path = TopicPath::new(&events_wildcard_path, service_topic_path.network_id().as_str()).unwrap();
+            let events = self.get_events_metadata_internal(&events_search_path).await;
 
             // Create metadata using individual getter methods
             return Some(ServiceMetadata {
@@ -845,8 +1072,8 @@ impl crate::services::RegistryDelegate for ServiceRegistry {
                 name: service.name().to_string(),
                 version: service.version().to_string(),
                 description: service.description().to_string(),
-                actions: Vec::new(), // TODO: Populate with actual actions
-                events: Vec::new(),  // TODO: Populate with actual events
+                actions,
+                events,
                 registration_time: service_entry.registration_time,
                 last_start_time: service_entry.last_start_time,
             });
@@ -854,6 +1081,8 @@ impl crate::services::RegistryDelegate for ServiceRegistry {
 
         None
     }
+
+
 
     /// Get metadata for all registered services with an option to filter internal services
     async fn get_all_service_metadata(

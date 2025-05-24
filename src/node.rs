@@ -2106,11 +2106,13 @@ impl Node {
         self.logger
             .debug(format!("Subscribing to topic: {}", topic_string));
         let options = SubscriptionOptions::default();
+        let service_path = TopicPath::new("TODO-ADD-SERVICE-PATH", &self.network_id)
+            .map_err(|e| anyhow!("Invalid service path for subscribe_with_options: {}", e))?;
         // Convert topic String to TopicPath and callback Box to Arc
         let topic_path = TopicPath::new(&topic_string, &self.network_id)
             .map_err(|e| anyhow!("Invalid topic string for subscribe: {}", e))?;
         self.service_registry
-            .register_local_event_subscription(&topic_path, callback.into(), options)
+            .register_local_event_subscription(&service_path, &topic_path, callback.into(), options)
             .await
     }
 
@@ -2132,11 +2134,13 @@ impl Node {
             "Subscribing to topic with options: {}",
             topic_string
         ));
+        let service_path = TopicPath::new("TODO-ADD-SERVICE-PATH", &self.network_id)
+            .map_err(|e| anyhow!("Invalid service path for subscribe_with_options: {}", e))?;
         // Convert topic String to TopicPath
         let topic_path = TopicPath::new(&topic_string, &self.network_id)
             .map_err(|e| anyhow!("Invalid topic string for subscribe_with_options: {}", e))?;
         self.service_registry
-            .register_local_event_subscription(&topic_path, callback.into(), options)
+            .register_local_event_subscription(&service_path, &topic_path, callback.into(), options)
             .await
     }
 
@@ -2205,8 +2209,10 @@ impl NodeDelegate for Node {
         // Parse the topic string into a TopicPath
         let topic_path = TopicPath::new(&topic, &self.network_id)
             .map_err(|e| anyhow!("Invalid topic string for subscribe: {}", e))?;
+        let service_path = TopicPath::new("TODO-ADD-SERVICE-PATH", &self.network_id)
+            .map_err(|e| anyhow!("Invalid service path for subscribe_with_options: {}", e))?;
         self.service_registry
-            .register_local_event_subscription(&topic_path, callback.into(), options)
+            .register_local_event_subscription(&service_path, &topic_path, callback.into(), options)
             .await
     }
 
@@ -2226,8 +2232,10 @@ impl NodeDelegate for Node {
         // Parse the topic string into a TopicPath
         let topic_path = TopicPath::new(&topic, &self.network_id)
             .map_err(|e| anyhow!("Invalid topic string for subscribe_with_options: {}", e))?;
+        let service_path = TopicPath::new("TODO-ADD-SERVICE-PATH", &self.network_id)
+            .map_err(|e| anyhow!("Invalid service path for subscribe_with_options: {}", e))?;
         self.service_registry
-            .register_local_event_subscription(&topic_path, callback.into(), options)
+            .register_local_event_subscription(&service_path, &topic_path, callback.into(), options)
             .await
     }
 
@@ -2304,6 +2312,16 @@ impl RegistryDelegate for Node {
     ) -> HashMap<String, ServiceMetadata> {
         self.service_registry
             .get_all_service_metadata(include_internal_services)
+            .await
+    }
+
+    /// Get metadata for all actions under a specific service path
+    async fn get_actions_metadata(
+        &self,
+        service_topic_path: &TopicPath,
+    ) -> Vec<ActionMetadata> {
+        self.service_registry
+            .get_actions_metadata(service_topic_path)
             .await
     }
 

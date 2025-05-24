@@ -52,6 +52,7 @@ async fn test_subscribe_and_unsubscribe() {
         let registry = ServiceRegistry::new_with_default_logger();
         
         // Create a TopicPath for the test topic
+        let service_topic = TopicPath::new("test", "net1").expect("Valid topic path");
         let topic = TopicPath::new("test/event", "net1").expect("Valid topic path");
         
         // Create a flag to track if the callback was called
@@ -69,7 +70,7 @@ async fn test_subscribe_and_unsubscribe() {
         });
         
         // Subscribe to the topic using the correct method
-        let subscription_id = registry.register_local_event_subscription(&topic, callback, SubscriptionOptions::default()).await.unwrap();
+        let subscription_id = registry.register_local_event_subscription(&service_topic, &topic, callback, SubscriptionOptions::default()).await.unwrap();
         
         // Test the get_local_event_subscribers method
         let handlers = registry.get_local_event_subscribers(&topic).await;
@@ -108,12 +109,13 @@ async fn test_wildcard_subscriptions() {
         });
         
         // Create TopicPaths for wildcard subscriptions
+        let service_topic = TopicPath::new("test", "net1").expect("Valid topic path");
         let wildcard1 = TopicPath::new("test/#", "net1").expect("Valid topic path");
         let wildcard2 = TopicPath::new("test/events/#", "net1").expect("Valid topic path");
         
         // Subscribe to wildcard topics using the correct method
-        let id1 = registry.register_local_event_subscription(&wildcard1, callback.clone(), SubscriptionOptions::default()).await.unwrap();
-        let id2 = registry.register_local_event_subscription(&wildcard2, callback.clone(), SubscriptionOptions::default()).await.unwrap();
+        let id1 = registry.register_local_event_subscription(&service_topic, &wildcard1, callback.clone(), SubscriptionOptions::default()).await.unwrap();
+        let id2 = registry.register_local_event_subscription(&service_topic, &wildcard2, callback.clone(), SubscriptionOptions::default()).await.unwrap();
         
         // Verify handlers are registered correctly using the correct method
         let handlers1 = registry.get_local_event_subscribers(&wildcard1).await;
@@ -349,6 +351,7 @@ async fn test_multiple_event_handlers() {
         let registry = ServiceRegistry::new_with_default_logger();
         
         // Create test topics
+        let service_topic = TopicPath::new("events", "net1").expect("Valid topic path");
         let topic1 = TopicPath::new("events/created", "net1").expect("Valid topic path");
         let topic2 = TopicPath::new("events/updated", "net1").expect("Valid topic path");
         
@@ -377,9 +380,10 @@ async fn test_multiple_event_handlers() {
             })
         });
         
+        
         // Subscribe handlers to topics using the correct method
-        let id1 = registry.register_local_event_subscription(&topic1, handler1, SubscriptionOptions::default()).await.unwrap();
-        let id2 = registry.register_local_event_subscription(&topic2, handler2, SubscriptionOptions::default()).await.unwrap();
+        let id1 = registry.register_local_event_subscription(&service_topic, &topic1, handler1, SubscriptionOptions::default()).await.unwrap();
+        let id2 = registry.register_local_event_subscription(&service_topic, &topic2, handler2, SubscriptionOptions::default()).await.unwrap();
         
         // Retrieve and verify handlers using the correct method
         let handlers1 = registry.get_local_event_subscribers(&topic1).await;
@@ -615,5 +619,82 @@ async fn test_multiple_network_ids() {
     let (handler2, _) = result2;
     handler2(Some(ArcValueType::null()), request_ctx2).await.unwrap();
 }
- 
+
+/// Test that verifies the get_actions_metadata method returns correct metadata for actions
+/// 
+/// INTENTION: This test validates that the registry can properly:
+/// - Register multiple action handlers for a service
+/// - Return the correct metadata for all actions under a service path
+#[tokio::test]
+async fn test_get_actions_metadata() {
+    // Wrap the test in a timeout to prevent it from hanging
+    match timeout(Duration::from_secs(10), async {
+        // Set up test logger
+        let logger = Logger::new_root(Component::Service, "test");
+        
+        // Create registry
+        let registry = ServiceRegistry::new(logger.clone());
+        
+        // Create a service path and action paths
+        let service_path = TopicPath::new("math-service", "test-network").unwrap();
+        let add_action_path = TopicPath::new("math-service/add", "test-network").unwrap();
+        let subtract_action_path = TopicPath::new("math-service/subtract", "test-network").unwrap();
+        let multiply_action_path = TopicPath::new("math-service/multiply", "test-network").unwrap();
+        
+        // Create action handlers
+        let add_handler: ActionHandler = Arc::new(|_params, _context| {
+            Box::pin(async move {
+                Ok(ServiceResponse::ok_empty())
+            })
+        });
+        
+        let subtract_handler: ActionHandler = Arc::new(|_params, _context| {
+            Box::pin(async move {
+                Ok(ServiceResponse::ok_empty())
+            })
+        });
+        
+        let multiply_handler: ActionHandler = Arc::new(|_params, _context| {
+            Box::pin(async move {
+                Ok(ServiceResponse::ok_empty())
+            })
+        });
+        
+        // Register the action handlers
+        registry.register_local_action_handler(&add_action_path, add_handler, None).await.unwrap();
+        registry.register_local_action_handler(&subtract_action_path, subtract_handler, None).await.unwrap();
+        registry.register_local_action_handler(&multiply_action_path, multiply_handler, None).await.unwrap();
+        
+        // Create a wildcard path to match all actions under this service
+        let service_path_str = service_path.service_path();
+        let wildcard_path = format!("{}/*", service_path_str);
+        let search_path = TopicPath::new(&wildcard_path, service_path.network_id().as_str()).unwrap();
+        
+        // Get the action metadata for the service using the wildcard path
+        let actions_metadata = registry.get_actions_metadata(&search_path).await;
+        
+        // Verify that we got metadata for all three actions
+        assert_eq!(actions_metadata.len(), 3, "Should have metadata for all three actions");
+        
+        // Verify the paths of the actions in the metadata
+        let action_paths: Vec<String> = actions_metadata.iter().map(|m| m.path.clone()).collect();
+        assert!(action_paths.contains(&add_action_path.as_str().to_string()), "Missing add action path");
+        assert!(action_paths.contains(&subtract_action_path.as_str().to_string()), "Missing subtract action path");
+        assert!(action_paths.contains(&multiply_action_path.as_str().to_string()), "Missing multiply action path");
+        
+        // Verify that the descriptions contain the action names
+        for metadata in &actions_metadata {
+            if metadata.path.contains("/add") {
+                assert!(metadata.description.contains("add"), "Description should contain action name");
+            } else if metadata.path.contains("/subtract") {
+                assert!(metadata.description.contains("subtract"), "Description should contain action name");
+            } else if metadata.path.contains("/multiply") {
+                assert!(metadata.description.contains("multiply"), "Description should contain action name");
+            }
+        }
+    }).await {
+        Ok(_) => (), // Test completed within the timeout
+        Err(_) => panic!("Test timed out after 10 seconds"),
+    }
+}
  

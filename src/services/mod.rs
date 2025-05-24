@@ -891,6 +891,15 @@ pub trait RegistryDelegate: Send + Sync {
         &self,
         include_internal_services: bool,
     ) -> HashMap<String, ServiceMetadata>;
+    
+    /// Get metadata for all actions under a specific service path
+    ///
+    /// INTENTION: Retrieve metadata for all actions registered under a service path.
+    /// This is useful for service discovery and introspection.
+    async fn get_actions_metadata(
+        &self,
+        service_topic_path: &TopicPath,
+    ) -> Vec<ActionMetadata>;
 
     /// Register a remote action handler
     ///

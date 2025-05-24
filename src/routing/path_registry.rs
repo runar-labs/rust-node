@@ -140,6 +140,11 @@ impl<T: Clone> PathTrie<T> {
     
     /// Find all handlers that match the given topic, including any extracted parameters
     pub fn find_matches(&self, topic: &TopicPath) -> Vec<PathTrieMatch<T>> {
+        // If the topic contains wildcards, use the wildcard search
+        if topic.is_pattern() {
+            return self.find_wildcard_matches(topic);
+        }
+        
         let network_id = topic.network_id();
         let segments = topic.get_segments();
         let mut results = Vec::new();
@@ -152,6 +157,101 @@ impl<T: Clone> PathTrie<T> {
         }
         
         results
+    }
+    
+    /// Find all handlers that match a wildcard topic pattern
+    /// 
+    /// INTENTION: Support searching with wildcard patterns, allowing clients to find
+    /// all handlers that match a specific pattern (e.g., "serviceA/*" to find all actions
+    /// for serviceA).
+    pub fn find_wildcard_matches(&self, pattern: &TopicPath) -> Vec<PathTrieMatch<T>> {
+        let network_id = pattern.network_id();
+        let pattern_segments = pattern.get_segments();
+        let mut results = Vec::new();
+        
+        // Only look in the network-specific trie
+        if let Some(network_trie) = self.networks.get(&network_id.to_string()) {
+            // Collect all handlers from the network trie that match the pattern
+            network_trie.collect_wildcard_matches(&pattern_segments, 0, &mut results);
+        }
+        
+        results
+    }
+    
+    /// Recursively collect all handlers that match a wildcard pattern
+    fn collect_wildcard_matches(&self, pattern_segments: &[String], index: usize, results: &mut Vec<PathTrieMatch<T>>) {
+        // If we've reached the end of the pattern, add all handlers at this level
+        if index >= pattern_segments.len() {
+            for handler in &self.handlers {
+                results.push(PathTrieMatch {
+                    handler: handler.clone(),
+                    params: HashMap::new(), // No parameter extraction for wildcard searches
+                });
+            }
+            return;
+        }
+        
+        let segment = &pattern_segments[index];
+        
+        // Handle different segment types
+        if segment == "*" {
+            // Single wildcard - match any single segment
+            // Check all children at this level
+            for (_, child) in &self.children {
+                child.collect_wildcard_matches(pattern_segments, index + 1, results);
+            }
+            
+            // Also check wildcard and template children if they exist
+            if let Some(child) = &self.wildcard_child {
+                child.collect_wildcard_matches(pattern_segments, index + 1, results);
+            }
+            
+            if let Some(child) = &self.template_child {
+                child.collect_wildcard_matches(pattern_segments, index + 1, results);
+            }
+        } else if segment == ">" {
+            // Multi-wildcard - match everything below this level
+            // Add all handlers from this level and all children recursively
+            self.collect_all_handlers(results);
+        } else {
+            // Literal segment - only check the matching child
+            if let Some(child) = self.children.get(segment) {
+                child.collect_wildcard_matches(pattern_segments, index + 1, results);
+            }
+        }
+    }
+    
+    /// Recursively collect all handlers from this node and all its children
+    fn collect_all_handlers(&self, results: &mut Vec<PathTrieMatch<T>>) {
+        // Add handlers at this level
+        for handler in &self.handlers {
+            results.push(PathTrieMatch {
+                handler: handler.clone(),
+                params: HashMap::new(), // No parameter extraction for wildcard searches
+            });
+        }
+        
+        // Add multi-wildcard handlers
+        for handler in &self.multi_wildcard_handlers {
+            results.push(PathTrieMatch {
+                handler: handler.clone(),
+                params: HashMap::new(),
+            });
+        }
+        
+        // Recursively add handlers from all children
+        for (_, child) in &self.children {
+            child.collect_all_handlers(results);
+        }
+        
+        // Check wildcard and template children if they exist
+        if let Some(child) = &self.wildcard_child {
+            child.collect_all_handlers(results);
+        }
+        
+        if let Some(child) = &self.template_child {
+            child.collect_all_handlers(results);
+        }
     }
     
     /// Internal recursive implementation of find_matches
