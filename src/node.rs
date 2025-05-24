@@ -1609,7 +1609,7 @@ impl Node {
         &self,
         node_info: NodeInfo,
     ) -> Result<Vec<Arc<RemoteService>>> {
-        let capabilities = node_info.capabilities.clone();
+        let capabilities = node_info.services.clone();
         self.logger.info(format!(
             "Processing {} capabilities from node {}",
             capabilities.len(),
@@ -2002,7 +2002,7 @@ impl Node {
             peer_id: self.peer_id.clone(),
             network_ids: self.network_ids.clone(),
             addresses: vec![address],
-            capabilities: self.collect_local_service_capabilities().await?,
+            services: self.collect_local_service_capabilities().await?,
             last_seen: std::time::SystemTime::now(),
         };
 

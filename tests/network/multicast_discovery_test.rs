@@ -33,7 +33,7 @@ mod tests {
             peer_id: PeerId::new(node_id.to_string()),
             network_ids: vec![network_id.to_string()],
             addresses: vec!["127.0.0.1:8000".to_string()],
-            capabilities: vec![
+            services: vec![
                 ServiceMetadata {
                     name: "test-service".to_string(),
                     service_path: "service".to_string(),

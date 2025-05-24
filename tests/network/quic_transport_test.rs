@@ -87,7 +87,7 @@ async fn test_quic_transport_connection_end_to_end() {
         peer_id: node_a_id.clone(),
         network_ids: vec!["default".to_string()],  // Use "default" to match what QuicTransport uses internally
         addresses: vec![node_a_addr.to_string()],
-        capabilities: capabilities.clone(),
+        services: capabilities.clone(),
         last_seen: std::time::SystemTime::now(),
     };
     
@@ -95,7 +95,7 @@ async fn test_quic_transport_connection_end_to_end() {
         peer_id: node_b_id.clone(),
         network_ids: vec!["default".to_string()],  // Use "default" to match what QuicTransport uses internally
         addresses: vec![node_b_addr.to_string()],
-        capabilities: capabilities.clone(),
+        services: capabilities.clone(),
         last_seen: std::time::SystemTime::now(),
     };
     

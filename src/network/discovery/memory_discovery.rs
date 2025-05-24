@@ -284,7 +284,7 @@ mod tests {
             peer_id: PeerId::new("test_node".to_string()),
             network_ids: vec!["net1".to_string()],
             addresses: vec!["127.0.0.1:8000".to_string()],
-            capabilities: vec![],
+            services: vec![],
             last_seen: SystemTime::now(),
         };
         discovery.set_local_node(local_node);
@@ -294,7 +294,7 @@ mod tests {
             peer_id: PeerId::new("node1".to_string()),
             network_ids: vec!["net1".to_string()], // Added network_ids
             addresses: vec!["addr1".to_string()],
-            capabilities: vec![],
+            services: vec![],
             last_seen: SystemTime::now(),
         };
         // discovery.register_node(node_info_1).await.unwrap();

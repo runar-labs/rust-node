@@ -1049,25 +1049,22 @@ impl crate::services::RegistryDelegate for ServiceRegistry {
         if !matches.is_empty() {
             let service_entry = &matches[0].content;
             let service = service_entry.service.clone();
+            let search_path = format!("{}/*", &service.path());
+            let network_id_string = topic_path.network_id();
             let service_topic_path = TopicPath::new(
-                &service.path().to_string(),
-                service.network_id().unwrap_or_default().as_str(),
+                search_path.as_str(),
+                &network_id_string,
             ).unwrap();
 
-            // Get actions metadata for this service - create a wildcard path
-            let service_path = service_topic_path.service_path();
-            let actions_wildcard_path = format!("{}/*", service_path);
-            let actions_search_path = TopicPath::new(&actions_wildcard_path, service_topic_path.network_id().as_str()).unwrap();
-            let actions = self.get_actions_metadata(&actions_search_path).await;
+            // Get actions metadata for this service - create a wildcard path 
+             let actions = self.get_actions_metadata(&service_topic_path).await;
             
             // Get events metadata for this service - create a wildcard path
-            let events_wildcard_path = format!("{}/*", service_path);
-            let events_search_path = TopicPath::new(&events_wildcard_path, service_topic_path.network_id().as_str()).unwrap();
-            let events = self.get_events_metadata(&events_search_path).await;
+             let events = self.get_events_metadata(&service_topic_path).await;
 
             // Create metadata using individual getter methods
             return Some(ServiceMetadata {
-                network_id: service.network_id().unwrap_or_default().to_string(),
+                network_id: network_id_string,
                 service_path: service.path().to_string(),
                 name: service.name().to_string(),
                 version: service.version().to_string(),

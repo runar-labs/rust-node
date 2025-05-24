@@ -734,6 +734,8 @@ impl QuicTransportImpl {
             return Err(NetworkError::ConnectionError(format!("Not connected to peer {}, cannot perform handshake", peer_id)));
         }
         
+        let correlation_id = format!("handshake-{}-{}", self.node_id, SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_millis());
+
         // Create a handshake message containing our node info
         let handshake_message = NetworkMessage {
             source: self.node_id.clone(),
@@ -743,7 +745,7 @@ impl QuicTransportImpl {
                 path: "".to_string(),  
                 value_bytes: bincode::serialize(&local_node)
                     .map_err(|e| NetworkError::MessageError(format!("Failed to serialize node info: {}", e)))?,
-                correlation_id: format!("handshake-{}-{}", self.node_id, SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_millis()),
+                correlation_id,
             }],
         };
         
@@ -857,7 +859,7 @@ impl QuicTransportImpl {
                                 peer_id: self.node_id.clone(),
                                 network_ids: vec!["default".to_string()],
                                 addresses: vec![self.bind_addr.to_string()],
-                                capabilities: vec![],
+                                services: vec![],
                                 last_seen: std::time::SystemTime::now(),
                             };
                             

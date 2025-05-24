@@ -187,9 +187,16 @@ impl LifecycleContext {
         self.logger
             .debug(format!("register_action: created TopicPath {}", topic_path));
 
+        let metadata = ActionMetadata {
+            path: action_path,
+            description: format!("Action {} for service {}", action_name_string, self.service_path),
+            input_schema: None,
+            output_schema: None,
+        };
+
         // Call the delegate to register the action handler
         delegate
-            .register_action_handler(topic_path, handler, None)
+            .register_action_handler(topic_path, handler, Some(metadata))
             .await
     }
 

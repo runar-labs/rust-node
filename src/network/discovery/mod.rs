@@ -68,8 +68,8 @@ pub struct NodeInfo {
     pub network_ids: Vec<String>,
     /// The node's  network addressess (e.g., "IP:PORT") - ordered by preference
     pub addresses: Vec<String>,
-    /// Node capabilities representing the services provided by this node
-    pub capabilities: Vec<ServiceMetadata>,
+    /// Node services representing the services provided by this node
+    pub services: Vec<ServiceMetadata>,
     /// Timestamp when this node information was last confirmed or updated.
     pub last_seen: std::time::SystemTime,
 }
