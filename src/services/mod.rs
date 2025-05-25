@@ -19,7 +19,7 @@
 // Module declarations
 pub mod abstract_service;
 pub mod event_context;
-pub mod registry_info;
+pub mod registry_service;
 pub mod remote_service;
 pub mod request_context;
 pub mod service_registry;

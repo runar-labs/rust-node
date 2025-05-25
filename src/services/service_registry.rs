@@ -999,6 +999,18 @@ impl ServiceRegistry {
                 continue;
             }
 
+            let search_path = format!("{}/*", &path_str);
+            let network_id_string = service.network_id().unwrap_or_default().to_string();
+            let service_topic_path = TopicPath::new(
+                search_path.as_str(),
+                &network_id_string,
+            ).unwrap();
+
+            // Get actions metadata for this service - create a wildcard path 
+            let actions = self.get_actions_metadata(&service_topic_path).await;
+            
+            // Get events metadata for this service - create a wildcard path
+            let events = self.get_events_metadata(&service_topic_path).await;
 
             // Create metadata using individual getter methods from the service
             result.insert(
@@ -1009,8 +1021,8 @@ impl ServiceRegistry {
                     name: service.name().to_string(),
                     version: service.version().to_string(),
                     description: service.description().to_string(),
-                    actions: Vec::new(), // TODO: Populate with actual actions
-                    events: Vec::new(),  // TODO: Populate with actual events
+                    actions: actions,
+                    events: events,
                     registration_time: service_entry.registration_time,
                     last_start_time: service_entry.last_start_time,
                 },
@@ -1064,10 +1076,10 @@ impl crate::services::RegistryDelegate for ServiceRegistry {
             ).unwrap();
 
             // Get actions metadata for this service - create a wildcard path 
-             let actions = self.get_actions_metadata(&service_topic_path).await;
+            let actions = self.get_actions_metadata(&service_topic_path).await;
             
             // Get events metadata for this service - create a wildcard path
-             let events = self.get_events_metadata(&service_topic_path).await;
+            let events = self.get_events_metadata(&service_topic_path).await;
 
             // Create metadata using individual getter methods
             return Some(ServiceMetadata {

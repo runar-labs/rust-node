@@ -38,7 +38,7 @@ use crate::network::transport::{
 };
 use crate::routing::TopicPath;
 use crate::services::abstract_service::{AbstractService, ServiceState};
-use crate::services::registry_info::RegistryService;
+use crate::services::registry_service::RegistryService;
 use crate::services::remote_service::RemoteService;
 use crate::services::service_registry::{ServiceEntry, ServiceRegistry};
 use crate::services::{

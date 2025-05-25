@@ -575,33 +575,24 @@ async fn test_multiple_network_ids() {
     
     // Create network-specific handlers
     let network1_handler: ActionHandler = Arc::new(move |_params, context| {
-        if let Some(topic_path) = &context.topic_path {
-            let network_id = topic_path.network_id();
-            assert_eq!(network_id, "network1");
-            
-            Box::pin(async move {
-                Ok(ServiceResponse::ok(ArcValueType::new_primitive(format!("Response from {}", network_id))))
-            })
-        } else {
-            Box::pin(async move {
-                Ok(ServiceResponse::error(400, "Missing topic path"))
-            })
-        }
+        let network_id = context.topic_path.network_id();
+        assert_eq!(network_id, "network1");
+        
+        Box::pin(async move {
+            Ok(ServiceResponse::ok(ArcValueType::new_primitive(format!("Response from {}", network_id))))
+        })
+         
     });
     
     let network2_handler: ActionHandler = Arc::new(move |_params, context| {
-        if let Some(topic_path) = &context.topic_path {
-            let network_id = topic_path.network_id();
-            assert_eq!(network_id, "network2");
-            
-            Box::pin(async move {
-                Ok(ServiceResponse::ok(ArcValueType::new_primitive(format!("Response from {}", network_id))))
-            })
-        } else {
-            Box::pin(async move {
-                Ok(ServiceResponse::error(400, "Missing topic path"))
-            })
-        }
+         
+        let network_id = context.topic_path.network_id();
+        assert_eq!(network_id, "network2");
+        
+        Box::pin(async move {
+            Ok(ServiceResponse::ok(ArcValueType::new_primitive(format!("Response from {}", network_id))))
+        })
+         
     });
     
     // Register handlers for different networks

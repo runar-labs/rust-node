@@ -114,7 +114,6 @@ impl RegistryService {
                     Box::pin(async move {
                         inner_self
                             .handle_service_info(
-                                "",
                                 params.unwrap_or_else(|| ArcValueType::null()),
                                 ctx,
                             )
@@ -172,7 +171,7 @@ impl RegistryService {
         ctx.logger.debug("Listing all services");
 
         // Get all service metadata directly
-        let service_metadata = self.registry_delegate.get_all_service_metadata(false).await;
+        let service_metadata = self.registry_delegate.get_all_service_metadata(true).await;
         
         // Convert the HashMap of ServiceMetadata to a Vec
         let metadata_vec: Vec<_> = service_metadata.values().cloned().collect();
@@ -184,7 +183,6 @@ impl RegistryService {
     /// Handler for getting detailed information about a specific service
     async fn handle_service_info(
         &self,
-        _service_path: &str,
         _params: ArcValueType,
         ctx: RequestContext,
     ) -> Result<ServiceResponse> {
@@ -200,7 +198,7 @@ impl RegistryService {
         };
 
         // Get the service metadata for the specific service path
-        let service_topic = match TopicPath::new(&actual_service_path, "default") {
+        let service_topic = match TopicPath::new(&actual_service_path, &ctx.network_id()) {
             Ok(topic) => topic,
             Err(_) => {
                 return Ok(ServiceResponse::error(500, "Invalid service path format"));

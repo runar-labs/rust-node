@@ -34,7 +34,7 @@ use std::{collections::HashMap, fmt, sync::Arc};
 /// and consistent handling.
 pub struct RequestContext {
     /// Complete topic path for this request (optional) - includes service path and action
-    pub topic_path: Option<TopicPath>,
+    pub topic_path: TopicPath,
     /// Metadata for this request - additional contextual information
     pub metadata: Option<ArcValueType>,
     /// Logger for this context - pre-configured with the appropriate component and path
@@ -95,7 +95,7 @@ impl RequestContext {
         };
 
         Self {
-            topic_path: Some(topic_path.clone()),
+            topic_path: topic_path.clone(),
             metadata: None,
             logger: action_logger,
             path_params: HashMap::new(),
@@ -112,20 +112,12 @@ impl RequestContext {
 
     /// Get the network ID from the topic path
     pub fn network_id(&self) -> String {
-        if let Some(topic_path) = &self.topic_path {
-            topic_path.network_id()
-        } else {
-            "unknown".to_string()
-        }
+        self.topic_path.network_id() 
     }
 
     /// Get the service path from the topic path
     pub fn service_path(&self) -> String {
-        if let Some(topic_path) = &self.topic_path {
-            topic_path.service_path()
-        } else {
-            "unknown".to_string()
-        }
+        self.topic_path.service_path() 
     }
 
     /// Helper method to log debug level message
@@ -167,17 +159,13 @@ impl LoggingContext for RequestContext {
     }
 
     fn service_path(&self) -> Option<&str> {
-        if let Some(topic_path) = &self.topic_path {
-            let path = topic_path.service_path();
-            Some(Box::leak(path.into_boxed_str()))
-        } else {
-            None
-        }
+        let path = self.topic_path.service_path();
+        Some(Box::leak(path.into_boxed_str()))
     }
 
     fn action_path(&self) -> Option<&str> {
-        // Get from logger's action_path
-        self.logger.action_path()
+        let path = self.topic_path.action_path();
+        Some(Box::leak(path.into_boxed_str()))
     }
 
     fn logger(&self) -> &Logger {

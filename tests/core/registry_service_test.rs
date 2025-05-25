@@ -48,35 +48,24 @@ async fn test_registry_service_list_services() {
         // Verify response is successful
         assert_eq!(response.status, 200, "Registry service request failed: {:?}", response);
         
-/**
- * hread 'core::registry_service_test::test_registry_service_list_services' panicked at rust-node/tests/core/registry_service_test.rs:53:64:
-Expected array response from registry service: Type mismatch: 
-expected alloc::vec::Vec<runar_common::types::value_type::ArcValueType>, 
-but has alloc::vec::Vec<runar_common::types::schemas::ServiceMetadata>
- */
+ 
 
         // Parse the response to verify it contains our registered services
         if let Some(mut value) = response.data {
             let services = value.as_list_ref::<ServiceMetadata>().expect("Expected array response from registry service");
             // The services list should contain at least the math service and the registry service itself
             assert!(services.len() >= 2, "Expected at least 2 services, got {}", services.len());
-            
-            // Verify the math service is in the list
-            let has_math_service = services.iter().any(|service| {
-                // Need to make service mutable for as_map_ref
-                let mut service_clone = service.clone();
-                let service_info = service_clone.as_map_ref::<String, ArcValueType>().expect("Expected map in service info");
-                if let Some(path_value) = service_info.get("path") {
-                    // Need to make path_value mutable for as_type
-                    let mut path_value_clone = path_value.clone();
-                    let path: String = path_value_clone.as_type().expect("Expected string path");
-                    path == "math"
-                } else {
-                    false   
-                }
-            });
-            
+
+            // Verify the math service is in the list by checking the service_path field
+            let has_math_service = services.iter().any(|service| service.service_path == "math");
             assert!(has_math_service, "Math service not found in registry service response");
+
+            // Optionally, validate structure of ServiceMetadata for at least one service
+            let math_service = services.iter().find(|service| service.service_path == "math").expect("Math service not found");
+            assert_eq!(math_service.name, "Math", "Math service name mismatch");
+            assert_eq!(math_service.version, "1.0.0", "Math service version mismatch");
+            // Add more field checks as desired
+
         } else {
             panic!("Expected array of services in response, got {:?}", response.data);
         }
@@ -105,7 +94,7 @@ async fn test_registry_service_get_service_info() {
         let mut node = Node::new(config).await.unwrap();
         
         // Create a test service
-        let math_service = MathService::new("Math", "math");
+        let math_service = MathService::new("math", "math");
         
         // Add the service to the node
         node.add_service(math_service).await.unwrap();
