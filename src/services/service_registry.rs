@@ -171,7 +171,7 @@ pub struct ServiceRegistry {
     service_states_by_service_path: Arc<RwLock<HashMap<String, ServiceState>>>,
 
     /// Logger instance
-    logger: Logger,
+    logger: Arc<Logger>,
 }
 
 impl Clone for ServiceRegistry {
@@ -211,7 +211,7 @@ impl ServiceRegistry {
     ///
     /// INTENTION: Initialize a new registry with a logger provided by the parent
     /// component (typically the Node). This ensures proper logger hierarchy.
-    pub fn new(logger: Logger) -> Self {
+    pub fn new(logger: Arc<Logger>) -> Self {
         Self {
             local_action_handlers: RwLock::new(PathTrie::new()),
             local_events_by_service: RwLock::new(PathTrie::new()),
@@ -234,10 +234,10 @@ impl ServiceRegistry {
     /// INTENTION: Create a registry with a default logger when no parent logger
     /// is available. This is primarily used for testing or standalone usage.
     pub fn new_with_default_logger() -> Self {
-        Self::new(Logger::new_root(
+        Self::new(Arc::new(Logger::new_root(
             runar_common::Component::Registry,
             "global",
-        ))
+        )))
     }
 
     /// Register a local service

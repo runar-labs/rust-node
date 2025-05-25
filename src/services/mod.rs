@@ -933,7 +933,7 @@ pub struct RemoteLifecycleContext {
     /// Optional configuration data
     pub config: Option<ArcValueType>,
     /// Logger instance with service context
-    pub logger: Logger,
+    pub logger: Arc<Logger>,
     /// Registry delegate for registry operations
     registry_delegate: Option<Arc<dyn RegistryDelegate + Send + Sync>>,
 }
@@ -942,7 +942,7 @@ impl RemoteLifecycleContext {
     /// Create a new RemoteLifecycleContext with the given topic path and logger
     ///
     /// This is the primary constructor that takes the minimum required parameters.
-    pub fn new(topic_path: &TopicPath, logger: Logger) -> Self {
+    pub fn new(topic_path: &TopicPath, logger: Arc<Logger>) -> Self {
         Self {
             network_id: topic_path.network_id().to_string(),
             service_path: topic_path.service_path(),

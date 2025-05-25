@@ -20,8 +20,7 @@ use socket2;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::future::Future;
-// use std::io::Read;
-use std::net::SocketAddr;
+
  
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -34,7 +33,7 @@ use crate::network::discovery::{
     DiscoveryOptions, MulticastDiscovery, NodeDiscovery, NodeInfo, DEFAULT_MULTICAST_ADDR,
 };
 use crate::network::transport::{
-    ConnectionCallback, MessageCallback, NetworkMessage, NetworkMessagePayloadItem, NetworkError,
+     MessageCallback, NetworkMessage, NetworkMessagePayloadItem, NetworkError,
     NetworkTransport, PeerId, QuicTransport, QuicTransportOptions,
 };
 use crate::routing::TopicPath;
@@ -548,13 +547,13 @@ pub struct Node {
     pub(crate) peer_id: PeerId,
 
     /// Configuration for this node
-    pub(crate) config: NodeConfig,
+    pub(crate) config: Arc<NodeConfig>,
 
     /// The service registry for this node
     pub(crate) service_registry: Arc<ServiceRegistry>,
 
     /// Logger instance
-    pub(crate) logger: Logger,
+    pub(crate) logger: Arc<Logger>,
 
     /// Flag indicating if the node is running
     pub(crate) running: AtomicBool,
@@ -569,12 +568,11 @@ pub struct Node {
     /// Load balancer for selecting remote handlers
     pub(crate) load_balancer: Arc<RwLock<dyn LoadBalancingStrategy>>,
 
-    /// Default load balancer to use if none is provided
-    pub(crate) default_load_balancer: RoundRobinLoadBalancer,
-
     /// Pending requests waiting for responses, keyed by correlation ID
     pub(crate) event_payloads:
         Arc<RwLock<HashMap<String, oneshot::Sender<Result<ServiceResponse>>>>>,
+
+    pub(crate) serializer_registry: Arc<SerializerRegistry>,
 }
 
 // Implementation for Node
@@ -647,7 +645,7 @@ impl Node {
     /// after registering services.
     pub async fn new(config: NodeConfig) -> Result<Self> {
         let node_id = config.node_id.clone();
-        let logger = Logger::new_root(Component::Node, &node_id);
+        let logger = Arc::new(Logger::new_root(Component::Node, &node_id));
 
         // Apply logging configuration (default to Info level if none provided)
         if let Some(logging_config) = &config.logging_config {
@@ -682,15 +680,15 @@ impl Node {
             network_id: default_network_id,
             network_ids,
             peer_id,
-            config,
+            config: Arc::new(config),
             logger: logger.clone(),
             service_registry,
             running: AtomicBool::new(false),
             supports_networking: networking_enabled,
             network_transport: Arc::new(RwLock::new(None)),
-            load_balancer: Arc::new(RwLock::new(RoundRobinLoadBalancer::new())),
-            default_load_balancer: RoundRobinLoadBalancer::new(),
+            load_balancer: Arc::new(RwLock::new(RoundRobinLoadBalancer::new())), 
             event_payloads: Arc::new(RwLock::new(HashMap::new())),
+            serializer_registry: Arc::new(SerializerRegistry::new()),
         };
 
         // Register the registry service
@@ -2441,9 +2439,9 @@ impl Clone for Node {
             running: AtomicBool::new(self.running.load(Ordering::SeqCst)),
             supports_networking: self.supports_networking,
             network_transport: self.network_transport.clone(),
-            load_balancer: self.load_balancer.clone(),
-            default_load_balancer: RoundRobinLoadBalancer::new(),
+            load_balancer: self.load_balancer.clone(), 
             event_payloads: self.event_payloads.clone(),
+            serializer_registry: self.serializer_registry.clone(),
         }
     }
 }

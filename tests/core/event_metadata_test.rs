@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::time::timeout;
  
 use runar_node::services::service_registry::ServiceRegistry;
-use runar_node::services::{EventContext, SubscriptionOptions};
+use runar_node::services::{EventContext};
 use runar_node::routing::TopicPath;
 use runar_common::logging::{Logger, Component};
 use runar_common::types::{EventMetadata, ArcValueType};
@@ -26,7 +26,7 @@ async fn test_get_events_metadata_by_subscriber() {
     // Wrap the test in a timeout to prevent it from hanging
     match timeout(Duration::from_secs(10), async {
         // Set up test logger
-        let logger = Logger::new_root(Component::Service, "test");
+        let logger = Arc::new(Logger::new_root(Component::Service, "test"));
         
         // Create registry
         let registry = ServiceRegistry::new(logger.clone());

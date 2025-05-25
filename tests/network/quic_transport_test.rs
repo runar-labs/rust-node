@@ -65,8 +65,8 @@ pub fn generate_test_certificates() -> (Vec<rustls::Certificate>, rustls::Privat
 #[tokio::test(flavor = "multi_thread")]
 async fn test_quic_transport_connection_end_to_end() {
     // Create two transport instances for testing
-    let logger_a = Logger::new_root(Component::Network, "transporter-a");
-    let logger_b = Logger::new_root(Component::Network, "transporter-b");
+    let logger_a = Arc::new(Logger::new_root(Component::Network, "transporter-a"));
+    let logger_b = Arc::new(Logger::new_root(Component::Network, "transporter-b"));
 
     // Create node info for both nodes with proper PeerId type
     let node_a_id_str = "node-a".to_string();

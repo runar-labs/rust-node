@@ -26,8 +26,8 @@ async fn test_get_local_services() {
     // Wrap the test in a timeout to prevent it from hanging
     match timeout(Duration::from_secs(10), async {
         // Create a service registry
-        let logger = Logger::new_root(Component::Service, "test");
-        let registry = ServiceRegistry::new(logger);
+        let logger = Arc::new(Logger::new_root(Component::Service, "test"));
+        let registry = ServiceRegistry::new(logger.clone());
         
         // Create services in different networks
         let service1 = Arc::new(MathService::new("service1", "service1" ));

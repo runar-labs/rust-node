@@ -14,7 +14,7 @@
 use crate::routing::TopicPath;
 use runar_common::{logging::{Component, Logger, LoggingContext}, types::ArcValueType}; 
  
-use std::{collections::HashMap, fmt};
+use std::{collections::HashMap, fmt, sync::Arc};
 
 /// Context for handling service requests
 ///
@@ -38,7 +38,7 @@ pub struct RequestContext {
     /// Metadata for this request - additional contextual information
     pub metadata: Option<ArcValueType>,
     /// Logger for this context - pre-configured with the appropriate component and path
-    pub logger: Logger,
+    pub logger: Arc<Logger>,
     /// Path parameters extracted from template matching
     pub path_params: HashMap<String, String>,
 }
@@ -84,12 +84,12 @@ impl RequestContext {
     /// Create a new RequestContext with a TopicPath and logger
     ///
     /// This is the primary constructor that takes the minimum required parameters.
-    pub fn new(topic_path: &TopicPath, logger: Logger) -> Self {
+    pub fn new(topic_path: &TopicPath, logger: Arc<Logger>) -> Self {
         // Add action path to logger if available from topic_path
         let action_path = topic_path.action_path();
         let action_logger = if !action_path.is_empty() {
             // If there's an action path, add it to the logger
-            logger.with_action_path(action_path)
+            Arc::new(logger.with_action_path(action_path))
         } else {
             logger
         };

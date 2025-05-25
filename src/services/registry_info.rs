@@ -29,7 +29,7 @@ pub struct RegistryService {
     path: String,
 
     /// Logger instance
-    logger: Logger,
+    logger: Arc<Logger>,
 
     /// Registry delegate for accessing node registry information
     registry_delegate: Arc<dyn RegistryDelegate>,
@@ -37,7 +37,7 @@ pub struct RegistryService {
 
 impl RegistryService {
     /// Create a new Registry Service
-    pub fn new(logger: Logger, delegate: Arc<dyn RegistryDelegate>) -> Self {
+    pub fn new(logger: Arc<Logger>, delegate: Arc<dyn RegistryDelegate>) -> Self {
         RegistryService {
             path: "$registry".to_string(),
             logger,

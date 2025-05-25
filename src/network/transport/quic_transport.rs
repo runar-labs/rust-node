@@ -76,7 +76,7 @@ pub struct QuicTransport {
     // Internal implementation containing the actual logic
     inner: Arc<QuicTransportImpl>,
     // Keep logger and node_id at this level for compatibility
-    logger: Logger,
+    logger: Arc<Logger>,
     node_id: PeerId,
     // Background tasks for connection handling and message processing
     background_tasks: Mutex<Vec<JoinHandle<()>>>,
@@ -285,7 +285,7 @@ impl QuicTransportImpl {
         local_node: NodeInfo,
         bind_addr: SocketAddr,
         options: QuicTransportOptions,
-        logger: Logger,
+        logger: Arc<Logger>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let connection_pool = Arc::new(ConnectionPool::new(logger.clone()));
         
@@ -300,7 +300,7 @@ impl QuicTransportImpl {
             endpoint: Mutex::new(None),
             connection_pool,
             options,
-            logger: Arc::new(logger),
+            logger,
             message_handlers: Arc::new(StdRwLock::new(Vec::new())),
             local_node,
             peer_node_info_sender,
@@ -1097,7 +1097,7 @@ impl QuicTransport {
         local_node_info: NodeInfo,
         bind_addr: SocketAddr,
         options: QuicTransportOptions,
-        logger: Logger,
+        logger: Arc<Logger>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         // Create the inner implementation
         let inner = QuicTransportImpl::new(local_node_info.clone(), bind_addr, options, logger.clone())?;

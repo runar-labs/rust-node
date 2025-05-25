@@ -20,14 +20,14 @@ use crate::network::transport::{PeerState, NetworkError, PeerId};
 /// INTENTION: Use DashMap for concurrent peer map access; PeerState is now granularly locked.
 pub struct ConnectionPool {
     pub peers: DashMap<PeerId, Arc<PeerState>>,
-    pub logger: Logger,
+    pub logger: Arc<Logger>,
 }
 
 impl ConnectionPool {
     /// Create a new ConnectionPool
     ///
     /// INTENTION: Initialize a pool for managing peer connections.
-    pub fn new(logger: Logger) -> Self {
+    pub fn new(logger: Arc<Logger>) -> Self {
         Self {
             peers: DashMap::new(),
             logger,

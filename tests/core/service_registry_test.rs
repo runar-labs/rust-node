@@ -149,8 +149,8 @@ async fn test_wildcard_subscriptions() {
 async fn test_register_and_get_action_handler() {
     // Wrap the test in a timeout to prevent it from hanging
     match timeout(Duration::from_secs(10), async {
-        let logger = Logger::new_root(Component::Service, "test");
-        let registry = ServiceRegistry::new(logger);
+        let logger = Arc::new(Logger::new_root(Component::Service, "test"));
+        let registry = ServiceRegistry::new(logger.clone());
         
         let service_path = "math".to_string();
         let action_name = "add".to_string();
@@ -200,8 +200,8 @@ async fn test_register_and_get_action_handler() {
 async fn test_multiple_action_handlers() {
     // Wrap the test in a timeout to prevent it from hanging
     match timeout(Duration::from_secs(10), async {
-        let logger = Logger::new_root(Component::Service, "test");
-        let registry = ServiceRegistry::new(logger);
+        let logger = Arc::new(Logger::new_root(Component::Service, "test"));
+        let registry = ServiceRegistry::new(logger.clone());
         
         // Create paths and handlers for different actions
         let add_action_path = TopicPath::new("math/add", "net1").unwrap();
@@ -274,7 +274,7 @@ async fn test_action_handler_network_isolation() {
     // Wrap the test in a timeout to prevent it from hanging
     match timeout(Duration::from_secs(10), async {
         // Create a registry
-        let logger = Logger::new_root(Component::Service, "test");
+        let logger = Arc::new(Logger::new_root(Component::Service, "test"));
         let registry = ServiceRegistry::new(logger.clone());
         
         // Define two paths with the same path but different network IDs
@@ -412,8 +412,8 @@ async fn test_multiple_event_handlers() {
 async fn test_path_template_parameters() {
     // Wrap the test in a timeout to prevent it from hanging
     match timeout(Duration::from_secs(10), async {
-        let logger = Logger::new_root(Component::Service, "test");
-        let registry = ServiceRegistry::new(logger);
+        let logger = Arc::new(Logger::new_root(Component::Service, "test"));
+        let registry = ServiceRegistry::new(logger.clone());
         
         // Create paths with parameter templates
         let service_info_path = TopicPath::new("$registry/services/{service_path}", "test_network").unwrap();
@@ -521,8 +521,8 @@ async fn test_path_template_parameters() {
 async fn test_local_remote_action_handler_separation() {
     // Wrap the test in a timeout to prevent it from hanging
     match timeout(Duration::from_secs(10), async {
-        let logger = Logger::new_root(Component::Service, "test");
-        let registry = ServiceRegistry::new(logger);
+        let logger = Arc::new(Logger::new_root(Component::Service, "test"));
+        let registry = ServiceRegistry::new(logger.clone());
         
         // Create a common topic path for both local and remote
         let action_path = TopicPath::new("math/add", "test_network").unwrap();
@@ -560,7 +560,7 @@ async fn test_local_remote_action_handler_separation() {
 #[tokio::test]
 async fn test_multiple_network_ids() {
     // Set up test logger
-    let logger = Logger::new_root(Component::Service, "test");
+    let logger = Arc::new(Logger::new_root(Component::Service, "test"));
     
     // Create registry
     let registry = ServiceRegistry::new(logger.clone());
@@ -628,7 +628,7 @@ async fn test_get_actions_metadata() {
     // Wrap the test in a timeout to prevent it from hanging
     match timeout(Duration::from_secs(10), async {
         // Set up test logger
-        let logger = Logger::new_root(Component::Service, "test");
+        let logger = Arc::new(Logger::new_root(Component::Service, "test"));
         
         // Create registry
         let registry = ServiceRegistry::new(logger.clone());

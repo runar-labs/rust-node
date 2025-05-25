@@ -42,7 +42,7 @@ pub struct RemoteService {
     actions: Arc<RwLock<HashMap<String, ActionMetadata>>>,
 
     /// Logger instance
-    logger: Logger,
+    logger: Arc<Logger>,
 
     /// Local node identifier (for sending messages)
     local_node_id: PeerId,
@@ -65,7 +65,7 @@ impl RemoteService {
         peer_id: PeerId,
         network_transport: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>,
         local_node_id: PeerId,
-        logger: Logger,
+        logger: Arc<Logger>,
         request_timeout_ms: u64,
     ) -> Self {
         Self {
@@ -92,12 +92,12 @@ impl RemoteService {
         peer_id: PeerId,
         capabilities: Vec<ServiceMetadata>,
         network_transport: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>,
-        logger: Logger,
+        logger: Arc<Logger>,
         local_node_id: PeerId,
         request_timeout_ms: u64,
     ) -> Result<Vec<Arc<RemoteService>>> {
-        let log = logger.clone();
-        log.info(format!(
+        
+        logger.info(format!(
             "Creating RemoteServices from {} service metadata entries",
             capabilities.len()
         ));
@@ -116,7 +116,7 @@ impl RemoteService {
             let service_path = match TopicPath::new(&service_metadata.name, "default") {
                 Ok(path) => path,
                 Err(e) => {
-                    log.error(format!(
+                    logger.error(format!(
                         "Invalid service path '{}': {}",
                         service_metadata.name, e
                     ));
@@ -146,7 +146,7 @@ impl RemoteService {
         }
 
 
-        log.info(format!(
+        logger.info(format!(
             "Created {} RemoteService instances",
             remote_services.len()
         ));
