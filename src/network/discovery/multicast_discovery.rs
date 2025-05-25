@@ -515,24 +515,10 @@ impl NodeDiscovery for MulticastDiscovery {
     }
     
     async fn stop_announcing(&self) -> Result<()> {
-        // Send goodbye message
-        let info_guard = self.local_node.read().await; 
-        if let Some(info) = info_guard.as_ref() {
-            self.logger.info(format!("Sending goodbye message for node: {}", info.peer_id));
-            let message = MulticastMessage::Goodbye(info.peer_id.public_key.clone());
-            let tx_opt = self.tx.lock().await; 
-             if let Some(ref tx) = *tx_opt {
-                 // Ignore error if channel is already closed during shutdown
-                 let _ = tx.send(message).await;
-             }
-        }
-        drop(info_guard); 
-        
         // Stop announce task
         if let Some(task) = self.announce_task.lock().await.take() {
             task.abort();
-        }
-        
+        }        
         Ok(())
     }
      
