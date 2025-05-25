@@ -1687,6 +1687,7 @@ impl Node {
             node_info.peer_id.clone(),
             capabilities,
             self.network_transport.clone(),
+            self.serializer_registry.clone(),
             self.logger.clone(), // Pass logger directly
             local_peer_id,
             self.config.request_timeout_ms,

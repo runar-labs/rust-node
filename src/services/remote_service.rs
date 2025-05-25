@@ -20,7 +20,7 @@ use crate::routing::TopicPath;
 use crate::services::abstract_service::AbstractService;
 use crate::services::{ActionHandler, LifecycleContext, ServiceResponse};
 use runar_common::logging::Logger;
-use runar_common::types::{ActionMetadata, ArcValueType, ServiceMetadata};
+use runar_common::types::{ActionMetadata, ArcValueType, SerializerRegistry, ServiceMetadata};
 
 /// Represents a service running on a remote node
 #[derive(Clone)]
@@ -37,6 +37,8 @@ pub struct RemoteService {
     peer_id: PeerId,
     /// Network transport wrapped in RwLock
     network_transport: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>,
+
+    serializer_registry: Arc<SerializerRegistry>,
 
     /// Service capabilities
     actions: Arc<RwLock<HashMap<String, ActionMetadata>>>,
@@ -64,6 +66,7 @@ impl RemoteService {
         description: String,
         peer_id: PeerId,
         network_transport: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>,
+        serializer_registry: Arc<SerializerRegistry>,
         local_node_id: PeerId,
         logger: Arc<Logger>,
         request_timeout_ms: u64,
@@ -75,6 +78,7 @@ impl RemoteService {
             description,
             peer_id,
             network_transport,
+            serializer_registry,
             actions: Arc::new(RwLock::new(HashMap::new())),
             logger,
             local_node_id,
@@ -92,6 +96,7 @@ impl RemoteService {
         peer_id: PeerId,
         capabilities: Vec<ServiceMetadata>,
         network_transport: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>,
+        serializer_registry: Arc<SerializerRegistry>,
         logger: Arc<Logger>,
         local_node_id: PeerId,
         request_timeout_ms: u64,
@@ -132,6 +137,7 @@ impl RemoteService {
                 service_metadata.description.clone(),
                 peer_id.clone(),
                 network_transport.clone(),
+                serializer_registry.clone(),
                 local_node_id.clone(),
                 logger.clone(),
                 request_timeout_ms,
@@ -171,15 +177,15 @@ impl RemoteService {
 
     /// Create a handler for a remote action
     pub fn create_action_handler(&self, action_name: String) -> ActionHandler {
-        let service = self.clone();
+        let service = self.clone(); 
 
         // Create a handler that forwards requests to the remote service
         Arc::new(move |params, context| {
-            let service_clone = service.clone();
+            // let service_clone = service.clone();
             let action = action_name.clone();
-
+            
             // Create a new TopicPath for this action using the helper method
-            let action_topic_path = match service_clone.service_topic.new_action_topic(&action) {
+            let action_topic_path = match service.service_topic.new_action_topic(&action) {
                 Ok(path) => path,
                 Err(e) => {
                     return Box::pin(async move {
@@ -191,6 +197,14 @@ impl RemoteService {
                 }
             };
 
+            // Clone all necessary fields before the async block
+            let peer_id = service.peer_id.clone();
+            let local_node_id = service.local_node_id.clone();
+            let pending_requests = service.pending_requests.clone();
+            let network_transport = service.network_transport.clone();
+            let serializer_registry = service.serializer_registry.clone();
+            let request_timeout_ms = service.request_timeout_ms;
+            
             Box::pin(async move {
                 // Generate a unique request ID
                 let request_id = Uuid::new_v4().to_string();
@@ -199,35 +213,38 @@ impl RemoteService {
                 let (tx, rx) = tokio::sync::oneshot::channel();
 
                 // Store the response channel
-                service_clone
-                    .pending_requests
+                pending_requests
                     .write()
                     .await
-                    .insert(request_id.clone(), tx);
+                    .insert(request_id.clone(), tx);                
 
-
-                // we need to add the serializer register to the node .. so we can use here for serialization
-                // let mut registry = SerializerRegistry::new();
-                // let payload_bytes = 
+                // Serialize the parameters and convert from Arc<[u8]> to Vec<u8>
+                let payload_vec: Vec<u8> = match if let Some(params) = params {
+                    serializer_registry.serialize_value(&params)
+                } else {
+                    serializer_registry.serialize_value(&ArcValueType::null())
+                } {
+                    Ok(bytes) => bytes.to_vec(),  // Convert Arc<[u8]> to Vec<u8>
+                    Err(e) => return Err(anyhow::anyhow!("Serialization error: {}", e)),
+                };
 
                 // Create the network message
                 let message = NetworkMessage {
-                    source: service_clone.local_node_id.clone(),
-                    destination: service_clone.peer_id.clone(),
+                    source: local_node_id.clone(),
+                    destination: peer_id.clone(),
                     message_type: "Request".to_string(),
                     payloads: vec![NetworkMessagePayloadItem::new(
                         action_topic_path.as_str().to_string(),
-                        Vec::new(), // Placeholder for actual payload data
+                        payload_vec,
                         request_id.clone(),
                     )],
                 };
 
                 // Send the request
-                if let Some(transport) = &*service_clone.network_transport.read().await {
+                if let Some(transport) = &*network_transport.read().await {
                     if let Err(e) = transport.send_message(message).await {
                         // Clean up the pending request
-                        service_clone
-                            .pending_requests
+                        pending_requests
                             .write()
                             .await
                             .remove(&request_id);
@@ -243,9 +260,9 @@ impl RemoteService {
                     ));
                 }
 
-                // Wait for the response with timeout
+                // Wait for the response with a timeout
                 match tokio::time::timeout(
-                    Duration::from_millis(service_clone.request_timeout_ms),
+                    std::time::Duration::from_millis(request_timeout_ms),
                     rx,
                 )
                 .await
@@ -257,8 +274,7 @@ impl RemoteService {
                     )),
                     Ok(Err(_)) => {
                         // Clean up the pending request
-                        service_clone
-                            .pending_requests
+                        pending_requests
                             .write()
                             .await
                             .remove(&request_id);
@@ -266,8 +282,7 @@ impl RemoteService {
                     }
                     Err(_) => {
                         // Clean up the pending request
-                        service_clone
-                            .pending_requests
+                        pending_requests
                             .write()
                             .await
                             .remove(&request_id);
@@ -282,25 +297,25 @@ impl RemoteService {
     ///
     /// INTENTION: Set up this service to receive responses for its requests.
     /// This should be called once when the service is created.
-    pub async fn register_response_handler(
-        &self,
-        network_transport: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>,
-    ) -> Result<()> {
-        // For now, just log the intent to register a response handler
-        // The actual registration requires a mutable reference to the transport
-        // which we don't have in this context
-        self.logger.info(format!(
-            "Would register response handler for remote service {}",
-            self.service_topic
-        ));
+    // pub async fn register_response_handler(
+    //     &self,
+    //     network_transport: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>,
+    // ) -> Result<()> {
+    //     // For now, just log the intent to register a response handler
+    //     // The actual registration requires a mutable reference to the transport
+    //     // which we don't have in this context
+    //     self.logger.info(format!(
+    //         "Would register response handler for remote service {}",
+    //         self.service_topic
+    //     ));
 
-        // Check if transport is available just to provide a meaningful error
-        // if network_transport.read().await.is_none() {
-        //     return Err(anyhow!("Network transport not available"));
-        // }
+    //     // Check if transport is available just to provide a meaningful error
+    //     // if network_transport.read().await.is_none() {
+    //     //     return Err(anyhow!("Network transport not available"));
+    //     // }
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 
     /// Handle a response for a pending request
     ///
@@ -361,78 +376,78 @@ impl RemoteService {
     }
 
     /// Handle a request for a remote action
-    async fn handle_remote_action(
-        &self,
-        action_topic_path: TopicPath,
-        params: Option<ArcValueType>,
-    ) -> Result<ServiceResponse> {
-        // Generate a unique correlation ID for this request
-        let correlation_id = Uuid::new_v4().to_string();
+    // async fn handle_remote_action(
+    //     &self,
+    //     action_topic_path: TopicPath,
+    //     params: Option<ArcValueType>,
+    // ) -> Result<ServiceResponse> {
+    //     // Generate a unique correlation ID for this request
+    //     let correlation_id = Uuid::new_v4().to_string();
 
-        // Create the message channel
-        let (sender, receiver) = tokio::sync::oneshot::channel();
+    //     // Create the message channel
+    //     let (sender, receiver) = tokio::sync::oneshot::channel();
 
-        // Register the pending request
-        {
-            let mut pending = self.pending_requests.write().await;
-            pending.insert(correlation_id.clone(), sender);
-        }
+    //     // Register the pending request
+    //     {
+    //         let mut pending = self.pending_requests.write().await;
+    //         pending.insert(correlation_id.clone(), sender);
+    //     }
 
-        // Build the request message
-        let message = NetworkMessage {
-            source: self.local_node_id.clone(),
-            destination: self.peer_id.clone(),
-            message_type: "Request".to_string(),
-            payloads: vec![NetworkMessagePayloadItem::new(
-                action_topic_path.as_str().to_string(),
-                Vec::new(), // Placeholder for actual payload data
-                correlation_id.clone(),
-            )],
-        };
+    //     // Build the request message
+    //     let message = NetworkMessage {
+    //         source: self.local_node_id.clone(),
+    //         destination: self.peer_id.clone(),
+    //         message_type: "Request".to_string(),
+    //         payloads: vec![NetworkMessagePayloadItem::new(
+    //             action_topic_path.as_str().to_string(),
+    //             Vec::new(), // Placeholder for actual payload data
+    //             correlation_id.clone(),
+    //         )],
+    //     };
 
-        // Send the request using the network transport
-        {
-            let transport_guard = self.network_transport.read().await;
-            if let Some(transport) = &*transport_guard {
-                self.logger.debug(format!(
-                    "Sending request to {} for action {}",
-                    self.peer_id,
-                    action_topic_path.as_str()
-                ));
-                transport.send_message(message).await?;
-            } else {
-                return Err(anyhow!("Network transport not available"));
-            }
-        }
+    //     // Send the request using the network transport
+    //     {
+    //         let transport_guard = self.network_transport.read().await;
+    //         if let Some(transport) = &*transport_guard {
+    //             self.logger.debug(format!(
+    //                 "Sending request to {} for action {}",
+    //                 self.peer_id,
+    //                 action_topic_path.as_str()
+    //             ));
+    //             transport.send_message(message).await?;
+    //         } else {
+    //             return Err(anyhow!("Network transport not available"));
+    //         }
+    //     }
 
-        // Wait for response with timeout
-        let response =
-            match tokio::time::timeout(Duration::from_millis(self.request_timeout_ms), receiver)
-                .await
-            {
-                Ok(r) => match r {
-                    Ok(response) => response,
-                    Err(_) => {
-                        self.logger.error(format!(
-                            "Response channel closed for request to {}",
-                            self.peer_id
-                        ));
-                        return Err(anyhow!("Response channel closed unexpectedly"));
-                    }
-                },
-                Err(_) => {
-                    // Remove from pending requests on timeout
-                    self.pending_requests.write().await.remove(&correlation_id);
-                    return Err(anyhow!(
-                        "Request timed out after {} ms",
-                        self.request_timeout_ms
-                    ));
-                }
-            };
+    //     // Wait for response with timeout
+    //     let response =
+    //         match tokio::time::timeout(Duration::from_millis(self.request_timeout_ms), receiver)
+    //             .await
+    //         {
+    //             Ok(r) => match r {
+    //                 Ok(response) => response,
+    //                 Err(_) => {
+    //                     self.logger.error(format!(
+    //                         "Response channel closed for request to {}",
+    //                         self.peer_id
+    //                     ));
+    //                     return Err(anyhow!("Response channel closed unexpectedly"));
+    //                 }
+    //             },
+    //             Err(_) => {
+    //                 // Remove from pending requests on timeout
+    //                 self.pending_requests.write().await.remove(&correlation_id);
+    //                 return Err(anyhow!(
+    //                     "Request timed out after {} ms",
+    //                     self.request_timeout_ms
+    //                 ));
+    //             }
+    //         };
 
-        // Return the response
-        response
-    }
+    //     // Return the response
+    //     response
+    // }
 
     /// Get a list of available actions this service can handle
     ///
