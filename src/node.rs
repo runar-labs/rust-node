@@ -741,9 +741,6 @@ impl Node {
                     "Failed to create topic path for service name:{} path:{} error:{}",
                     service_name, service_path, e
                 ));
-                registry
-                    .update_service_state(service_path, ServiceState::Error)
-                    .await?;
                 return Err(anyhow!(
                     "Failed to create topic path for service {}: {}",
                     service_name,
@@ -755,6 +752,7 @@ impl Node {
         // Create a lifecycle context for initialization
         let init_context = crate::services::LifecycleContext::new(
             &service_topic,
+            self.serializer.clone(),
             self.logger
                 .clone()
                 .with_component(runar_common::Component::Service),
@@ -768,12 +766,12 @@ impl Node {
                 service_name, e
             ));
             registry
-                .update_service_state(service_path, ServiceState::Error)
+                .update_service_state(&service_topic, ServiceState::Error)
                 .await?;
             return Err(anyhow!("Failed to initialize service: {}", e));
         }
         registry
-            .update_service_state(service_path, ServiceState::Initialized)
+            .update_service_state(&service_topic, ServiceState::Initialized)
             .await?;
 
         // Service initialized successfully, create the ServiceEntry and register it
@@ -824,12 +822,12 @@ impl Node {
             self.logger
                 .info(format!("Initializing service: {}", service_topic));
 
-            let service = service_entry.service.clone();
-            let service_path = service.path();
+            let service = service_entry.service.clone(); 
 
             // Create a lifecycle context for starting
             let start_context = crate::services::LifecycleContext::new(
                 &service_topic,
+                self.serializer.clone(),
                 self.logger
                     .clone()
                     .with_component(runar_common::Component::Service),
@@ -842,13 +840,13 @@ impl Node {
                     service_topic, e
                 ));
                 registry
-                    .update_service_state(service_path, ServiceState::Error)
+                    .update_service_state(&service_topic, ServiceState::Error)
                     .await?;
                 continue;
             }
 
             registry
-                .update_service_state(service_path, ServiceState::Running)
+                .update_service_state(&service_topic, ServiceState::Running)
                 .await?;
         }
 
@@ -897,11 +895,12 @@ impl Node {
 
             // Extract the service from the entry
             let service = service_entry.service.clone();
-            let service_path = service.path();
+ 
 
             // Create a lifecycle context for stopping
             let stop_context = crate::services::LifecycleContext::new(
                 &service_topic,
+                self.serializer.clone(),
                 self.logger
                     .clone()
                     .with_component(runar_common::Component::Service),
@@ -917,7 +916,7 @@ impl Node {
             }
 
             registry
-                .update_service_state(service_path, ServiceState::Stopped)
+                .update_service_state(&service_topic, ServiceState::Stopped)
                 .await?;
         }
 
@@ -1102,7 +1101,7 @@ impl Node {
         let node_info = self.get_local_node_info().await?;
 
         match provider_config {
-            DiscoveryProviderConfig::Multicast(options) => {
+            DiscoveryProviderConfig::Multicast(_options) => {
                 self.logger
                     .info("Creating MulticastDiscovery provider with config options");
                 // Use .await to properly wait for the async initialization
@@ -1114,7 +1113,7 @@ impl Node {
                 .await?;
                 Ok(Box::new(discovery) as Box<dyn NodeDiscovery>)
             }
-            DiscoveryProviderConfig::Static(options) => {
+            DiscoveryProviderConfig::Static(_options) => {
                 self.logger.info("Static discovery provider configured");
                 // Implement static discovery when needed
                 Err(anyhow!("Static discovery provider not yet implemented"))
@@ -1686,7 +1685,7 @@ impl Node {
             .service_registry
             .get_local_event_subscribers(&topic_path)
             .await;
-        for (subscription_id, callback) in local_subscribers {
+        for (_subscription_id, callback) in local_subscribers {
             // Create an event context for this subscriber
             let event_context = Arc::new(EventContext::new(&topic_path, event_logger.clone()));
 
@@ -1702,6 +1701,7 @@ impl Node {
         // Broadcast to remote nodes if requested and network is available
         if options.broadcast && self.supports_networking {
             if let Some(transport) = &*self.network_transport.read().await {
+                //TODO
                 // Log message since we can't implement send yet
                 self.logger
                     .debug(format!("Would broadcast event {} to network", topic_string));
@@ -2163,9 +2163,10 @@ impl NodeDelegate for Node {
 
 #[async_trait]
 impl RegistryDelegate for Node {
-    /// Get all service states
-    async fn get_all_service_states(&self) -> HashMap<String, ServiceState> {
-        self.service_registry.get_all_service_states().await
+
+    /// Get service state
+    async fn get_service_state(&self, service_path: &TopicPath) -> Option<ServiceState> {
+        self.service_registry.get_service_state(service_path).await
     }
 
     /// Get metadata for a specific service

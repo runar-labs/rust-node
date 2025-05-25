@@ -12,16 +12,14 @@
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::routing::TopicPath;
-use crate::services::abstract_service::{AbstractService, ServiceState};
+use crate::services::abstract_service::{AbstractService};
 use crate::services::{LifecycleContext, RegistryDelegate, RequestContext, ServiceResponse};
+use crate::ServiceState;
 use runar_common::logging::Logger;
 use runar_common::types::{ArcValueType}; 
-use runar_common::vmap;
 
 /// Registry Info Service - provides information about registered services without holding state
 pub struct RegistryService {
@@ -230,10 +228,16 @@ impl RegistryService {
         };
         let service_topic = TopicPath::new_service(&ctx.network_id(), &service_path);
 
-        // Get service state directly from the registry delegate
-        let service_state = self.registry_delegate.get_service_state(&service_topic).await;
-        let state_info =ArcValueType::from_struct(service_state);
-        Ok(ServiceResponse::ok(state_info))
+        // Get service state directly from the registry delegate 
+        if let Some(service_state) = self.registry_delegate.get_service_state(&service_topic).await {
+            let state_info =ArcValueType::from_struct(service_state);
+            Ok(ServiceResponse::ok(state_info))
+        } else {
+            Ok(ServiceResponse::error(
+                404,
+                &format!("Service '{}' not found", service_path),
+            ))
+        }
     }
 }
 
@@ -294,9 +298,8 @@ impl AbstractService for RegistryService {
             .logger
             .info("Registry Service initialization complete");
 
-        //during the init the service needs to register any type that is needed for serialization of its actions/events
-        context.serializer::register::<ServiceState>().await?;
-        
+        // registering custom types with the serializer
+        context.serializer.write().await.register::<ServiceState>()?;
         
         Ok(())
     }

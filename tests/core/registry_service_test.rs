@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 use tokio::time::timeout;
-use runar_node::{node::{LogLevel, LoggingConfig, Node, NodeConfig}, ServiceMetadata};
+use runar_node::{node::{LogLevel, LoggingConfig, Node, NodeConfig}, ServiceMetadata, ServiceState};
 use runar_common::logging::{Logger, Component};
 use runar_node::services::RegistryDelegate;
 use runar_common::types::ArcValueType;
@@ -99,16 +99,16 @@ async fn test_registry_service_get_service_info() {
         // Add the service to the node
         node.add_service(math_service).await.unwrap();
         
-        // Debug log service states before starting
-        let states_before = node.get_all_service_states().await;
-        test_logger.debug(format!("Service states BEFORE start: {:?}", states_before));
+        // // Debug log service states before starting
+        // let states_before = node.get_all_service_states().await;
+        // test_logger.debug(format!("Service states BEFORE start: {:?}", states_before));
         
         // Start the services to check that we get the correct state
         node.start().await.unwrap();
         
-        // Debug log service states after starting
-        let states_after = node.get_all_service_states().await;
-        test_logger.debug(format!("Service states AFTER start: {:?}", states_after));
+        // // Debug log service states after starting
+        // let states_after = node.get_all_service_states().await;
+        // test_logger.debug(format!("Service states AFTER start: {:?}", states_after));
         
         // Debug log available handlers using logger
         let list_response = node.request("$registry/services/list", ArcValueType::null()).await.unwrap();
@@ -163,10 +163,10 @@ async fn test_registry_service_get_service_state() {
         // Add the service to the node
         node.add_service(math_service).await.unwrap();
         
-        // Debug log service states before the request
-        let states_before = node.get_all_service_states().await;
-        test_logger.debug(format!("Service states before request: {:?}", states_before));
-        
+        // Start the service
+        node.start().await.unwrap();
+
+
         // Use the request method to query the registry service for the math service state
         let response = node.request("$registry/services/math/state", ArcValueType::null()).await.unwrap();
         test_logger.debug(format!("Initial service state response: {:?}", response));
@@ -175,44 +175,17 @@ async fn test_registry_service_get_service_state() {
         assert_eq!(response.status, 200, "Registry service request failed: {:?}", response);
         
         // Parse the response to verify it contains service state
-        if let Some(value) = response.data.clone() {
-            let mut value_clone = value.clone();
-            let state_info = value_clone.as_map_ref::<String, ArcValueType>().expect("Expected map in state info");
-            // Verify service state is present
-            assert!(state_info.contains_key("state"), "Service state field not found in response");
-            
-            // Verify that only state information is returned
-            assert_eq!(state_info.len(), 1, "Expected only state information, got {:?}", state_info);
+        if let Some(mut value) = response.data {
+            let service_state = value.as_type::<ServiceState>().expect("Expected ServiceState in response");
+            assert_eq!(service_state, ServiceState::Running, "Expected service state to be 'RUNNING'"); 
         } else {
             panic!("Expected map with state info in response, got {:?}", response.data);
         }
         
-        // Start the service
-        node.start().await.unwrap();
-        
-        // Debug log service states after starting
-        let states_after = node.get_all_service_states().await;
-        test_logger.debug(format!("Service states after start: {:?}", states_after));
-        
-        // Check state after service is started
-        let response = node.request("$registry/services/math/state", ArcValueType::null()).await.unwrap();
+        let response = node.request("$registry/services/not_exisstent/state", ArcValueType::null()).await.unwrap();
         test_logger.debug(format!("Service state after start: {:?}", response));
+        assert_eq!(response.status, 404, "Registry service request failed: {:?}", response);
         
-        if let Some(value) = response.data {
-            let mut value_clone = value.clone();
-            let state_info = value_clone.as_map_ref::<String, ArcValueType>().expect("Expected map in state info");
-            // Verify service state is present
-            if let Some(state_value) = state_info.get("state") {
-                let mut state_value_clone = state_value.clone();
-                let state: String = state_value_clone.as_type().expect("Expected string state");
-                assert!(!state.is_empty(), "Expected non-empty service state, got '{}'", state);
-                test_logger.debug(format!("Final service state from response: {}", state));
-            } else {
-                panic!("Service state not found in response");
-            }
-        } else {
-            panic!("Expected map with state info in response, got {:?}", response.data);
-        }
     }).await {
         Ok(_) => (), // Test completed within the timeout
         Err(_) => panic!("Test timed out after 10 seconds"),

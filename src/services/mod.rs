@@ -28,7 +28,8 @@ pub mod service_registry;
 use crate::routing::TopicPath;
 use anyhow::{anyhow, Result};
 use runar_common::logging::{Component, Logger, LoggingContext};
-use runar_common::types::{ActionMetadata, ArcValueType, FieldSchema};
+use runar_common::types::{ActionMetadata, ArcValueType, FieldSchema, SerializerRegistry};
+use tokio::sync::RwLock;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -78,19 +79,22 @@ pub struct LifecycleContext {
     pub logger: Logger,
     /// Node delegate for node operations
     node_delegate: Option<Arc<dyn NodeDelegate + Send + Sync>>,
+    /// Serializer registry for type registration
+    pub serializer:Arc<RwLock<SerializerRegistry>>,
 }
 
 impl LifecycleContext {
     /// Create a new LifecycleContext with a topic path and logger
     ///
     /// This is the primary constructor that takes the minimum required parameters.
-    pub fn new(topic_path: &TopicPath, logger: Logger) -> Self {
+    pub fn new(topic_path: &TopicPath, serializer: Arc<RwLock<SerializerRegistry>>, logger: Logger) -> Self {
         Self {
             network_id: topic_path.network_id(),
             service_path: topic_path.service_path(),
             config: None,
             logger,
             node_delegate: None,
+            serializer,
         }
     }
 
@@ -881,8 +885,6 @@ pub trait NodeDelegate: Send + Sync {
 /// the functionality needed by registry operations.
 #[async_trait::async_trait]
 pub trait RegistryDelegate: Send + Sync {
-    /// Get all service states
-    async fn get_all_service_states(&self) -> HashMap<String, ServiceState>;
 
     async fn get_service_state(&self, service_path: &TopicPath) -> Option<ServiceState>;
 

@@ -255,7 +255,7 @@ impl ServiceRegistry {
             .await
             .add_content(service_topic.clone(), service);
 
-        self.update_service_state(&service_entry.service.path(), service_entry.service_state)
+        self.update_service_state(&service_topic, service_entry.service_state)
             .await?;
 
         self.local_services_list
@@ -623,29 +623,26 @@ impl ServiceRegistry {
     /// INTENTION: Track the lifecycle state of a service.
     pub async fn update_service_state(
         &self,
-        service_path: &str,
+        service_topic: &TopicPath,
         state: ServiceState,
     ) -> Result<()> {
         self.logger.debug(format!(
             "Updating service state for {}: {:?}",
-            service_path, state
+            service_topic.clone(), state
         ));
         let mut states = self.service_states_by_service_path.write().await;
-        states.insert(service_path.to_string(), state);
+        states.insert(service_topic.as_str().to_string(), state);
         Ok(())
     }
 
-    /// Get all service states
-    ///
-    /// INTENTION: Retrieve the current state of all services.
-    pub async fn get_all_service_states(&self) -> HashMap<String, ServiceState> {
-        self.service_states_by_service_path.read().await.clone()
+    pub async fn get_service_state(&self, service_path: &TopicPath) -> Option<ServiceState> {
+        let map= self.service_states_by_service_path.read().await;
+        if let Some(state) = map.get(service_path.as_str()) {
+            Some(state.clone())
+        } else {
+            None
+        }
     }
-
-    pub async fn get_service_state(&self, service_path: &str) -> Option<ServiceState> {
-        self.service_states_by_service_path.read().await.get(service_path).cloned()
-    }
-
     
     /// Get metadata for all events under a specific service path
     ///
@@ -713,72 +710,7 @@ impl ServiceRegistry {
     pub async fn get_local_services(&self) -> HashMap<TopicPath, Arc<ServiceEntry>> {
         self.local_services_list.read().await.clone()
     }
-    
-    /// Get metadata for all events under a specific event path
-    ///
-    /// INTENTION: Retrieve metadata for all events registered under a service path.
-    /// This is useful for service discovery and introspection.
-    // pub async fn get_events_metadata_internal(
-    //     &self,
-    //     search_path: &TopicPath,
-    // ) -> Vec<EventMetadata> {
-    //     // Search in the events trie
-    //     let event_subscriptions = self.local_event_subscriptions.read().await;
-    //     let event_matches = event_subscriptions.find_matches(search_path);
-        
-    //     // Collect all events that match the service path
-    //     let mut result = Vec::new();
-    //     let mut seen_paths = HashSet::new();
-        
-    //     // For event subscriptions, we need to handle the Vec<(String, EventCallback)> structure
-    //     for match_item in event_matches {
-    //         // Each handler is a Vec of (subscription_id, callback) pairs
-    //         for (_, _callback) in &match_item.handler {
-    //             // We can use the match path since event handlers don't store the original topic path
-    //             let path_str = search_path.as_str().replace("/*", "");
-                
-    //             // Only add each event path once, no need to add duplicates for multiple subscribers
-    //             if !seen_paths.contains(&path_str) {
-    //                 seen_paths.insert(path_str.clone());
-                    
-    //                 // Create metadata for this event
-    //                 result.push(EventMetadata {
-    //                     path: path_str.clone(),
-    //                     description: format!("Event handler for {}", path_str),
-    //                     data_schema: None, // We don't have schema information in the handler
-    //                 });
-    //             }
-    //         }
-    //     }
-        
-    //     result
-    // }
-
-    /// Helper method to get all network IDs from the registry
-    /// 
-    /// INTENTION: Collect all unique network IDs from registered services
-    async fn get_all_network_ids(&self) -> Vec<String> {
-        // Start with the default network
-        let mut network_ids = vec!["default".to_string()];
-        
-        // Add network IDs from local services
-        let local_service_states = self.service_states_by_service_path.read().await;
-        
-        // Extract network IDs from service paths
-        for service_path in local_service_states.keys() {
-            // Try to parse the service path to extract the network ID
-            // Format is typically "network_id:service/path"
-            if let Some(network_id) = service_path.split(':').next() {
-                let network_id = network_id.to_string();
-                if !network_ids.contains(&network_id) && !network_id.is_empty() {
-                    network_ids.push(network_id);
-                }
-            }
-        }
-        
-        network_ids
-    }
-    
+     
     pub async fn unsubscribe_local(&self, subscription_id: &str) -> Result<()> {
         self.logger.debug(format!(
             "Attempting to unsubscribe local subscription ID: {}",
@@ -1040,11 +972,10 @@ impl ServiceRegistry {
 
 #[async_trait::async_trait]
 impl crate::services::RegistryDelegate for ServiceRegistry {
-    /// Get all service states
-    async fn get_all_service_states(&self) -> HashMap<String, ServiceState> {
-        self.service_states_by_service_path.read().await.clone()
-    }
 
+    async fn get_service_state(&self, service_path: &TopicPath) -> Option<ServiceState> {
+        self.service_states_by_service_path.read().await.get(service_path.as_str()).cloned()
+    }
 
     
     // This method is now implemented as a public method above
