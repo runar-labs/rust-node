@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 use tokio::time::timeout;
-use runar_node::node::{LogLevel, LoggingConfig, Node, NodeConfig};
+use runar_node::{node::{LogLevel, LoggingConfig, Node, NodeConfig}, ServiceMetadata};
 use runar_common::logging::{Logger, Component};
 use runar_node::services::RegistryDelegate;
 use runar_common::types::ArcValueType;
@@ -48,9 +48,16 @@ async fn test_registry_service_list_services() {
         // Verify response is successful
         assert_eq!(response.status, 200, "Registry service request failed: {:?}", response);
         
+/**
+ * hread 'core::registry_service_test::test_registry_service_list_services' panicked at rust-node/tests/core/registry_service_test.rs:53:64:
+Expected array response from registry service: Type mismatch: 
+expected alloc::vec::Vec<runar_common::types::value_type::ArcValueType>, 
+but has alloc::vec::Vec<runar_common::types::schemas::ServiceMetadata>
+ */
+
         // Parse the response to verify it contains our registered services
         if let Some(mut value) = response.data {
-            let services = value.as_list_ref::<ArcValueType>().expect("Expected array response from registry service");
+            let services = value.as_list_ref::<ServiceMetadata>().expect("Expected array response from registry service");
             // The services list should contain at least the math service and the registry service itself
             assert!(services.len() >= 2, "Expected at least 2 services, got {}", services.len());
             
