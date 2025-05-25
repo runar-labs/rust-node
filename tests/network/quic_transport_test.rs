@@ -303,7 +303,6 @@ async fn test_quic_transport_connection_end_to_end() {
     assert!(b_connected_to_a, "Node A not connected to Node B");
     
     // Test sending a message from A to B
-    
     println!("Testing message sending from A to B");
     let test_message = NetworkMessage {
         source: node_a_id.clone(),
