@@ -341,11 +341,11 @@ pub trait NetworkTransport: Send + Sync {
     /// Get the local address this transport is bound to as a string
     fn get_local_address(&self) -> String;
     
-    /// Register a message handler for incoming messages
-    async fn register_message_handler(
-        &self,
-        handler: Box<dyn Fn(NetworkMessage) -> Result<(), NetworkError> + Send + Sync + 'static>,
-    ) -> Result<(), NetworkError>;
+    // /// Register a message handler for incoming messages
+    // async fn register_message_handler(
+    //     &self,
+    //     handler: Box<dyn Fn(NetworkMessage) -> Result<(), NetworkError> + Send + Sync + 'static>,
+    // ) -> Result<(), NetworkError>;
     
     /// Subscribe to peer node info updates
     /// 

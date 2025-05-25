@@ -569,7 +569,7 @@ pub struct Node {
     pub(crate) load_balancer: Arc<RwLock<dyn LoadBalancingStrategy>>,
 
     /// Pending requests waiting for responses, keyed by correlation ID
-    pub(crate) event_payloads:
+    pub(crate) pending_requests:
         Arc<RwLock<HashMap<String, oneshot::Sender<Result<ServiceResponse>>>>>,
 
     pub serializer: Arc<RwLock<SerializerRegistry>>,
@@ -687,7 +687,7 @@ impl Node {
             supports_networking: networking_enabled,
             network_transport: Arc::new(RwLock::new(None)),
             load_balancer: Arc::new(RwLock::new(RoundRobinLoadBalancer::new())), 
-            event_payloads: Arc::new(RwLock::new(HashMap::new())),
+            pending_requests: Arc::new(RwLock::new(HashMap::new())),
             serializer: Arc::new(RwLock::new(SerializerRegistry::new())),
         };
 
@@ -1056,7 +1056,7 @@ impl Node {
     ) -> Result<Box<dyn NetworkTransport>> {
         // Get the local node info to pass to the transport
         let local_node_info = self.get_local_node_info().await?;
-        
+        let self_arc = Arc::new(self.clone());
         match network_config.transport_type {
             TransportType::Quic => {
                 self.logger.debug("Creating QUIC transport");
@@ -1066,9 +1066,21 @@ impl Node {
                 let quic_options = network_config.quic_options.clone()
                     .ok_or_else(|| anyhow!("QUIC options not provided"))?;
 
+                let message_handler = Box::new(move |message: NetworkMessage| {
+                    let self_arc = self_arc.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = self_arc.handle_network_message(message).await {
+                            self_arc.logger.error(format!("Error handling network message: {}", e));
+                        }
+                    });
+                    // Return success immediately since we've spawned the task
+                    Ok(())
+                });
+
                 let transport = QuicTransport::new(
                     local_node_info,
                     bind_addr,
+                    message_handler,
                     quic_options,
                     self.logger.clone(),
                 ).map_err(|e| anyhow!("Failed to create QUIC transport: {}", e))?;
@@ -1165,355 +1177,398 @@ impl Node {
     }
 
     /// Handle a network message
-    // async fn handle_network_message(&self, message: NetworkMessage) -> Result<()> {
-    //     // Skip if networking is not enabled
-    //     if !self.supports_networking {
-    //         self.logger
-    //             .warn("Received network message but networking is disabled");
-    //         return Ok(());
-    //     }
+    async fn handle_network_message(&self, message: NetworkMessage) -> Result<()> {
+        // Skip if networking is not enabled
+        if !self.supports_networking {
+            self.logger
+                .warn("Received network message but networking is disabled");
+            return Ok(());
+        }
 
-    //     self.logger
-    //         .debug(format!("Received network message: {:?}", message));
+        self.logger
+            .debug(format!("Received network message: {:?}", message));
 
-    //     // Match on message type
-    //     match message.message_type.as_str() {
-    //         "Request" => self.handle_network_request(message).await,
-    //         "Response" => self.handle_network_response(message).await,
-    //         "Event" => self.handle_network_event(message).await,
-    //         // "Discovery" => self.handle_network_discovery(message).await,
-    //         _ => {
-    //             self.logger
-    //                 .warn(format!("Unknown message type: {}", message.message_type));
-    //             Ok(())
-    //         }
-    //     }
-    // }
+        // Match on message type
+        match message.message_type.as_str() {
+            "Request" => self.handle_network_request(message).await,
+            "Response" => self.handle_network_response(message).await,
+            "Event" => self.handle_network_event(message).await,
+            // "Discovery" => self.handle_network_discovery(message).await,
+            _ => {
+                self.logger
+                    .warn(format!("Unknown message type: {}", message.message_type));
+                Ok(())
+            }
+        }
+    }
 
     // /// Handle a network request
-    // async fn handle_network_request(&self, message: NetworkMessage) -> Result<()> {
-    //     // Skip if networking is not enabled
-    //     if !self.supports_networking {
-    //         self.logger
-    //             .warn("Received network request but networking is disabled");
-    //         return Ok(());
-    //     }
+    async fn handle_network_request(&self, message: NetworkMessage) -> Result<()> {
+        // Skip if networking is not enabled
+        if !self.supports_networking {
+            self.logger
+                .warn("Received network request but networking is disabled");
+            return Ok(());
+        }
 
-    //     self.logger
-    //         .info(format!("Handling network request from {}", message.source));
+        self.logger
+            .info(format!("Handling network request from {}", message.source));
 
-    //     // Assume requests have one payload for now. If batching is allowed, this needs iteration.
-    //     if message.payloads.is_empty() {
-    //         return Err(anyhow!("Received request message with no payloads"));
-    //     }
+        if message.payloads.is_empty() {
+            return Err(anyhow!("Received request message with no payloads"));
+        }
+        let serializer = self.serializer.read().await;
+        for payload_item in &message.payloads {
+            // let payload_item = &message.payloads[0];
+            let path = payload_item.path.clone();
+            let correlation_id = payload_item.correlation_id.clone();
 
-    //     // Extract data from the payload item
-    //     let payload_item = &message.payloads[0];
-    //     let topic = payload_item.path.clone();
-    //     let correlation_id = payload_item.correlation_id.clone();
+            // Deserialize the value from bytes
+            let params =
+                match serializer.deserialize_value(Arc::from(payload_item.value_bytes.clone())) {
+                    Ok(value) => value,
+                    Err(e) => {
+                        self.logger
+                            .error(format!("Failed to deserialize request payload: {}", e));
+                        return Err(anyhow!("Failed to deserialize request payload: {}", e));
+                    }
+                };
+ 
+            let local_peer_id = self.peer_id.clone(); 
 
-    //     // Create a SerializerRegistry to deserialize the payload
-    //     let type_registry = SerializerRegistry::with_defaults();
+            // Process the request locally using extracted topic and params
+            self.logger
+                .debug(format!("Processing network request for topic: {}", path));
+            match self.local_request(path.as_str(), params).await {
+                Ok(response) => {
+                    // Serialize the response data
+                    let serialized_data = if let Some(data) = &response.data {
+                        match serializer.serialize_value(data) {
+                            Ok(bytes) => bytes.to_vec(),
+                            Err(e) => {
+                                self.logger
+                                    .error(format!("Failed to serialize response: {}", e));
+                                return Err(anyhow!("Failed to serialize response: {}", e));
+                            }
+                        }
+                    } else {
+                        // Create a Null value and serialize it
+                        let null_value = ArcValueType::null();
+                        match serializer.serialize_value(&null_value) {
+                            Ok(bytes) => bytes.to_vec(),
+                            Err(e) => {
+                                self.logger
+                                    .error(format!("Failed to serialize null response: {}", e));
+                                return Err(anyhow!("Failed to serialize null response: {}", e));
+                            }
+                        }
+                    };
 
-    //     // Deserialize the value from bytes
-    //     let params =
-    //         match type_registry.deserialize_value(Arc::from(payload_item.value_bytes.clone())) {
-    //             Ok(value) => value,
-    //             Err(e) => {
-    //                 self.logger
-    //                     .error(format!("Failed to deserialize request payload: {}", e));
-    //                 return Err(anyhow!("Failed to deserialize request payload: {}", e));
-    //             }
-    //         };
+                    // Create a payload item with the serialized response
+                    let response_payload = NetworkMessagePayloadItem {
+                        path,
+                        value_bytes: serialized_data,
+                        correlation_id,
+                    };
 
-    //     // Get local node ID (remains the same)
-    //     let network_transport = self.network_transport.read().await;
-    //     let local_peer_id = self.peer_id.clone();
-    //     drop(network_transport); // Drop read lock
+                    // Create response message - destination is the original source
+                    let response_message = NetworkMessage {
+                        source: local_peer_id,               // Source is now self
+                        destination: message.source.clone(), // Destination is the original request source
+                        message_type: "Response".to_string(),
+                        payloads: vec![response_payload],
+                    };
 
-    //     // Process the request locally using extracted topic and params
-    //     self.logger
-    //         .debug(format!("Processing network request for topic: {}", topic));
-    //     match self.request(topic.as_str(), params).await {
-    //         Ok(response) => {
-    //             // Serialize the response data
-    //             let type_registry = SerializerRegistry::with_defaults();
-    //             let serialized_response = if let Some(data) = &response.data {
-    //                 match type_registry.serialize_value(data) {
-    //                     Ok(bytes) => bytes.to_vec(),
-    //                     Err(e) => {
-    //                         self.logger
-    //                             .error(format!("Failed to serialize response: {}", e));
-    //                         return Err(anyhow!("Failed to serialize response: {}", e));
-    //                     }
-    //                 }
-    //             } else {
-    //                 // Create a Null value and serialize it
-    //                 let null_value = ArcValueType::null();
-    //                 match type_registry.serialize_value(&null_value) {
-    //                     Ok(bytes) => bytes.to_vec(),
-    //                     Err(e) => {
-    //                         self.logger
-    //                             .error(format!("Failed to serialize null response: {}", e));
-    //                         return Err(anyhow!("Failed to serialize null response: {}", e));
-    //                     }
-    //                 }
-    //             };
+                    // Check if networking is still enabled before trying to send response
+                    if !self.supports_networking {
+                        self.logger
+                            .warn("Can't send response - networking is disabled");
+                        return Ok(());
+                    }
 
-    //             // Create a payload item with the serialized response
-    //             let response_payload = NetworkMessagePayloadItem {
-    //                 path: topic,
-    //                 value_bytes: serialized_response,
-    //                 correlation_id,
-    //             };
+                    // Send the response via transport
+                    let transport_guard = self.network_transport.read().await;
+                    if let Some(transport) = transport_guard.as_ref() {
+                        if let Err(e) = transport.send_message(response_message).await {
+                            self.logger
+                                .error(format!("Failed to send response message: {}", e));
+                            // Consider returning error or just logging?
+                        } else {
+                            self.logger.debug("Sent response message to remote node");
+                        }
+                    } else {
+                        self.logger
+                            .warn("No network transport available to send response");
+                    }
+                }
+                Err(e) => {
+                    // Create a map for the error response
+                    let mut error_map = HashMap::new();
+                    error_map.insert("error".to_string(), ArcValueType::new_primitive(true));
+                    error_map.insert(
+                        "message".to_string(),
+                        ArcValueType::new_primitive(e.to_string()),
+                    );
+                    let error_value = ArcValueType::from_map(error_map);
 
-    //             // Create response message - destination is the original source
-    //             let response_message = NetworkMessage {
-    //                 source: local_peer_id,               // Source is now self
-    //                 destination: message.source.clone(), // Destination is the original request source
-    //                 message_type: "Response".to_string(),
-    //                 payloads: vec![response_payload],
-    //             };
+                    // Serialize the error value
+                    let type_registry = SerializerRegistry::with_defaults();
+                    let serialized_error = match type_registry.serialize_value(&error_value) {
+                        Ok(bytes) => bytes.to_vec(),
+                        Err(e) => {
+                            self.logger
+                                .error(format!("Failed to serialize error response: {}", e));
+                            return Err(anyhow!("Failed to serialize error response: {}", e));
+                        }
+                    };
 
-    //             // Check if networking is still enabled before trying to send response
-    //             if !self.supports_networking {
-    //                 self.logger
-    //                     .warn("Can't send response - networking is disabled");
-    //                 return Ok(());
-    //             }
+                    // Create payload item with serialized error
+                    let error_payload = NetworkMessagePayloadItem {
+                        path,
+                        value_bytes: serialized_error,
+                        correlation_id,
+                    };
 
-    //             // Send the response via transport
-    //             let transport_guard = self.network_transport.read().await;
-    //             if let Some(transport) = transport_guard.as_ref() {
-    //                 if let Err(e) = transport.send_message(response_message).await {
-    //                     self.logger
-    //                         .error(format!("Failed to send response message: {}", e));
-    //                     // Consider returning error or just logging?
-    //                 } else {
-    //                     self.logger.debug("Sent response message to remote node");
-    //                 }
-    //             } else {
-    //                 self.logger
-    //                     .warn("No network transport available to send response");
-    //             }
-    //         }
-    //         Err(e) => {
-    //             // Create a map for the error response
-    //             let mut error_map = HashMap::new();
-    //             error_map.insert("error".to_string(), ArcValueType::new_primitive(true));
-    //             error_map.insert(
-    //                 "message".to_string(),
-    //                 ArcValueType::new_primitive(e.to_string()),
-    //             );
-    //             let error_value = ArcValueType::from_map(error_map);
+                    let response_message = NetworkMessage {
+                        source: local_peer_id,               // Source is self
+                        destination: message.source.clone(), // Destination is the original request source
+                        message_type: "Error".to_string(),   // Use Error type
+                        payloads: vec![error_payload],
+                    };
 
-    //             // Serialize the error value
-    //             let type_registry = SerializerRegistry::with_defaults();
-    //             let serialized_error = match type_registry.serialize_value(&error_value) {
-    //                 Ok(bytes) => bytes.to_vec(),
-    //                 Err(e) => {
-    //                     self.logger
-    //                         .error(format!("Failed to serialize error response: {}", e));
-    //                     return Err(anyhow!("Failed to serialize error response: {}", e));
-    //                 }
-    //             };
+                    // Check if networking is still enabled before trying to send error response
+                    if !self.supports_networking {
+                        self.logger
+                            .warn("Can't send error response - networking is disabled");
+                        return Ok(());
+                    }
 
-    //             // Create payload item with serialized error
-    //             let error_payload = NetworkMessagePayloadItem {
-    //                 path: topic,
-    //                 value_bytes: serialized_error,
-    //                 correlation_id,
-    //             };
+                    // Send the error response via transport
+                    let transport_guard = self.network_transport.read().await;
+                    if let Some(transport) = transport_guard.as_ref() {
+                        if let Err(e) = transport.send_message(response_message).await {
+                            self.logger
+                                .error(format!("Failed to send error response message: {}", e));
+                        } else {
+                            self.logger
+                                .debug(format!("Sent error response to remote node: {}", e));
+                        }
+                    } else {
+                        self.logger
+                            .warn("No network transport available to send error response");
+                    }
+                }
+            }
+        }
 
-    //             let response_message = NetworkMessage {
-    //                 source: local_peer_id,               // Source is self
-    //                 destination: message.source.clone(), // Destination is the original request source
-    //                 message_type: "Error".to_string(),   // Use Error type
-    //                 payloads: vec![error_payload],
-    //             };
+    Ok(())
+    }
 
-    //             // Check if networking is still enabled before trying to send error response
-    //             if !self.supports_networking {
-    //                 self.logger
-    //                     .warn("Can't send error response - networking is disabled");
-    //                 return Ok(());
-    //             }
+    /// Handle a network response
+    async fn handle_network_response(&self, message: NetworkMessage) -> Result<()> {
+        // Skip if networking is not enabled
+        if !self.supports_networking {
+            self.logger
+                .warn("Received network response but networking is disabled");
+            return Ok(());
+        }
 
-    //             // Send the error response via transport
-    //             let transport_guard = self.network_transport.read().await;
-    //             if let Some(transport) = transport_guard.as_ref() {
-    //                 if let Err(e) = transport.send_message(response_message).await {
-    //                     self.logger
-    //                         .error(format!("Failed to send error response message: {}", e));
-    //                 } else {
-    //                     self.logger
-    //                         .debug(format!("Sent error response to remote node: {}", e));
-    //                 }
-    //             } else {
-    //                 self.logger
-    //                     .warn("No network transport available to send error response");
-    //             }
-    //         }
-    //     }
+        let serializer = self.serializer.read().await;
 
-    //     Ok(())
-    // }
+        self.logger
+            .debug(format!("Handling network response: {:?}", message));
 
-    // /// Handle a network response
-    // async fn handle_network_response(&self, message: NetworkMessage) -> Result<()> {
-    //     // Skip if networking is not enabled
-    //     if !self.supports_networking {
-    //         self.logger
-    //             .warn("Received network response but networking is disabled");
-    //         return Ok(());
-    //     }
+        // Extract payloads and handle them
+        for payload_item in &message.payloads {
+            let topic = &payload_item.path;
+            let correlation_id = &payload_item.correlation_id;
 
-    //     self.logger
-    //         .debug(format!("Handling network response: {:?}", message));
+            // Only process if we have an actual correlation ID
+            self.logger.debug(format!(
+                "Processing response for topic {}, correlation ID: {}",
+                topic, correlation_id
+            ));
 
-    //     // Extract payloads and handle them
-    //     for payload_item in &message.payloads {
-    //         let topic = &payload_item.path;
-    //         let correlation_id = &payload_item.correlation_id;
+            // Find any pending response handlers
+            if let Some(pending_request_sender) = self.pending_requests.write().await.remove(correlation_id)
+            {
+                self.logger.debug(format!(
+                    "Found response handler for correlation ID: {}",
+                    correlation_id
+                ));
 
-    //         // Only process if we have an actual correlation ID
-    //         self.logger.debug(format!(
-    //             "Processing response for topic {}, correlation ID: {}",
-    //             topic, correlation_id
-    //         ));
+                // Deserialize the payload data
+                let payload_data = match serializer
+                    .deserialize_value(Arc::from(payload_item.value_bytes.clone()))
+                {
+                    Ok(value) => value,
+                    Err(e) => {
+                        self.logger
+                            .error(format!("Failed to deserialize response payload: {}", e));
+                        // Send an error response
+                        if let Err(send_err) = pending_request_sender
+                            .send(Err(anyhow!("Failed to deserialize response: {}", e)))
+                        {
+                            self.logger
+                                .error(format!("Failed to send error response: {:?}", send_err));
+                        }
+                        continue;
+                    }
+                };
 
-    //         // Find any pending response handlers
-    //         if let Some(response_sender) = self.event_payloads.write().await.remove(correlation_id)
-    //         {
-    //             self.logger.debug(format!(
-    //                 "Found response handler for correlation ID: {}",
-    //                 correlation_id
-    //             ));
+                // Create a success response
+                let response = ServiceResponse::ok(payload_data);
 
-    //             // Deserialize the payload data
-    //             let type_registry = SerializerRegistry::with_defaults();
-    //             let payload_data = match type_registry
-    //                 .deserialize_value(Arc::from(payload_item.value_bytes.clone()))
-    //             {
-    //                 Ok(value) => value,
-    //                 Err(e) => {
-    //                     self.logger
-    //                         .error(format!("Failed to deserialize response payload: {}", e));
-    //                     // Send an error response
-    //                     if let Err(send_err) = response_sender
-    //                         .send(Err(anyhow!("Failed to deserialize response: {}", e)))
-    //                     {
-    //                         self.logger
-    //                             .error(format!("Failed to send error response: {:?}", send_err));
-    //                     }
-    //                     continue;
-    //                 }
-    //             };
+                // Send the response through the oneshot channel
+                match pending_request_sender.send(Ok(response)) {
+                    Ok(_) => self.logger.debug(format!(
+                        "Successfully sent response for correlation ID: {}",
+                        correlation_id
+                    )),
+                    Err(e) => self
+                        .logger
+                        .error(format!("Failed to send response data: {:?}", e)),
+                }
+            } else {
+                self.logger.warn(format!(
+                    "No response handler found for correlation ID: {}",
+                    correlation_id
+                ));
+            }
+        }
 
-    //             // Create a success response
-    //             let response = ServiceResponse::ok(payload_data);
+        Ok(())
+    }
 
-    //             // Send the response through the oneshot channel
-    //             match response_sender.send(Ok(response)) {
-    //                 Ok(_) => self.logger.debug(format!(
-    //                     "Successfully sent response for correlation ID: {}",
-    //                     correlation_id
-    //                 )),
-    //                 Err(e) => self
-    //                     .logger
-    //                     .error(format!("Failed to send response data: {:?}", e)),
-    //             }
-    //         } else {
-    //             self.logger.warn(format!(
-    //                 "No response handler found for correlation ID: {}",
-    //                 correlation_id
-    //             ));
-    //         }
-    //     }
+    /// Handle a network event
+    async fn handle_network_event(&self, message: NetworkMessage) -> Result<()> {
+        // Skip if networking is not enabled
+        if !self.supports_networking {
+            self.logger
+                .warn("Received network event but networking is disabled");
+            return Ok(());
+        }
 
-    //     Ok(())
-    // }
+        self.logger
+            .debug(format!("Handling network event: {:?}", message));
 
-    // /// Handle a network event
-    // async fn handle_network_event(&self, message: NetworkMessage) -> Result<()> {
-    //     // Skip if networking is not enabled
-    //     if !self.supports_networking {
-    //         self.logger
-    //             .warn("Received network event but networking is disabled");
-    //         return Ok(());
-    //     }
+        // Process each payload separately
+        for payload_item in &message.payloads {
+            let topic = &payload_item.path;
 
-    //     self.logger
-    //         .debug(format!("Handling network event: {:?}", message));
+            // Skip processing if topic is empty
+            if topic.is_empty() {
+                self.logger
+                    .warn("Received event with empty topic, skipping");
+                continue;
+            }
 
-    //     // Process each payload separately
-    //     for payload_item in &message.payloads {
-    //         let topic = &payload_item.path;
+            // Create topic path
+            let topic_path = match TopicPath::new(topic, &self.network_id) {
+                Ok(tp) => tp,
+                Err(e) => {
+                    self.logger
+                        .error(format!("Invalid topic path for event: {}", e));
+                    continue;
+                }
+            };
 
-    //         // Skip processing if topic is empty
-    //         if topic.is_empty() {
-    //             self.logger
-    //                 .warn("Received event with empty topic, skipping");
-    //             continue;
-    //         }
+            // Deserialize the payload data
+            let type_registry = SerializerRegistry::with_defaults();
+            let payload = match type_registry
+                .deserialize_value(Arc::from(payload_item.value_bytes.clone()))
+            {
+                Ok(value) => value,
+                Err(e) => {
+                    self.logger
+                        .error(format!("Failed to deserialize event payload: {}", e));
+                    continue;
+                }
+            };
 
-    //         // Create topic path
-    //         let topic_path = match TopicPath::new(topic, &self.network_id) {
-    //             Ok(tp) => tp,
-    //             Err(e) => {
-    //                 self.logger
-    //                     .error(format!("Invalid topic path for event: {}", e));
-    //                 continue;
-    //             }
-    //         };
+            // Create proper event context
+            let event_context = Arc::new(EventContext::new(
+                &topic_path,
+                self.logger.clone().with_component(Component::Service),
+            ));
 
-    //         // Deserialize the payload data
-    //         let type_registry = SerializerRegistry::with_defaults();
-    //         let payload = match type_registry
-    //             .deserialize_value(Arc::from(payload_item.value_bytes.clone()))
-    //         {
-    //             Ok(value) => value,
-    //             Err(e) => {
-    //                 self.logger
-    //                     .error(format!("Failed to deserialize event payload: {}", e));
-    //                 continue;
-    //             }
-    //         };
+            // Get subscribers for this topic
+            let subscribers = self
+                .service_registry
+                .get_local_event_subscribers(&topic_path)
+                .await;
 
-    //         // Create proper event context
-    //         let event_context = Arc::new(EventContext::new(
-    //             &topic_path,
-    //             self.logger.clone().with_component(Component::Service),
-    //         ));
+            if subscribers.is_empty() {
+                self.logger
+                    .debug(format!("No subscribers found for topic: {}", topic));
+                continue;
+            }
 
-    //         // Get subscribers for this topic
-    //         let subscribers = self
-    //             .service_registry
-    //             .get_local_event_subscribers(&topic_path)
-    //             .await;
+            // Notify all subscribers
+            for (_subscription_id, callback) in subscribers {
+                let ctx = event_context.clone();
+                let payload_clone = payload.clone();
 
-    //         if subscribers.is_empty() {
-    //             self.logger
-    //                 .debug(format!("No subscribers found for topic: {}", topic));
-    //             continue;
-    //         }
+                // Invoke callback. errors are logged but not propagated to avoid affecting other subscribers
+                let result = callback(ctx, payload_clone).await;
+                if let Err(e) = result {
+                    self.logger
+                        .error(format!("Error in subscriber callback: {}", e));
+                }
+            }
+        }
 
-    //         // Notify all subscribers
-    //         for (_subscription_id, callback) in subscribers {
-    //             let ctx = event_context.clone();
-    //             let payload_clone = payload.clone();
+        Ok(())
+    }
 
-    //             // Invoke callback. errors are logged but not propagated to avoid affecting other subscribers
-    //             let result = callback(ctx, payload_clone).await;
-    //             if let Err(e) = result {
-    //                 self.logger
-    //                     .error(format!("Error in subscriber callback: {}", e));
-    //             }
-    //         }
-    //     }
+    pub async fn local_request(
+        &self,
+        path: impl Into<String>,
+        payload: ArcValueType,
+    ) -> Result<ServiceResponse> {
+        let path_string = path.into();
+        let topic_path = match TopicPath::new(&path_string, &self.network_id) {
+            Ok(tp) => tp,
+            Err(e) => {
+                return Err(anyhow!(
+                    "Failed to parse topic path: {} : {}",
+                    path_string,
+                    e
+                ))
+            }
+        };
 
-    //     Ok(())
-    // }
+        self.logger
+            .debug(format!("Processing request: {}", topic_path));
+
+        // First check for local handlers
+        if let Some((handler, registration_path)) = self
+            .service_registry
+            .get_local_action_handler(&topic_path)
+            .await
+        {
+            self.logger
+                .debug(format!("Executing local handler for: {}", topic_path));
+
+            // Create request context
+            let mut context = RequestContext::new(&topic_path, self.logger.clone());
+
+            // Extract parameters using the original registration path
+            if let Ok(params) = topic_path.extract_params(&registration_path.action_path()) {
+                // Populate the path_params in the context
+                context.path_params = params;
+                self.logger.debug(format!(
+                    "Extracted path parameters: {:?}",
+                    context.path_params
+                ));
+            }
+
+            // Execute the handler and return result
+            return handler(Some(payload), context).await;
+        } else {
+            return Err(anyhow!("No local handler found for topic: {}", topic_path));
+        }
+    }
 
     /// Handle a request for a specific action - Stable API DO NOT CHANGE UNLESS EXPLICITLY ASKED TO DO SO!
     ///
@@ -1912,32 +1967,6 @@ impl Node {
         Ok(())
     }
 
-    /// Create a message handler for network messages
-    // fn create_message_handler(&self) -> MessageCallback {
-    //     let node_arc = self.clone();
-
-    //     Arc::new(move |message: NetworkMessage| {
-    //         let node = node_arc.clone();
-
-    //         Box::pin(async move {
-    //             // Quick check if networking is disabled
-    //             if !node.supports_networking {
-    //                 node.logger
-    //                     .warn("Received network message but networking is disabled");
-    //                 return Ok(());
-    //             }
-
-    //             if let Err(e) = node.handle_network_message(message).await {
-    //                 // Errors are handled and logged in handle_network_message
-    //                 // Here we just log that message handling failed
-    //                 node.logger
-    //                     .error(format!("Failed to handle network message: {}", e));
-    //             }
-    //             Ok(())
-    //         })
-    //     })
-    // }
-
     async fn subscribe(
         &self,
         topic: impl Into<String>,
@@ -2231,7 +2260,7 @@ impl Clone for Node {
             supports_networking: self.supports_networking,
             network_transport: self.network_transport.clone(),
             load_balancer: self.load_balancer.clone(), 
-            event_payloads: self.event_payloads.clone(),
+            pending_requests: self.pending_requests.clone(),
             serializer: self.serializer.clone(),
         }
     }

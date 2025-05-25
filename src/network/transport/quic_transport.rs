@@ -56,7 +56,7 @@ struct QuicTransportImpl {
     connection_pool: Arc<ConnectionPool>,
     options: QuicTransportOptions,
     logger: Arc<Logger>,
-    message_handlers: Arc<StdRwLock<Vec<Box<dyn Fn(NetworkMessage) -> Result<(), NetworkError> + Send + Sync + 'static>>>>,
+    message_handler: Arc<StdRwLock<Box<dyn Fn(NetworkMessage) -> Result<(), NetworkError> + Send + Sync + 'static>>>,
     local_node: NodeInfo,
     // Channel for sending peer node info updates
     peer_node_info_sender: tokio::sync::broadcast::Sender<NodeInfo>,
@@ -284,6 +284,7 @@ impl QuicTransportImpl {
     fn new(
         local_node: NodeInfo,
         bind_addr: SocketAddr,
+        message_handler: Box<dyn Fn(NetworkMessage) -> Result<(), NetworkError> + Send + Sync + 'static>,
         options: QuicTransportOptions,
         logger: Arc<Logger>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
@@ -301,7 +302,7 @@ impl QuicTransportImpl {
             connection_pool,
             options,
             logger,
-            message_handlers: Arc::new(StdRwLock::new(Vec::new())),
+            message_handler: Arc::new(StdRwLock::new(message_handler)),
             local_node,
             peer_node_info_sender,
         })
@@ -768,19 +769,19 @@ impl QuicTransportImpl {
         Ok(())
     }
     
-    async fn register_message_handler(
-        self: &Arc<Self>,
-        handler: Box<dyn Fn(NetworkMessage) -> Result<(), NetworkError> + Send + Sync + 'static>,
-    ) -> Result<(), NetworkError> {
-        // Get a write lock and push the handler
-        match self.message_handlers.write() {
-            Ok(mut handlers) => {
-                handlers.push(handler);
-                Ok(())
-            },
-            Err(_) => Err(NetworkError::ConnectionError("Failed to acquire write lock".to_string()))
-        }
-    }
+    // async fn register_message_handler(
+    //     self: &Arc<Self>,
+    //     handler: Box<dyn Fn(NetworkMessage) -> Result<(), NetworkError> + Send + Sync + 'static>,
+    // ) -> Result<(), NetworkError> {
+    //     // Get a write lock and push the handler
+    //     match self.message_handler.write() {
+    //         Ok(mut handlers) => {
+    //             handlers.push(handler);
+    //             Ok(())
+    //         },
+    //         Err(_) => Err(NetworkError::ConnectionError("Failed to acquire write lock".to_string()))
+    //     }
+    // }
     
     /// Process an incoming message
     ///
@@ -837,13 +838,10 @@ impl QuicTransportImpl {
         }
         
         // Get a read lock on the handlers
-        match self.message_handlers.read() {
-            Ok(handlers) => {
-                // Call each registered handler
-                for handler in handlers.iter() {
-                    if let Err(e) = handler(message.clone()) {
-                        self.logger.error(&format!("Error in message handler: {}", e));
-                    }
+        match self.message_handler.read() {
+            Ok(handler) => {
+                if let Err(e) = handler(message.clone()) {
+                    self.logger.error(&format!("Error in message handler: {}", e));
                 }
                 Ok(())
             },
@@ -1067,14 +1065,7 @@ impl NetworkTransport for QuicTransport {
     fn get_local_address(&self) -> String {
         self.inner.get_local_address()
     }
-    
-    async fn register_message_handler(
-        &self,
-        handler: Box<dyn Fn(NetworkMessage) -> Result<(), NetworkError> + Send + Sync + 'static>,
-    ) -> Result<(), NetworkError> {
-        self.inner.register_message_handler(handler).await
-    }
-    
+ 
     /// Subscribe to peer node info updates
     /// 
     /// INTENTION: Allow callers to subscribe to peer node info updates when they are received
@@ -1096,11 +1087,12 @@ impl QuicTransport {
     pub fn new(
         local_node_info: NodeInfo,
         bind_addr: SocketAddr,
+        message_handler: Box<dyn Fn(NetworkMessage) -> Result<(), NetworkError> + Send + Sync + 'static>,
         options: QuicTransportOptions,
         logger: Arc<Logger>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         // Create the inner implementation
-        let inner = QuicTransportImpl::new(local_node_info.clone(), bind_addr, options, logger.clone())?;
+        let inner = QuicTransportImpl::new(local_node_info.clone(), bind_addr, message_handler, options, logger.clone())?;
         
         // Create and return the public API wrapper with proper task management
         Ok(Self {

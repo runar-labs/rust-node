@@ -136,14 +136,37 @@ async fn test_quic_transport_connection_end_to_end() {
         .with_verify_certificates(false)
         .with_certificate_verifier(Arc::new(SkipServerVerification {}));
     
-    // Create message channels
-    let (tx_a, _rx_a) = mpsc::channel(100);
-    let (tx_b, mut rx_b) = mpsc::channel(100);
+    // Setup message channels for receiving messages
+    let (tx_a, mut rx_a) = mpsc::channel::<NetworkMessage>(10);
+    let (tx_b, mut rx_b) = mpsc::channel::<NetworkMessage>(10);
     
+    let message_handler_a = Box::new({        
+        let tx = tx_a.clone();
+        move |message: NetworkMessage| {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                tx.send(message).await.unwrap();
+            });
+            Ok::<(), NetworkError>(())
+        }
+    });
+
+    let message_handler_b = Box::new({
+        let tx = tx_b.clone();
+        move |message: NetworkMessage| {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                tx.send(message).await.unwrap();
+            });
+            Ok::<(), NetworkError>(())
+        }
+    });
+
     // Create transport instances with the new API that takes NodeInfo
     let transport_a = QuicTransport::new(
         node_a_info.clone(),
         node_a_addr,
+        message_handler_a,
         options_a,
         logger_a.clone(),
     ).expect("Failed to create transport A");
@@ -151,6 +174,7 @@ async fn test_quic_transport_connection_end_to_end() {
     let transport_b = QuicTransport::new(
         node_b_info.clone(),
         node_b_addr,
+        message_handler_b,
         options_b,
         logger_b.clone(),
     ).expect("Failed to create transport B");
@@ -163,26 +187,7 @@ async fn test_quic_transport_connection_end_to_end() {
     
     // Give the transports a moment to initialize
     tokio::time::sleep(Duration::from_millis(500)).await;
-    
-    // Register message handlers
-    transport_a.register_message_handler(Box::new(move |msg| {
-        let tx = tx_a.clone();
-        tokio::spawn(async move {
-            tx.send(msg).await.expect("Failed to forward message to channel");
-            Ok::<(), NetworkError>(())
-        });
-        Ok(())
-    })).await.expect("Failed to register message handler for A");
-    
-    transport_b.register_message_handler(Box::new(move |msg| {
-        let tx = tx_b.clone();
-        tokio::spawn(async move {
-            tx.send(msg).await.expect("Failed to forward message to channel");
-            Ok::<(), NetworkError>(())
-        });
-        Ok(())
-    })).await.expect("Failed to register message handler for B");
-    
+     
     // Subscribe to peer node info updates for both transports
     let mut node_info_receiver_a = transport_a.subscribe_to_peer_node_info().await;
     let mut node_info_receiver_b = transport_b.subscribe_to_peer_node_info().await;
@@ -335,6 +340,41 @@ async fn test_quic_transport_connection_end_to_end() {
     
     println!("Message successfully received by B from A");
 
+    // Test sending a message from B to A
+    println!("Testing message sending from B to A");
+    let test_message_b_to_a = NetworkMessage {
+        source: node_b_id.clone(),
+        destination: node_a_id.clone(),
+        payloads: vec![NetworkMessagePayloadItem {
+            path: "".to_string(),
+            value_bytes: vec![5, 6, 7, 8],
+            correlation_id: "test-456".to_string(),
+        }],
+        message_type: "TEST_MESSAGE_B_TO_A".to_string(),
+    };
+    
+    // Send message from B to A
+    transport_b.send_message(test_message_b_to_a.clone()).await
+        .expect("Failed to send message from B to A");
+    
+    // Wait for the message to be received with timeout
+    let received_message_b_to_a = tokio::time::timeout(
+        Duration::from_secs(5),
+        rx_a.recv()
+    ).await
+        .expect("Timeout waiting for message from B to A")
+        .expect("Failed to receive message from B to A");
+    
+    // Verify message contents
+    assert_eq!(received_message_b_to_a.source, node_b_id);
+    assert_eq!(received_message_b_to_a.destination, node_a_id);
+    assert_eq!(received_message_b_to_a.payloads.len(), 1);
+    assert_eq!(received_message_b_to_a.payloads[0].path, "");
+    assert_eq!(received_message_b_to_a.payloads[0].value_bytes, vec![5, 6, 7, 8]);
+    assert_eq!(received_message_b_to_a.payloads[0].correlation_id, "test-456");
+    assert_eq!(received_message_b_to_a.message_type, "TEST_MESSAGE_B_TO_A");
+    
+    println!("Message successfully received by A from B");
     
     // Clean up
     println!("Stopping transports");
