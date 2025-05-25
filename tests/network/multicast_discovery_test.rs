@@ -50,7 +50,7 @@ mod tests {
     .as_secs()),
                     actions: vec![
                         ActionMetadata {
-                            path: "request".to_string(),
+                            name: "request".to_string(),
                             description: "Test request".to_string(),
                             input_schema: None,
                             output_schema: None,

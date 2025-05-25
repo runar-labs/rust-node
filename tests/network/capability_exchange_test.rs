@@ -17,19 +17,19 @@ async fn test_service_capability_serialization() -> Result<()> {
         description: "Provides math operations".to_string(),
         actions: vec![
             ActionMetadata {
-                path: "add".to_string(),
+                name: "add".to_string(),
                 description: "Adds two numbers".to_string(),
                 input_schema: None,
                 output_schema: None,
             },
             ActionMetadata {
-                path: "subtract".to_string(),
+                name: "subtract".to_string(),
                 description: "Subtracts two numbers".to_string(),
                 input_schema: None,
                 output_schema: None,
             },
             ActionMetadata {
-                path: "multiply".to_string(),
+                name: "multiply".to_string(),
                 description: "Multiplies two numbers".to_string(),
                 input_schema: None,
                 output_schema: None,
@@ -62,9 +62,9 @@ async fn test_service_capability_serialization() -> Result<()> {
     assert_eq!(deserialized.description, "Provides math operations");
     assert_eq!(deserialized.actions.len(), 3);
     assert_eq!(deserialized.events.len(), 1);
-    assert_eq!(deserialized.actions[0].path, "add");
-    assert_eq!(deserialized.actions[1].path, "subtract");
-    assert_eq!(deserialized.actions[2].path, "multiply");
+    assert_eq!(deserialized.actions[0].name, "add");
+    assert_eq!(deserialized.actions[1].name, "subtract");
+    assert_eq!(deserialized.actions[2].name, "multiply");
     assert_eq!(deserialized.events[0].path, "calculation-done");
     
     Ok(())

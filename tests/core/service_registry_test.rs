@@ -645,21 +645,21 @@ async fn test_get_actions_metadata() {
                 Ok(ServiceResponse::ok_empty())
             })
         });
-        let add_metadata = ActionMetadata{path:add_action_path.as_str().to_string(), description:"Add action".to_string(), input_schema:None, output_schema:None};
+        let add_metadata = ActionMetadata{name:add_action_path.as_str().to_string(), description:"Add action".to_string(), input_schema:None, output_schema:None};
         
         let subtract_handler: ActionHandler = Arc::new(|_params, _context| {
             Box::pin(async move {
                 Ok(ServiceResponse::ok_empty())
             })
         });
-        let subtract_metadata = ActionMetadata{path:subtract_action_path.as_str().to_string(), description:"Subtract action".to_string(), input_schema:None, output_schema:None};
+        let subtract_metadata = ActionMetadata{name:subtract_action_path.as_str().to_string(), description:"Subtract action".to_string(), input_schema:None, output_schema:None};
         
         let multiply_handler: ActionHandler = Arc::new(|_params, _context| {
             Box::pin(async move {
                 Ok(ServiceResponse::ok_empty())
             })
         });
-        let multiply_metadata = ActionMetadata{path:multiply_action_path.as_str().to_string(), description:"Multiply action".to_string(), input_schema:None, output_schema:None};
+        let multiply_metadata = ActionMetadata{name:multiply_action_path.as_str().to_string(), description:"Multiply action".to_string(), input_schema:None, output_schema:None};
         
         // Register the action handlers
         registry.register_local_action_handler(&add_action_path, add_handler, Some(add_metadata)).await.unwrap();
@@ -678,18 +678,18 @@ async fn test_get_actions_metadata() {
         assert_eq!(actions_metadata.len(), 3, "Should have metadata for all three actions");
         
         // Verify the paths of the actions in the metadata
-        let action_paths: Vec<String> = actions_metadata.iter().map(|m| m.path.clone()).collect();
+        let action_paths: Vec<String> = actions_metadata.iter().map(|m| m.name.clone()).collect();
         assert!(action_paths.contains(&add_action_path.as_str().to_string()), "Missing add action path");
         assert!(action_paths.contains(&subtract_action_path.as_str().to_string()), "Missing subtract action path");
         assert!(action_paths.contains(&multiply_action_path.as_str().to_string()), "Missing multiply action path");
         
         // Verify that the descriptions contain the action names
         for metadata in &actions_metadata {
-            if metadata.path.contains("/add") {
+            if metadata.name.contains("/add") {
                 assert!(metadata.description.contains("Add action"), "Description should contain action name");
-            } else if metadata.path.contains("/subtract") {
+            } else if metadata.name.contains("/subtract") {
                 assert!(metadata.description.contains("Subtract action"), "Description should contain action name");
-            } else if metadata.path.contains("/multiply") {
+            } else if metadata.name.contains("/multiply") {
                 assert!(metadata.description.contains("Multiply action"), "Description should contain action name");
             }
         }

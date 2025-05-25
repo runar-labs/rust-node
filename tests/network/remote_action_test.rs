@@ -92,11 +92,25 @@ mod remote_action_tests {
 
 
         node2.add_service(math_service2).await?;
+
+        {
+            let mut serializer = node2.serializer.write().await;
+            serializer.register::<HashMap<String, f64>>()?;
+            // The lock is automatically released here when `serializer` goes out of scope
+        }
+
+        {
+            let mut serializer = node1.serializer.write().await;
+            serializer.register::<HashMap<String, f64>>()?;
+            // The lock is automatically released here when `serializer` goes out of scope
+        }
+
+
         node2.start().await?;
 
         // Wait for discovery and connection to happen (simple sleep)
         logger.info("Waiting for nodes to discover each other...");
-        sleep(Duration::from_secs(55)).await;
+        sleep(Duration::from_secs(5)).await;
 
         // Test calling math service1 (on node1) from node2
         logger.info("Testing remote action call from node2 to node1...");
@@ -104,7 +118,7 @@ mod remote_action_tests {
             "a" => 5.0,
             "b" => 3.0
         });
-        
+
         // Use the proper network path format - with network ID for remote actions
         let response = node2.request("math1/add", add_params).await?;
         if let Some(mut result_value) = response.data {

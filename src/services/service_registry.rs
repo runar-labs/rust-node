@@ -368,12 +368,16 @@ impl ServiceRegistry {
 
         // Store the remote service reference if needed
         {
+            let service_topic_path = TopicPath::new(
+                &topic_path.service_path(),
+                &topic_path.network_id()
+            ).map_err(|e| anyhow::anyhow!("Failed to create service topic path: {}", e))?;
             let mut services = self.remote_services.write().await;
-            let matches = services.find_matches(topic_path);
+            let matches = services.find_matches(&service_topic_path);
 
             if matches.is_empty() {
                 // No existing services for this topic
-                services.add_content(topic_path.clone(), vec![remote_service]);
+                services.add_content(service_topic_path.clone(), vec![remote_service]);
             } else {
                 // Get the existing services for this topic
                 let mut existing_services = matches[0].content.clone();
@@ -386,7 +390,7 @@ impl ServiceRegistry {
                     existing_services.push(remote_service);
 
                     // Update the services in the trie
-                    services.add_content(topic_path.clone(), existing_services);
+                    services.add_content(service_topic_path.clone(), existing_services);
                 }
             }
         }

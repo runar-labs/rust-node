@@ -38,7 +38,7 @@ pub struct RemoteService {
     /// Network transport wrapped in RwLock
     network_transport: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>,
 
-    serializer_registry: Arc<SerializerRegistry>,
+    serializer: Arc<RwLock<SerializerRegistry>>,
 
     /// Service capabilities
     actions: Arc<RwLock<HashMap<String, ActionMetadata>>>,
@@ -66,7 +66,7 @@ impl RemoteService {
         description: String,
         peer_id: PeerId,
         network_transport: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>,
-        serializer_registry: Arc<SerializerRegistry>,
+        serializer: Arc<RwLock<SerializerRegistry>>,
         local_node_id: PeerId,
         logger: Arc<Logger>,
         request_timeout_ms: u64,
@@ -78,7 +78,7 @@ impl RemoteService {
             description,
             peer_id,
             network_transport,
-            serializer_registry,
+            serializer: serializer,
             actions: Arc::new(RwLock::new(HashMap::new())),
             logger,
             local_node_id,
@@ -96,7 +96,7 @@ impl RemoteService {
         peer_id: PeerId,
         capabilities: Vec<ServiceMetadata>,
         network_transport: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>,
-        serializer_registry: Arc<SerializerRegistry>,
+        serializer: Arc<RwLock<SerializerRegistry>>,
         logger: Arc<Logger>,
         local_node_id: PeerId,
         request_timeout_ms: u64,
@@ -118,7 +118,7 @@ impl RemoteService {
 
         for service_metadata in capabilities {
             // Create a topic path using the service name as the path
-            let service_path = match TopicPath::new(&service_metadata.name, "default") {
+            let service_path = match TopicPath::new(&service_metadata.name, &service_metadata.network_id) {
                 Ok(path) => path,
                 Err(e) => {
                     logger.error(format!(
@@ -137,7 +137,7 @@ impl RemoteService {
                 service_metadata.description.clone(),
                 peer_id.clone(),
                 network_transport.clone(),
-                serializer_registry.clone(),
+                serializer.clone(),
                 local_node_id.clone(),
                 logger.clone(),
                 request_timeout_ms,
@@ -145,7 +145,7 @@ impl RemoteService {
 
             // Add actions to the service
             for action in service_metadata.actions {
-                service.add_action(action.path.clone(), action).await?;
+                service.add_action(action.name.clone(), action).await?;
             }
             // Add service to the result list
             remote_services.push(service);
@@ -202,7 +202,7 @@ impl RemoteService {
             let local_node_id = service.local_node_id.clone();
             let pending_requests = service.pending_requests.clone();
             let network_transport = service.network_transport.clone();
-            let serializer_registry = service.serializer_registry.clone();
+            let serializer = service.serializer.clone();
             let request_timeout_ms = service.request_timeout_ms;
             
             Box::pin(async move {
@@ -218,11 +218,12 @@ impl RemoteService {
                     .await
                     .insert(request_id.clone(), tx);                
 
+                let serializer = serializer.read().await;
                 // Serialize the parameters and convert from Arc<[u8]> to Vec<u8>
                 let payload_vec: Vec<u8> = match if let Some(params) = params {
-                    serializer_registry.serialize_value(&params)
+                    serializer.serialize_value(&params)
                 } else {
-                    serializer_registry.serialize_value(&ArcValueType::null())
+                    serializer.serialize_value(&ArcValueType::null())
                 } {
                     Ok(bytes) => bytes.to_vec(),  // Convert Arc<[u8]> to Vec<u8>
                     Err(e) => return Err(anyhow::anyhow!("Serialization error: {}", e)),

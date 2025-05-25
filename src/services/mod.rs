@@ -188,7 +188,7 @@ impl LifecycleContext {
             .debug(format!("register_action: created TopicPath {}", topic_path));
 
         let metadata = ActionMetadata {
-            path: action_path,
+            name: action_name_string.clone(),
             description: format!("Action {} for service {}", action_name_string, self.service_path),
             input_schema: None,
             output_schema: None,
@@ -246,7 +246,7 @@ impl LifecycleContext {
 
         // Create action metadata from the options
         let metadata = ActionMetadata {
-            path: action_name_string.clone(),
+            name: action_name_string.clone(),
             description: options.description.unwrap_or_default(),
             input_schema: options.input_schema,
             output_schema: options.output_schema,
