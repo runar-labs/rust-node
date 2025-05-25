@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use serde::{Serialize, Deserialize};
-use runar_common::types::{ArcValueType, SerializerRegistry};
+use runar_common::{types::{ArcValueType, SerializerRegistry}, Component, Logger};
 use runar_node::network::transport::{NetworkMessage, NetworkMessagePayloadItem, PeerId};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -18,7 +18,10 @@ fn test_message_payload_item_serialization() -> Result<()> {
     let value = ArcValueType::new_primitive("test-value".to_string());
     
     // Create a SerializerRegistry for serialization
-    let registry = SerializerRegistry::with_defaults();
+    let logger = Logger::new_root(Component::Network, "binary_serialization_test");
+    
+    // Create a SerializerRegistry for serialization
+    let mut registry = SerializerRegistry::with_defaults(Arc::new(logger.clone()));
     
     // Serialize the ArcValueType
     let value_bytes = registry.serialize_value(&value)?;
@@ -59,7 +62,10 @@ fn test_network_message_serialization() -> Result<()> {
     let value = ArcValueType::new_primitive(42.0);
     
     // Create a SerializerRegistry for serialization
-    let registry = SerializerRegistry::with_defaults();
+    let logger = Logger::new_root(Component::Network, "binary_serialization_test");
+    
+    // Create a SerializerRegistry for serialization
+    let mut registry = SerializerRegistry::with_defaults(Arc::new(logger.clone()));
     
     // Serialize the ArcValueType
     let value_bytes = registry.serialize_value(&value)?;
@@ -125,7 +131,10 @@ fn test_struct_serialization_in_network_message() -> Result<()> {
     let arc_value = ArcValueType::from_struct(original.clone());
     
     // Create a SerializerRegistry for serialization
-    let mut registry = SerializerRegistry::with_defaults();
+    let logger = Logger::new_root(Component::Network, "binary_serialization_test");
+    
+    // Create a SerializerRegistry for serialization
+    let mut registry = SerializerRegistry::with_defaults(Arc::new(logger.clone()));
     registry.register::<TestStruct>()?;
     
     // Serialize the ArcValueType
@@ -211,7 +220,10 @@ fn test_multiple_struct_types_in_message() -> Result<()> {
     
     // Create payloads with different struct types using ArcValueType
     // Create a SerializerRegistry for serialization
-    let mut registry = SerializerRegistry::with_defaults();
+    let logger = Logger::new_root(Component::Network, "binary_serialization_test");
+    
+    // Create a SerializerRegistry for serialization
+    let mut registry = SerializerRegistry::with_defaults(Arc::new(logger.clone()));
     registry.register::<UserData>()?;
     registry.register::<ProductData>()?;
     
@@ -291,8 +303,11 @@ fn test_various_types_in_network_messages() -> Result<()> {
     // Create an array
     let test_array = vec![1, 2, 3, 4, 5];
     
+    // Create a logger
+    let logger = Logger::new_root(Component::Network, "binary_serialization_test");
+    
     // Create a SerializerRegistry for serialization
-    let mut registry = SerializerRegistry::with_defaults();
+    let mut registry = SerializerRegistry::with_defaults(Arc::new(logger.clone()));
     registry.register::<TestStruct>()?;
     
     // Create payload items for each type using ArcValueType

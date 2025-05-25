@@ -675,6 +675,7 @@ impl Node {
 
         let service_registry = Arc::new(ServiceRegistry::new(logger.clone()));
         let peer_id = PeerId::new(node_id.clone());
+        let serializer_logger = Arc::new(  logger.with_component(Component::Custom("Serializer")));
         // Create the node (with network fields now included)
         let mut node = Self {
             network_id: default_network_id,
@@ -688,7 +689,7 @@ impl Node {
             network_transport: Arc::new(RwLock::new(None)),
             load_balancer: Arc::new(RwLock::new(RoundRobinLoadBalancer::new())), 
             pending_requests: Arc::new(RwLock::new(HashMap::new())),
-            serializer: Arc::new(RwLock::new(SerializerRegistry::new())),
+            serializer: Arc::new(RwLock::new(SerializerRegistry::with_defaults(serializer_logger))),
         };
 
         // Register the registry service
@@ -1130,7 +1131,7 @@ impl Node {
             return Ok(());
         }
 
-        let local_node_info = self.get_local_node_info().await?;
+        // let local_node_info = self.get_local_node_info().await?;
 
         let peer_public_key = peer_info.public_key.clone();
 
@@ -1312,8 +1313,7 @@ impl Node {
                     let error_value = ArcValueType::from_map(error_map);
 
                     // Serialize the error value
-                    let type_registry = SerializerRegistry::with_defaults();
-                    let serialized_error = match type_registry.serialize_value(&error_value) {
+                    let serialized_error = match self.serializer.read().await.serialize_value(&error_value) {
                         Ok(bytes) => bytes.to_vec(),
                         Err(e) => {
                             self.logger
@@ -1474,9 +1474,7 @@ impl Node {
             };
 
             // Deserialize the payload data
-            let type_registry = SerializerRegistry::with_defaults();
-            let payload = match type_registry
-                .deserialize_value(Arc::from(payload_item.value_bytes.clone()))
+            let payload = match self.serializer.read().await.deserialize_value(Arc::from(payload_item.value_bytes.clone()))
             {
                 Ok(value) => value,
                 Err(e) => {

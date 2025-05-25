@@ -321,60 +321,60 @@ impl RemoteService {
     /// Handle a response for a pending request
     ///
     /// INTENTION: Process an incoming response and resolve the corresponding pending request.
-    async fn handle_response(&self, message: NetworkMessage) -> Result<()> {
-        for payload_item in &message.payloads {
-            // Extract fields from the payload item
-            let topic = &payload_item.path;
-            let payload_data = payload_item.deserialize_value()?;
-            let correlation_id = &payload_item.correlation_id;
+    // async fn handle_response(&self, message: NetworkMessage) -> Result<()> {
+    //     for payload_item in &message.payloads {
+    //         // Extract fields from the payload item
+    //         let topic = &payload_item.path;
+    //         let payload_data = payload_item.deserialize_value()?;
+    //         let correlation_id = &payload_item.correlation_id;
 
-            // Attempt to remove the sender using the correlation ID
-            let sender_opt = {
-                let mut pending = self.pending_requests.write().await;
-                pending.remove(correlation_id) // Use correlation_id directly
-            };
+    //         // Attempt to remove the sender using the correlation ID
+    //         let sender_opt = {
+    //             let mut pending = self.pending_requests.write().await;
+    //             pending.remove(correlation_id) // Use correlation_id directly
+    //         };
 
-            if let Some(sender) = sender_opt {
-                // We found a pending request for this response
-                let response_result = if message.message_type == "Response" {
-                    // Assume payload_data is the actual response data or an error map
-                    // Let's create ServiceResponse directly from payload_data
-                    // TODO: Add more robust error checking based on payload structure if needed
-                    Ok(ServiceResponse::ok(payload_data.clone()))
-                } else if message.message_type == "Error" {
-                    Ok(ServiceResponse::error(
-                        500,
-                        format!("Remote error: {:?}", payload_data),
-                    ))
-                } else {
-                    // Unexpected message type for a response
-                    Ok(ServiceResponse::error(
-                        400,
-                        format!(
-                            "Unexpected message type received for response: {}",
-                            message.message_type
-                        ),
-                    ))
-                };
+    //         if let Some(sender) = sender_opt {
+    //             // We found a pending request for this response
+    //             let response_result = if message.message_type == "Response" {
+    //                 // Assume payload_data is the actual response data or an error map
+    //                 // Let's create ServiceResponse directly from payload_data
+    //                 // TODO: Add more robust error checking based on payload structure if needed
+    //                 Ok(ServiceResponse::ok(payload_data.clone()))
+    //             } else if message.message_type == "Error" {
+    //                 Ok(ServiceResponse::error(
+    //                     500,
+    //                     format!("Remote error: {:?}", payload_data),
+    //                 ))
+    //             } else {
+    //                 // Unexpected message type for a response
+    //                 Ok(ServiceResponse::error(
+    //                     400,
+    //                     format!(
+    //                         "Unexpected message type received for response: {}",
+    //                         message.message_type
+    //                     ),
+    //                 ))
+    //             };
 
-                // Send the result back to the waiting task
-                if sender.send(response_result).is_err() {
-                    self.logger.warn(format!(
-                        "Failed to send response for correlation ID {}: receiver dropped",
-                        correlation_id
-                    ));
-                }
-            } else {
-                // No sender found for this ID, maybe it timed out?
-                self.logger.warn(format!(
-                    "Received response for unknown or timed-out correlation ID: {}",
-                    correlation_id
-                ));
-            }
-        }
+    //             // Send the result back to the waiting task
+    //             if sender.send(response_result).is_err() {
+    //                 self.logger.warn(format!(
+    //                     "Failed to send response for correlation ID {}: receiver dropped",
+    //                     correlation_id
+    //                 ));
+    //             }
+    //         } else {
+    //             // No sender found for this ID, maybe it timed out?
+    //             self.logger.warn(format!(
+    //                 "Received response for unknown or timed-out correlation ID: {}",
+    //                 correlation_id
+    //             ));
+    //         }
+    //     }
 
-        Ok(())
-    }
+    //     Ok(())
+    // }
 
     /// Handle a request for a remote action
     // async fn handle_remote_action(
