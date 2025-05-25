@@ -110,7 +110,7 @@ mod remote_action_tests {
 
         // Wait for discovery and connection to happen (simple sleep)
         logger.info("Waiting for nodes to discover each other...");
-        sleep(Duration::from_secs(15)).await;
+        sleep(Duration::from_secs(5)).await;
 
         // Test calling math service1 (on node1) from node2
         logger.info("Testing remote action call from node2 to node1...");

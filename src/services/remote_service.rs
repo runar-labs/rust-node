@@ -68,6 +68,8 @@ impl RemoteService {
         network_transport: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>,
         serializer: Arc<RwLock<SerializerRegistry>>,
         local_node_id: PeerId,
+        pending_requests:
+        Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<Result<ServiceResponse>>>>>,
         logger: Arc<Logger>,
         request_timeout_ms: u64,
     ) -> Self {
@@ -82,7 +84,7 @@ impl RemoteService {
             actions: Arc::new(RwLock::new(HashMap::new())),
             logger,
             local_node_id,
-            pending_requests: Arc::new(RwLock::new(HashMap::new())),
+            pending_requests,
             request_timeout_ms,
             network_id: String::new(),
         }
@@ -97,6 +99,8 @@ impl RemoteService {
         capabilities: Vec<ServiceMetadata>,
         network_transport: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>,
         serializer: Arc<RwLock<SerializerRegistry>>,
+        pending_requests:
+        Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<Result<ServiceResponse>>>>>,
         logger: Arc<Logger>,
         local_node_id: PeerId,
         request_timeout_ms: u64,
@@ -139,6 +143,7 @@ impl RemoteService {
                 network_transport.clone(),
                 serializer.clone(),
                 local_node_id.clone(),
+                pending_requests.clone(),
                 logger.clone(),
                 request_timeout_ms,
             ));
