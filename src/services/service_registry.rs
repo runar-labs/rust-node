@@ -642,6 +642,10 @@ impl ServiceRegistry {
         self.service_states_by_service_path.read().await.clone()
     }
 
+    pub async fn get_service_state(&self, service_path: &str) -> Option<ServiceState> {
+        self.service_states_by_service_path.read().await.get(service_path).cloned()
+    }
+
     
     /// Get metadata for all events under a specific service path
     ///

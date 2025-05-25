@@ -884,6 +884,8 @@ pub trait RegistryDelegate: Send + Sync {
     /// Get all service states
     async fn get_all_service_states(&self) -> HashMap<String, ServiceState>;
 
+    async fn get_service_state(&self, service_path: &TopicPath) -> Option<ServiceState>;
+
     /// Get metadata for a specific service
     async fn get_service_metadata(
         &self,

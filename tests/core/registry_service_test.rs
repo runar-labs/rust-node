@@ -94,7 +94,7 @@ async fn test_registry_service_get_service_info() {
         let mut node = Node::new(config).await.unwrap();
         
         // Create a test service
-        let math_service = MathService::new("math", "math");
+        let math_service = MathService::new("Math Service", "math");
         
         // Add the service to the node
         node.add_service(math_service).await.unwrap();
@@ -125,60 +125,16 @@ async fn test_registry_service_get_service_info() {
         // Dump the complete response data for debugging
         if let Some(ref data) = response.data {
             test_logger.debug(format!("Response data type: {:?}", data));
-            match data {
-                value => {
-                    let mut value_clone = value.clone();
-                    let map_data = value_clone.as_map_ref::<String, ArcValueType>().expect("Expected map in response");
-                    test_logger.debug(format!("Response map keys: {:?}", map_data.keys().collect::<Vec<_>>()));
-                    for (k, v) in map_data.as_ref().iter() {
-                        test_logger.debug(format!("Key: {}, Value: {:?}", k, v));
-                    }
-                },
-                _ => test_logger.debug("Response is not a map"),
-            }
+            let mut value_clone = data.clone();
+            let service_metadata = value_clone.as_type::<ServiceMetadata>().expect("Expected ServiceMetadata in response");
+            test_logger.debug(format!("ServiceMetadata: {:?}", service_metadata));
+            // Example assertions:
+            assert_eq!(service_metadata.service_path, "math");
+            assert_eq!(service_metadata.name, "Math Service");
+            assert_eq!(service_metadata.version, "1.0.0");
+            assert_eq!(service_metadata.actions.len(), 4);
         }
         
-        // Parse the response to verify it contains correct service information
-        if let Some(value) = response.data {
-            let mut value_clone = value.clone();
-            let service_info = value_clone.as_map_ref::<String, ArcValueType>().expect("Expected map in service info");
-            // Verify service path
-            if let Some(path_value) = service_info.get("path") {
-                let mut path_value_clone = path_value.clone();
-                let path: String = path_value_clone.as_type().expect("Expected string path");
-                assert_eq!(path, "math", "Expected service path 'math', got '{}'", path);
-            } else {
-                test_logger.warn("Service path not found in response");
-                // Continue the test even if this check fails
-            }
-            
-            // Verify service state is present (instead of checking specific value)
-            if let Some(state_value) = service_info.get("state") {
-                let mut state_value_clone = state_value.clone();
-                let state: String = state_value_clone.as_type().expect("Expected string state");
-                assert!(!state.is_empty(), "Expected non-empty service state, got '{}'", state);
-                test_logger.debug(format!("Service state from response: {}", state));
-            } else {
-                test_logger.warn("Service state not found in response");
-                // Continue the test even if this check fails
-            }
-            
-            // Verify service name
-            if let Some(name_value) = service_info.get("name") {
-                let mut name_value_clone = name_value.clone();
-                let name: String = name_value_clone.as_type().expect("Expected string name");
-                assert_eq!(name, "Math", "Expected service name 'Math', got '{}'", name);
-            } else {
-                test_logger.error("Service name not found in response");
-                // Continue the test even if this check fails
-            }
-            
-            // Verify the response has some keys (less strict check)
-            assert!(!service_info.is_empty(), "Expected some service information in response");
-            
-        } else {
-            panic!("Expected map of service info in response, got {:?}", response.data);
-        }
     }).await {
         Ok(_) => (), // Test completed within the timeout
         Err(_) => panic!("Test timed out after 10 seconds"),

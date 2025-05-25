@@ -146,8 +146,6 @@ impl RegistryService {
                     Box::pin(async move {
                         inner_self
                             .handle_service_state(
-                                "",
-                                params.unwrap_or_else(|| ArcValueType::null()),
                                 ctx,
                             )
                             .await
@@ -217,13 +215,11 @@ impl RegistryService {
 
     /// Handler for getting just the state of a service
     async fn handle_service_state(
-        &self,
-        _service_path: &str,
-        _params: ArcValueType,
+        &self,  
         ctx: RequestContext,
     ) -> Result<ServiceResponse> {
         // Extract the service path from path parameters
-        let actual_service_path = match self.extract_service_path(&ctx) {
+        let service_path = match self.extract_service_path(&ctx) {
             Ok(path) => path,
             Err(_) => {
                 return Ok(ServiceResponse::error(
@@ -232,43 +228,12 @@ impl RegistryService {
                 ));
             }
         };
+        let service_topic = TopicPath::new_service(&ctx.network_id(), &service_path);
 
         // Get service state directly from the registry delegate
-        let service_states = self.registry_delegate.get_all_service_states().await;
-
-        // Print all service states for debugging
-        ctx.logger.debug("ALL SERVICE STATES:");
-        for (key, value) in &service_states {
-            ctx.logger.debug(format!("  - '{}': {:?}", key, value));
-        }
-
-        ctx.logger.debug(format!(
-            "Looking for service state with key exactly '{}'",
-            actual_service_path
-        ));
-
-        if let Some(state) = service_states.get(&actual_service_path) {
-            // Use vmap! macro to build the response
-            let state_info = vmap! {
-                "state" => format!("{:?}", state)
-            };
-
-            ctx.logger.debug(format!(
-                "Found state {:?} for service {}",
-                state, actual_service_path
-            ));
-
-            Ok(ServiceResponse::ok(state_info))
-        } else {
-            ctx.logger.error(format!(
-                "Service '{}' not found in state map",
-                actual_service_path
-            ));
-            Ok(ServiceResponse::error(
-                404,
-                &format!("Service '{}' not found", actual_service_path),
-            ))
-        }
+        let service_state = self.registry_delegate.get_service_state(&service_topic).await;
+        let state_info =ArcValueType::from_struct(service_state);
+        Ok(ServiceResponse::ok(state_info))
     }
 }
 
@@ -328,6 +293,11 @@ impl AbstractService for RegistryService {
         context
             .logger
             .info("Registry Service initialization complete");
+
+        //during the init the service needs to register any type that is needed for serialization of its actions/events
+        context.serializer::register::<ServiceState>().await?;
+        
+        
         Ok(())
     }
 
