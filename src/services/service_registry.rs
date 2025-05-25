@@ -416,15 +416,18 @@ impl ServiceRegistry {
     /// Get all remote action handlers for a path (for load balancing)
     ///
     /// INTENTION: Retrieve all handlers for a specific action path that exist on remote nodes.
+    /// Get all remote action handlers for a path (for load balancing)
+    ///
+    /// INTENTION: Retrieve all handlers for a specific action path that exist on remote nodes.
+    /// Returns a flattened vector of all matching handlers across all matching topic patterns.
     pub async fn get_remote_action_handlers(&self, topic_path: &TopicPath) -> Vec<ActionHandler> {
         let handlers_trie = self.remote_action_handlers.read().await;
         let matches = handlers_trie.find_matches(topic_path);
 
-        if !matches.is_empty() {
-            matches[0].content.clone()
-        } else {
-            Vec::new()
-        }
+        // Flatten all matches into a single vector of handlers
+        matches.into_iter()
+            .flat_map(|mat| mat.content.clone())
+            .collect()
     }
 
     /// Get an action handler for a specific topic path
