@@ -17,11 +17,13 @@ use thiserror::Error;
 
 // Internal module declarations
 pub mod peer_registry;
+pub mod cert_utils;
 pub mod connection_pool;
 pub mod peer_state;
-pub mod stream_pool;
 pub mod quic_transport;
+pub mod stream_pool;
 
+pub use cert_utils::generate_self_signed_cert;
 pub use connection_pool::ConnectionPool;
 pub use peer_state::PeerState;
 pub use stream_pool::StreamPool;

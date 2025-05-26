@@ -19,6 +19,7 @@
 // Module declarations
 pub mod abstract_service;
 pub mod event_context;
+pub mod load_balancing;
 pub mod registry_service;
 pub mod remote_service;
 pub mod request_context;

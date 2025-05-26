@@ -1,9 +1,9 @@
-// Network Transport Module
+// Network Module
 //
-// This module provides network transport capabilities for the Runar system.
-// It includes traits and implementations for network communication between nodes.
+// This module provides network functionality for the Runar system.
 
 pub mod discovery;
+pub mod network_config;
 pub mod transport;
 
 pub use discovery::{

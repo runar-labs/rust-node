@@ -5,7 +5,8 @@
 
 use std::time::Duration;
 use tokio::time::timeout;
-use runar_node::{node::{LogLevel, LoggingConfig, Node, NodeConfig}, ServiceMetadata, ServiceState};
+use runar_node::{Node, NodeConfig, ServiceMetadata, ServiceState};
+use runar_node::config::logging_config::{LogLevel, LoggingConfig};
 use runar_common::logging::{Logger, Component};
 use runar_node::services::RegistryDelegate;
 use runar_common::types::ArcValueType;

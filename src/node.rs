@@ -7,35 +7,32 @@
 use anyhow::{anyhow, Result};
 use std::pin::Pin;
 use async_trait::async_trait;
-use chrono;
-use env_logger;
-use rcgen;
 use runar_common::logging::{Component, Logger};
 use runar_common::types::schemas::{ActionMetadata, ServiceMetadata};
 use runar_common::types::{ArcValueType, EventMetadata, SerializerRegistry};
-use rustls;
-use rustls::{Certificate, PrivateKey};
-// use serde_json;
 use socket2;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::future::Future;
 
  
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::{oneshot, RwLock};
 use uuid::Uuid;
 
 use crate::network::discovery::multicast_discovery::PeerInfo;
 use crate::network::discovery::{
-    DiscoveryOptions, MulticastDiscovery, NodeDiscovery, NodeInfo, DEFAULT_MULTICAST_ADDR,
+    DiscoveryOptions, MulticastDiscovery, NodeDiscovery, NodeInfo,
 };
 use crate::network::transport::{
-     MessageCallback, NetworkMessage, NetworkMessagePayloadItem, NetworkError,
-    NetworkTransport, PeerId, QuicTransport, QuicTransportOptions,
+    NetworkMessage, NetworkMessagePayloadItem,
+    NetworkTransport, PeerId, QuicTransport,
 };
+// Certificate and PrivateKey types are now imported via the cert_utils module
+use crate::network::network_config::{NetworkConfig, DiscoveryProviderConfig, TransportType};
+use crate::config::LoggingConfig;
+use crate::services::load_balancing::{LoadBalancingStrategy, RoundRobinLoadBalancer};
 use crate::routing::TopicPath;
 use crate::services::abstract_service::{AbstractService, ServiceState};
 use crate::services::registry_service::RegistryService;
@@ -47,64 +44,7 @@ use crate::services::{
 };
 use crate::TransportOptions;
 
-// Type alias for BoxFuture
-type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
-
-/// Type alias for the discovery factory closure
-type DiscoveryFactoryFn = Box<
-    dyn FnOnce(
-            Arc<RwLock<Option<Box<dyn NetworkTransport>>>>,
-            Logger,
-        ) -> Result<Box<dyn NodeDiscovery>>
-        + Send
-        + Sync
-        + 'static,
->;
-
-/// Define the load balancing strategy trait
-///
-/// INTENTION: Provide a common interface for different load balancing
-/// strategies that can be plugged into the Node for selecting remote handlers.
-pub trait LoadBalancingStrategy: Send + Sync {
-    /// Select a handler from the list of handlers
-    ///
-    /// This method is called when a remote request needs to be routed to one
-    /// of multiple available handlers. The implementation should choose a handler
-    /// based on its strategy (round-robin, random, weighted, etc.)
-    fn select_handler(&self, handlers: &[ActionHandler], context: &RequestContext) -> usize;
-}
-
-/// Simple round-robin load balancer
-///
-/// INTENTION: Provide a basic load balancing strategy that distributes
-/// requests evenly across all available handlers in a sequential fashion.
-#[derive(Debug)]
-pub struct RoundRobinLoadBalancer {
-    /// The current index for round-robin selection
-    current_index: Arc<AtomicUsize>,
-}
-
-impl RoundRobinLoadBalancer {
-    /// Create a new round-robin load balancer
-    pub fn new() -> Self {
-        RoundRobinLoadBalancer {
-            current_index: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-}
-
-impl LoadBalancingStrategy for RoundRobinLoadBalancer {
-    fn select_handler(&self, handlers: &[ActionHandler], _context: &RequestContext) -> usize {
-        if handlers.is_empty() {
-            return 0;
-        }
-
-        // Get the next index in a thread-safe way
-        let index = self.current_index.fetch_add(1, Ordering::SeqCst) % handlers.len();
-
-        index
-    }
-}
+// LoadBalancingStrategy and RoundRobinLoadBalancer have been moved to services/load_balancing.rs
 
 /// Node Configuration
 ///
@@ -125,349 +65,13 @@ pub struct NodeConfig {
 
     /// Logging configuration options
     pub logging_config: Option<LoggingConfig>,
-
     //FIX: move this to the network config.. local sercvies shuold not have timeout checks.
     /// Request timeout in milliseconds
     pub request_timeout_ms: u64,
 }
 
-/// Logging configuration options
-#[derive(Clone, Debug)]
-pub struct LoggingConfig {
-    /// Default log level for all components
-    pub default_level: LogLevel,
-
-    /// Component-specific log levels that override the default
-    pub component_levels: HashMap<ComponentKey, LogLevel>,
-}
-
-/// Component key for logging configuration
-/// This provides Hash and Eq implementations for identifying components
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum ComponentKey {
-    Node,
-    Registry,
-    Service,
-    Database,
-    Network,
-    System,
-    Custom(String),
-}
-
-impl From<Component> for ComponentKey {
-    fn from(component: Component) -> Self {
-        match component {
-            Component::Node => ComponentKey::Node,
-            Component::Registry => ComponentKey::Registry,
-            Component::Service => ComponentKey::Service,
-            Component::Database => ComponentKey::Database,
-            Component::Network => ComponentKey::Network,
-            Component::NetworkDiscovery => ComponentKey::Network,
-            Component::System => ComponentKey::System,
-            Component::Custom(name) => ComponentKey::Custom(name.to_string()),
-        }
-    }
-}
-
-/// Log levels matching standard Rust log crate levels
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LogLevel {
-    Error,
-    Warn,
-    Info,
-    Debug,
-    Trace,
-    Off,
-}
-
-impl LogLevel {
-    /// Convert to log::LevelFilter
-    pub fn to_level_filter(&self) -> log::LevelFilter {
-        match self {
-            LogLevel::Error => log::LevelFilter::Error,
-            LogLevel::Warn => log::LevelFilter::Warn,
-            LogLevel::Info => log::LevelFilter::Info,
-            LogLevel::Debug => log::LevelFilter::Debug,
-            LogLevel::Trace => log::LevelFilter::Trace,
-            LogLevel::Off => log::LevelFilter::Off,
-        }
-    }
-}
-
-impl LoggingConfig {
-    /// Create a new logging configuration with default settings
-    pub fn new() -> Self {
-        Self {
-            default_level: LogLevel::Info,
-            component_levels: HashMap::new(),
-        }
-    }
-
-    /// Create a default logging configuration with Info level for all components
-    pub fn default_info() -> Self {
-        Self {
-            default_level: LogLevel::Info,
-            component_levels: HashMap::new(),
-        }
-    }
-
-    /// Set the default log level
-    pub fn with_default_level(mut self, level: LogLevel) -> Self {
-        self.default_level = level;
-        self
-    }
-
-    /// Set a log level for a specific component
-    pub fn with_component_level(mut self, component: Component, level: LogLevel) -> Self {
-        self.component_levels
-            .insert(ComponentKey::from(component), level);
-        self
-    }
-
-    /// Apply this logging configuration
-    ///
-    /// INTENTION: Configure the global logger solely based on the settings in this
-    /// LoggingConfig object. Ignore all environment variables.
-    pub fn apply(&self) {
-        // Create a new env_logger builder
-        let mut builder = env_logger::Builder::new();
-
-        // Configure the log level from this config
-        builder.filter_level(match self.default_level {
-            LogLevel::Error => log::LevelFilter::Error,
-            LogLevel::Warn => log::LevelFilter::Warn,
-            LogLevel::Info => log::LevelFilter::Info,
-            LogLevel::Debug => log::LevelFilter::Debug,
-            LogLevel::Trace => log::LevelFilter::Trace,
-            LogLevel::Off => log::LevelFilter::Off,
-        });
-
-        // Add a custom formatter to match the desired log format
-        builder.format(|buf, record| {
-            use std::io::Write;
-
-            // Simplified timestamp format without T and Z
-            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-
-            // Format the log level with brackets
-            let level = format!("[{}]", record.level());
-
-            // Extract the content (which includes our custom prefix format)
-            let content = format!("{}", record.args());
-
-            // Write the final log message
-            writeln!(buf, "[{}] {} {}", timestamp, level, content)
-        });
-
-        // Initialize the logger, ignoring any errors (in case it's already initialized)
-        let _ = builder.try_init();
-    }
-}
-
-/// Network configuration options
-#[derive(Clone, Debug)]
-pub struct NetworkConfig {
-    /// Load balancing strategy (defaults to round-robin)
-    pub load_balancer: Arc<RoundRobinLoadBalancer>,
-
-    /// Transport configuration
-    pub transport_type: TransportType,
-
-    /// Base transport options
-    pub transport_options: TransportOptions,
-
-    /// QUIC transport options (fully configured)
-    pub quic_options: Option<QuicTransportOptions>,
-
-    /// Discovery configuration
-    pub discovery_providers: Vec<DiscoveryProviderConfig>,
-    pub discovery_options: Option<DiscoveryOptions>,
-
-    /// Advanced options
-    pub connection_timeout_ms: u32,
-    pub request_timeout_ms: u32,
-    pub max_connections: u32,
-    pub max_message_size: usize,
-    pub max_chunk_size: usize,
-}
-
-impl std::fmt::Display for NetworkConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "NetworkConfig: transport:{:?} bind_address:{} msg_size:{}/{}KB timeout:{}ms",
-            self.transport_type,
-            self.transport_options.bind_address,
-            self.max_message_size / 1024,
-            self.max_chunk_size / 1024,
-            self.connection_timeout_ms
-        )?;
-
-        if let Some(discovery_options) = &self.discovery_options {
-            if discovery_options.use_multicast {
-                write!(
-                    f,
-                    " multicast discovery interval:{}ms timeout:{}ms",
-                    discovery_options.announce_interval.as_millis(),
-                    discovery_options.discovery_timeout.as_millis()
-                )?;
-            }
-
-            write!(f, " ttl:{}s", discovery_options.node_ttl.as_secs())?;
-        }
-
-        Ok(())
-    }
-}
-
-/// Transport type enum
-#[derive(Clone, Debug)]
-pub enum TransportType {
-    Quic,
-    // Add other transport types as needed
-}
-
-/// Discovery provider configuration using proper typed options instead of string hashmaps
-#[derive(Clone, Debug)]
-pub enum DiscoveryProviderConfig {
-    /// Multicast discovery configuration
-    Multicast(MulticastDiscoveryOptions),
-
-    /// Static discovery configuration
-    Static(StaticDiscoveryOptions),
-    // Other discovery types can be added here as needed
-}
-
-/// Options specific to multicast discovery
-#[derive(Clone, Debug)]
-pub struct MulticastDiscoveryOptions {
-    /// Multicast group address
-    pub multicast_group: String,
-
-    /// Announcement interval
-    pub announce_interval: Duration,
-
-    /// Discovery timeout
-    pub discovery_timeout: Duration,
-
-    /// Time-to-live for discovered nodes
-    pub node_ttl: Duration,
-
-    /// Whether to use multicast for discovery
-    pub use_multicast: bool,
-
-    /// Whether to only discover on local network
-    pub local_network_only: bool,
-}
-
-/// Options specific to static discovery
-#[derive(Clone, Debug)]
-pub struct StaticDiscoveryOptions {
-    /// List of static node addresses
-    pub node_addresses: Vec<String>,
-
-    /// Refresh interval for checking static nodes
-    pub refresh_interval: Duration,
-}
-
-impl DiscoveryProviderConfig {
-    pub fn default_multicast() -> Self {
-        DiscoveryProviderConfig::Multicast(MulticastDiscoveryOptions {
-            multicast_group: DEFAULT_MULTICAST_ADDR.to_string(),
-            announce_interval: Duration::from_secs(30),
-            discovery_timeout: Duration::from_secs(30),
-            node_ttl: Duration::from_secs(60),
-            use_multicast: true,
-            local_network_only: true,
-        })
-    }
-
-    pub fn default_static(addresses: Vec<String>) -> Self {
-        DiscoveryProviderConfig::Static(StaticDiscoveryOptions {
-            node_addresses: addresses,
-            refresh_interval: Duration::from_secs(60),
-        })
-    }
-}
-
-impl NetworkConfig {
-    /// Creates a new network configuration with default settings.
-    pub fn new() -> Self {
-        Self {
-            load_balancer: Arc::new(RoundRobinLoadBalancer::new()),
-            transport_type: TransportType::Quic,
-            transport_options: TransportOptions::default(),
-            quic_options: None,
-            discovery_providers: Vec::new(),
-            discovery_options: Some(DiscoveryOptions::default()),
-            connection_timeout_ms: 60000,
-            request_timeout_ms: 10000,
-            max_connections: 100,
-            max_message_size: 1024 * 1024 * 10, // 10MB default
-            max_chunk_size: 1024 * 1024 * 10,   // 10MB default
-        }
-    }
-
-    /// Create a new NetworkConfig with default QUIC transport settings
-    ///
-    /// This is a convenience method that sets up a NetworkConfig with:
-    /// - Default QUIC transport
-    /// - Auto port selection
-    /// - Localhost binding
-    /// - Secure defaults for connection handling
-    pub fn with_quic(quic_options: QuicTransportOptions) -> Self {
-        Self {
-            load_balancer: Arc::new(RoundRobinLoadBalancer::new()),
-            transport_type: TransportType::Quic,
-            transport_options: TransportOptions::default(),
-            quic_options: Some(quic_options),
-            discovery_providers: Vec::new(), // No providers by default
-            discovery_options: None,         // No discovery options by default (disabled)
-            connection_timeout_ms: 30000,
-            request_timeout_ms: 30000,
-            max_connections: 100,
-            max_message_size: 1024 * 1024, // 1MB
-            max_chunk_size: 1024 * 1024,   // 1MB
-        }
-    }
-
-    pub fn with_transport_type(mut self, transport_type: TransportType) -> Self {
-        self.transport_type = transport_type;
-        self
-    }
-
-    pub fn with_quic_options(mut self, options: QuicTransportOptions) -> Self {
-        self.quic_options = Some(options);
-        self
-    }
-
-    pub fn with_discovery_provider(mut self, provider: DiscoveryProviderConfig) -> Self {
-        self.discovery_providers.push(provider);
-        self
-    }
-
-    pub fn with_discovery_options(mut self, options: DiscoveryOptions) -> Self {
-        self.discovery_options = Some(options);
-        self
-    }
-
-    /// Enable multicast discovery with default settings
-    ///
-    /// This is a convenience method that configures:
-    /// - Default multicast discovery provider
-    /// - Default discovery options
-    pub fn with_multicast_discovery(mut self) -> Self {
-        // Clear existing providers and add the default multicast provider
-        self.discovery_providers.clear();
-        self.discovery_providers
-            .push(DiscoveryProviderConfig::default_multicast());
-
-        // Use default discovery options
-        self.discovery_options = Some(DiscoveryOptions::default());
-
-        self
-    }
-}
+// LoggingConfig, ComponentKey, and LogLevel have been moved to config/logging_config.rs
+// NetworkConfig, TransportType, DiscoveryProviderConfig, and related types have been moved to network/network_config.rs
 
 impl NodeConfig {
     /// Create a new configuration with the specified node ID and network ID
@@ -1867,7 +1471,6 @@ impl Node {
         }
 
         // If transport is not available or didn't provide an address,
-        // try to get the address from the network config
         if let Some(network_config) = &self.config.network_config {
             return Ok(network_config.transport_options.bind_address.to_string());
         }
@@ -2215,36 +1818,7 @@ impl RegistryDelegate for Node {
             .register_remote_action_handler(topic_path, handler, remote_service)
             .await
     }
-}
-/// Implementation of discovery listener that forwards node information to Node
-// struct NodeDiscoveryListener {
-//     logger: Logger,
-//     transport: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>,
-// }
-
-// impl NodeDiscoveryListener {
-//     fn new(logger: Logger, transport: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>) -> Self {
-//         Self { logger, transport }
-//     }
-
-//     async fn handle_discovered_node(&self, discovery_msg: PeerInfo) -> Result<()> {
-//         self.logger.info(format!(
-//             "Discovery listener found node: {}",
-//             discovery_msg.public_key
-//         ));
-
-//         // For now, just log discovery events
-//         // The actual connection logic will be handled by the Node
-//         self.logger.info(format!(
-//             "Node discovery event for: {}",
-//             discovery_msg.public_key
-//         ));
-
-//         // We'll implement proper connection logic elsewhere to avoid the
-//         // linter errors related to mutability and type mismatches
-//         Ok(())
-//     }
-// }
+} 
 
 // Implement Clone for Node
 impl Clone for Node {
@@ -2265,16 +1839,4 @@ impl Clone for Node {
         }
     }
 }
-
-/// Generate a self-signed certificate for testing/development
-fn generate_self_signed_cert() -> Result<(Certificate, PrivateKey)> {
-    // Generate self-signed certificates for development/testing
-    // In production, these should be replaced with proper certificates
-    let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
-    let cert_der = cert.serialize_der()?;
-    let priv_key = cert.serialize_private_key_der();
-    let priv_key = PrivateKey(priv_key);
-    let certificate = Certificate(cert_der);
-
-    Ok((certificate, priv_key))
-}
+ 
