@@ -71,7 +71,7 @@ impl<T: Clone> PathTrie<T> {
     }
     
     /// Add a topic path and its handlers to the trie
-    pub fn add(&mut self, topic: TopicPath, content_list: Vec<T>) {
+    pub fn set_values(&mut self, topic: TopicPath, content_list: Vec<T>) {
         let network_id = topic.network_id();
         
         // Get or create network-specific trie
@@ -80,23 +80,63 @@ impl<T: Clone> PathTrie<T> {
             .or_insert_with(PathTrie::new);
             
         // Add to the network-specific trie
-        network_trie.add_internal(&topic.get_segments(), 0, content_list);
+        network_trie.set_values_internal(&topic.get_segments(), 0, content_list);
     }
     
     /// Add a single handler for a topic path
-    pub fn add_content(&mut self, topic: TopicPath, content: T) {
-        self.add(topic, vec![content]);
+    pub fn set_value(&mut self, topic: TopicPath, content: T) {
+        self.set_values(topic, vec![content]);
     }
     
     /// Add handlers for a vector of topic paths
-    pub fn add_multi_content(&mut self, topics: Vec<TopicPath>, contents: Vec<T>) {
+    pub fn add_batch_values(&mut self, topics: Vec<TopicPath>, contents: Vec<T>) {
         for topic in topics {
-            self.add(topic, contents.clone());
+            self.set_values(topic, contents.clone());
+        }
+    }
+
+    pub fn remove_values(&mut self, topic: &TopicPath) {
+        let network_id = topic.network_id();
+        
+        // Get or create network-specific trie
+        let network_trie = self.networks
+            .entry(network_id.to_string())
+            .or_insert_with(PathTrie::new);
+            
+        // Remove from the network-specific trie
+        network_trie.remove_values_internal(&topic.get_segments(), 0);
+    }
+    
+    /// Internal recursive implementation of remove
+    fn remove_values_internal(&mut self, segments: &[String], index: usize) {
+        if index >= segments.len() {
+            // We've reached the end of the path, remove handlers here
+            self.content.clear();
+            return;
+        }
+        
+        let segment = &segments[index];
+        
+        if segment == "*" {
+            // Single wildcard - remove from wildcard child
+            if let Some(child) = &mut self.wildcard_child {
+                child.remove_values_internal(segments, index + 1);
+            }
+        } else if is_template_param(segment) {
+            // Template parameter - remove from template child
+            if let Some(child) = &mut self.template_child {
+                child.remove_values_internal(segments, index + 1);
+            }
+        } else {
+            // Literal segment - remove from child
+            if let Some(child) = self.children.get_mut(segment) {
+                child.remove_values_internal(segments, index + 1);
+            }
         }
     }
     
     /// Internal recursive implementation of add
-    fn add_internal(&mut self, segments: &[String], index: usize, handlers: Vec<T>) {
+    fn set_values_internal(&mut self, segments: &[String], index: usize, handlers: Vec<T>) {
         if index >= segments.len() {
             // We've reached the end of the path, add handlers here
             self.content.extend(handlers);
@@ -115,7 +155,7 @@ impl<T: Clone> PathTrie<T> {
             }
             
             if let Some(child) = &mut self.wildcard_child {
-                child.add_internal(segments, index + 1, handlers);
+                child.set_values_internal(segments, index + 1, handlers);
             }
         } else if is_template_param(segment) {
             // Template parameter - create/get template child and continue
@@ -126,7 +166,7 @@ impl<T: Clone> PathTrie<T> {
             }
             
             if let Some(child) = &mut self.template_child {
-                child.add_internal(segments, index + 1, handlers);
+                child.set_values_internal(segments, index + 1, handlers);
             }
         } else {
             // Literal segment - create/get child and continue
@@ -134,7 +174,7 @@ impl<T: Clone> PathTrie<T> {
                 .entry(segment.clone())
                 .or_insert_with(PathTrie::new);
                 
-            child.add_internal(segments, index + 1, handlers);
+            child.set_values_internal(segments, index + 1, handlers);
         }
     }
     
@@ -318,7 +358,7 @@ impl<T: Clone> PathTrie<T> {
     }
     
     /// For backward compatibility - get just the handlers without parameters
-    pub fn find_handlers(&self, topic: &TopicPath) -> Vec<T> {
+    pub fn find(&self, topic: &TopicPath) -> Vec<T> {
         self.find_matches(topic)
             .into_iter()
             .map(|m| m.content)

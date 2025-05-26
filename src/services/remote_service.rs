@@ -298,163 +298,7 @@ impl RemoteService {
             })
         })
     }
-
-    /// Register a response handler for incoming network messages
-    ///
-    /// INTENTION: Set up this service to receive responses for its requests.
-    /// This should be called once when the service is created.
-    // pub async fn register_response_handler(
-    //     &self,
-    //     network_transport: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>,
-    // ) -> Result<()> {
-    //     // For now, just log the intent to register a response handler
-    //     // The actual registration requires a mutable reference to the transport
-    //     // which we don't have in this context
-    //     self.logger.info(format!(
-    //         "Would register response handler for remote service {}",
-    //         self.service_topic
-    //     ));
-
-    //     // Check if transport is available just to provide a meaningful error
-    //     // if network_transport.read().await.is_none() {
-    //     //     return Err(anyhow!("Network transport not available"));
-    //     // }
-
-    //     Ok(())
-    // }
-
-    /// Handle a response for a pending request
-    ///
-    /// INTENTION: Process an incoming response and resolve the corresponding pending request.
-    // async fn handle_response(&self, message: NetworkMessage) -> Result<()> {
-    //     for payload_item in &message.payloads {
-    //         // Extract fields from the payload item
-    //         let topic = &payload_item.path;
-    //         let payload_data = payload_item.deserialize_value()?;
-    //         let correlation_id = &payload_item.correlation_id;
-
-    //         // Attempt to remove the sender using the correlation ID
-    //         let sender_opt = {
-    //             let mut pending = self.pending_requests.write().await;
-    //             pending.remove(correlation_id) // Use correlation_id directly
-    //         };
-
-    //         if let Some(sender) = sender_opt {
-    //             // We found a pending request for this response
-    //             let response_result = if message.message_type == "Response" {
-    //                 // Assume payload_data is the actual response data or an error map
-    //                 // Let's create ServiceResponse directly from payload_data
-    //                 // TODO: Add more robust error checking based on payload structure if needed
-    //                 Ok(ServiceResponse::ok(payload_data.clone()))
-    //             } else if message.message_type == "Error" {
-    //                 Ok(ServiceResponse::error(
-    //                     500,
-    //                     format!("Remote error: {:?}", payload_data),
-    //                 ))
-    //             } else {
-    //                 // Unexpected message type for a response
-    //                 Ok(ServiceResponse::error(
-    //                     400,
-    //                     format!(
-    //                         "Unexpected message type received for response: {}",
-    //                         message.message_type
-    //                     ),
-    //                 ))
-    //             };
-
-    //             // Send the result back to the waiting task
-    //             if sender.send(response_result).is_err() {
-    //                 self.logger.warn(format!(
-    //                     "Failed to send response for correlation ID {}: receiver dropped",
-    //                     correlation_id
-    //                 ));
-    //             }
-    //         } else {
-    //             // No sender found for this ID, maybe it timed out?
-    //             self.logger.warn(format!(
-    //                 "Received response for unknown or timed-out correlation ID: {}",
-    //                 correlation_id
-    //             ));
-    //         }
-    //     }
-
-    //     Ok(())
-    // }
-
-    /// Handle a request for a remote action
-    // async fn handle_remote_action(
-    //     &self,
-    //     action_topic_path: TopicPath,
-    //     params: Option<ArcValueType>,
-    // ) -> Result<ServiceResponse> {
-    //     // Generate a unique correlation ID for this request
-    //     let correlation_id = Uuid::new_v4().to_string();
-
-    //     // Create the message channel
-    //     let (sender, receiver) = tokio::sync::oneshot::channel();
-
-    //     // Register the pending request
-    //     {
-    //         let mut pending = self.pending_requests.write().await;
-    //         pending.insert(correlation_id.clone(), sender);
-    //     }
-
-    //     // Build the request message
-    //     let message = NetworkMessage {
-    //         source: self.local_node_id.clone(),
-    //         destination: self.peer_id.clone(),
-    //         message_type: "Request".to_string(),
-    //         payloads: vec![NetworkMessagePayloadItem::new(
-    //             action_topic_path.as_str().to_string(),
-    //             Vec::new(), // Placeholder for actual payload data
-    //             correlation_id.clone(),
-    //         )],
-    //     };
-
-    //     // Send the request using the network transport
-    //     {
-    //         let transport_guard = self.network_transport.read().await;
-    //         if let Some(transport) = &*transport_guard {
-    //             self.logger.debug(format!(
-    //                 "Sending request to {} for action {}",
-    //                 self.peer_id,
-    //                 action_topic_path.as_str()
-    //             ));
-    //             transport.send_message(message).await?;
-    //         } else {
-    //             return Err(anyhow!("Network transport not available"));
-    //         }
-    //     }
-
-    //     // Wait for response with timeout
-    //     let response =
-    //         match tokio::time::timeout(Duration::from_millis(self.request_timeout_ms), receiver)
-    //             .await
-    //         {
-    //             Ok(r) => match r {
-    //                 Ok(response) => response,
-    //                 Err(_) => {
-    //                     self.logger.error(format!(
-    //                         "Response channel closed for request to {}",
-    //                         self.peer_id
-    //                     ));
-    //                     return Err(anyhow!("Response channel closed unexpectedly"));
-    //                 }
-    //             },
-    //             Err(_) => {
-    //                 // Remove from pending requests on timeout
-    //                 self.pending_requests.write().await.remove(&correlation_id);
-    //                 return Err(anyhow!(
-    //                     "Request timed out after {} ms",
-    //                     self.request_timeout_ms
-    //                 ));
-    //             }
-    //         };
-
-    //     // Return the response
-    //     response
-    // }
-
+ 
     /// Get a list of available actions this service can handle
     ///
     /// INTENTION: Provide a way to identify all actions that this remote service
@@ -478,10 +322,8 @@ impl RemoteService {
                 // Create handler for this action
                 let handler = self.create_action_handler(action_name.clone());
 
-                // Register with the context
-                let self_arc = Arc::new(self.clone());
                 context
-                    .register_remote_action_handler(&action_topic_path, handler, self_arc)
+                    .register_remote_action_handler(&action_topic_path, handler)
                     .await?;
             } else {
                 self.logger.warn(format!(
@@ -493,6 +335,26 @@ impl RemoteService {
 
         Ok(())
     }
+
+    pub async fn stop(&self, context: crate::services::RemoteLifecycleContext) -> Result<()> {
+        let action_names = self.get_available_actions().await;
+    
+        for action_name in action_names {
+            if let Ok(action_topic_path) = self.service_topic.new_action_topic(&action_name) {
+                context
+                    .remove_remote_action_handler(&action_topic_path)
+                    .await?;
+            } else {
+                self.logger.warn(format!(
+                    "Failed to create topic path for action: {}/{}",
+                    self.service_topic, action_name
+                ));
+            }
+        }
+    
+        Ok(())
+    }
+    
 }
 
 #[async_trait]

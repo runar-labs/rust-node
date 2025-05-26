@@ -14,9 +14,9 @@ use socket2;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::future::Future;
-
+use tokio::time::{sleep, Duration};
  
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{oneshot, RwLock};
 use uuid::Uuid;
@@ -140,6 +140,12 @@ impl std::fmt::Display for NodeConfig {
 /// with each other, for registering and discovering services, and for
 /// managing the lifecycle of services.
 pub struct Node {
+    /// Debounce state for notify_node_change.
+    ///
+    /// INTENTION: Ensures that rapid successive calls to notify_node_change only trigger a single
+    /// notification after a 5s debounce window. This prevents unnecessary network traffic and ensures
+    /// only the latest node state is broadcast. Internal use only; not exposed outside Node.
+    debounce_notify_task: std::sync::Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
     /// The network ID for this node
     pub(crate) network_id: String,
 
@@ -154,6 +160,8 @@ pub struct Node {
 
     /// The service registry for this node
     pub(crate) service_registry: Arc<ServiceRegistry>,
+
+    pub(crate) known_peers: Arc<RwLock<HashMap<PeerId, NodeInfo>>>,
 
     /// Logger instance
     pub(crate) logger: Arc<Logger>,
@@ -178,6 +186,8 @@ pub struct Node {
         Arc<RwLock<HashMap<String, oneshot::Sender<Result<ServiceResponse>>>>>,
 
     pub serializer: Arc<RwLock<SerializerRegistry>>,
+
+    pub registry_version: Arc<AtomicI64>,
 }
 
 // Implementation for Node
@@ -283,12 +293,14 @@ impl Node {
         let serializer_logger = Arc::new(  logger.with_component(Component::Custom("Serializer")));
         // Create the node (with network fields now included)
         let mut node = Self {
+            debounce_notify_task: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             network_id: default_network_id,
             network_ids,
             peer_id,
             config: Arc::new(config),
             logger: logger.clone(),
             service_registry,
+            known_peers: Arc::new(RwLock::new(HashMap::new())),
             running: AtomicBool::new(false),
             supports_networking: networking_enabled,
             network_transport: Arc::new(RwLock::new(None)),
@@ -296,6 +308,7 @@ impl Node {
             load_balancer: Arc::new(RwLock::new(RoundRobinLoadBalancer::new())), 
             pending_requests: Arc::new(RwLock::new(HashMap::new())),
             serializer: Arc::new(RwLock::new(SerializerRegistry::with_defaults(serializer_logger))),
+            registry_version: Arc::new(AtomicI64::new(0)),
         };
 
         // Register the registry service
@@ -397,6 +410,13 @@ impl Node {
             .register_local_service(Arc::new(service_entry))
             .await?;
 
+
+        //if started... need to increment  -> registry_version
+        if self.running.load(Ordering::SeqCst) {
+            self.registry_version.fetch_add(1, Ordering::SeqCst);
+            self.notify_node_change().await;
+        }
+
         Ok(())
     }
 
@@ -467,6 +487,8 @@ impl Node {
 
         self.logger.info("Node started successfully");
         self.running.store(true, Ordering::SeqCst);
+
+        self.registry_version.fetch_add(1, Ordering::SeqCst);
 
         Ok(())
     }
@@ -1322,8 +1344,46 @@ impl Node {
     /// RemoteService instances and making them available locally.
     async fn process_remote_capabilities(
         &self,
+        new_peer: NodeInfo,
+    ) -> Result<Vec<Arc<RemoteService>>> {
+
+        //check if we alrady know about this service..
+        let mut known_peers = self.known_peers.write().await;
+        if let Some(existing_peer) = known_peers.get(&new_peer.peer_id) {
+            //check if node info is older then the stored peer
+            if new_peer.version > existing_peer.version {
+                self.remove_peer(&existing_peer).await?;
+                //remove and add again
+                known_peers.remove(&new_peer.peer_id);
+                known_peers.insert(new_peer.peer_id.clone(), new_peer.clone());
+                return self.add_new_peer(new_peer).await;
+            }
+        } else {
+            known_peers.insert(new_peer.peer_id.clone(), new_peer.clone());
+            return self.add_new_peer(new_peer).await;
+        }
+        drop(known_peers);
+        Ok(Vec::new())
+    }
+
+    async fn remove_peer(
+        &self,
+        existing_peer: &NodeInfo,
+    ) -> Result<Vec<Arc<RemoteService>>> {
+        //remove all the services
+        for service_to_remove in &existing_peer.services {
+            let service_path = TopicPath::new(&service_to_remove.service_path, service_to_remove.network_id.as_str()).unwrap();
+            self.service_registry.remove_remote_service(&service_path).await;
+        }
+
+        Ok(Vec::new())
+    }
+
+    async fn add_new_peer(
+        &self,
         node_info: NodeInfo,
     ) -> Result<Vec<Arc<RemoteService>>> {
+
         let capabilities = node_info.services.clone();
         self.logger.info(format!(
             "Processing {} capabilities from node {}",
@@ -1413,6 +1473,55 @@ impl Node {
         Ok(remote_services)
     }
  
+    //this function is debounced since it can be called in rapid suyccession.. it is debounced for 5 seconds.. 
+    // it will then call the notify_node_change_impl  which will use the transposter to send a handshake message with the latest node info to all known peers.
+    /// Debounced notification of node change.
+    ///
+    /// INTENTION: This function is debounced to avoid flooding the network with repeated notifications.
+    /// If called multiple times in rapid succession, only the last call within a 5 second window will
+    /// trigger the actual notification. After the debounce period, it delegates to notify_node_change_impl,
+    /// which sends the latest node info to all known peers via the transport.
+    pub async fn notify_node_change(&self) -> Result<()> {
+        
+        let debounce_task = self.debounce_notify_task.clone();
+        let this = self.clone();
+        // Cancel any existing debounce task
+        {
+            let mut guard = debounce_task.lock().await;
+            if let Some(handle) = guard.take() {
+                handle.abort();
+            }
+        }
+        // Spawn a new debounce task
+        let handle = tokio::spawn(async move {
+            sleep(Duration::from_secs(2)).await;
+            // Ignore errors from notify_node_change_impl; log if needed
+            if let Err(e) = this.notify_node_change_impl().await {
+                this.logger.warn(format!("notify_node_change_impl failed after debounce: {}", e));
+            }
+        });
+        // Store the new handle
+        {
+            let mut guard = debounce_task.lock().await;
+            *guard = Some(handle);
+        }
+        Ok(())
+    }
+
+    pub async fn notify_node_change_impl(&self) -> Result<()> {
+        let local_node_info = self.get_local_node_info().await?;
+        
+        self.logger.info(format!("Notifying node change - version: {}", local_node_info.version));
+        
+        let transport_guard = self.network_transport.read().await;
+        if let Some(transport) = transport_guard.as_ref() {
+            transport.update_peers(local_node_info).await?;
+            Ok(())
+        } else {
+            Err(anyhow!("No transport available"))
+        }
+    }
+
     /// Collect capabilities of all local services
     ///
     /// INTENTION: Gather capability information from all local services.
@@ -1509,7 +1618,7 @@ impl Node {
             network_ids: self.network_ids.clone(),
             addresses: vec![address],
             services: self.collect_local_service_capabilities().await?,
-            last_seen: std::time::SystemTime::now(),
+            version: self.registry_version.load(Ordering::SeqCst),
         };
 
         Ok(node_info)
@@ -1573,91 +1682,7 @@ impl Node {
 
         Ok(())
     }
-
-    // async fn subscribe(
-    //     &self,
-    //     topic: impl Into<String>,
-    //     callback: Box<
-    //         dyn Fn(
-    //                 Arc<EventContext>,
-    //                 ArcValueType,
-    //             ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
-    //             + Send
-    //             + Sync,
-    //     >,
-    // ) -> Result<String> {
-    //     let topic_string = topic.into();
-    //     self.logger
-    //         .debug(format!("Subscribing to topic: {}", topic_string));
-
-    //     // Convert topic String to TopicPath and callback Box to Arc
-    //     let topic_path = TopicPath::new(&topic_string, &self.network_id)
-    //         .map_err(|e| anyhow!("Invalid topic string for subscribe: {}", e))?;
-        
-    //     let metadata = EventMetadata{path:topic_path.as_str().to_string(), description: "".to_string(), data_schema: None};
-        
-    //     self.service_registry
-    //         .register_local_event_subscription(&topic_path, callback.into(), Some(metadata))
-    //         .await
-    // }
-
-    // async fn subscribe_with_options(
-    //     &self,
-    //     topic: impl Into<String>,
-    //     callback: Box<
-    //         dyn Fn(
-    //                 Arc<EventContext>,
-    //                 ArcValueType,
-    //             ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
-    //             + Send
-    //             + Sync,
-    //     >,
-    //     options: SubscriptionOptions,
-    // ) -> Result<String> {
-    //     let topic_string = topic.into();
-    //     self.logger.debug(format!(
-    //         "Subscribing to topic with options: {}",
-    //         topic_string
-    //     ));
-    //     // Convert topic String to TopicPath
-    //     let topic_path = TopicPath::new(&topic_string, &self.network_id)
-    //         .map_err(|e| anyhow!("Invalid topic string for subscribe_with_options: {}", e))?;
-        
-    //     let metadata = EventMetadata{path:topic_path.as_str().to_string(), description: "".to_string(), data_schema: None};
-        
-        
-    //     self.service_registry
-    //         .register_local_event_subscription(&topic_path, callback.into(), Some(metadata))
-    //         .await
-    // }
-
-    // async fn unsubscribe(&self, subscription_id: Option<&str>) -> Result<()> {
-        // let topic_string = topic.into();
-    //     if let Some(id) = subscription_id {
-    //         self.logger
-    //             .debug(format!("Unsubscribing from  with ID: {}", id));
-    //         // Directly forward to service registry's method
-    //         let registry = self.service_registry.clone();
-    //         match registry.unsubscribe_local(id).await {
-    //             Ok(_) => {
-    //                 self.logger.debug(format!(
-    //                     "Successfully unsubscribed locally from   id {}",
-    //                     id
-    //                 ));
-    //                 Ok(())
-    //             }
-    //             Err(e) => {
-    //                 self.logger.error(format!(
-    //                     "Failed to unsubscribe locally from  with id {}: {}",
-    //                     id, e
-    //                 ));
-    //                 Err(anyhow!("Failed to unsubscribe locally: {}", e))
-    //             }
-    //         }
-    //     } else {
-    //         Err(anyhow!("Subscription ID is required"))
-    //     }
-    // }
+ 
 }
 
 #[async_trait]
@@ -1697,9 +1722,17 @@ impl NodeDelegate for Node {
 
         let metadata = EventMetadata{path:topic_path.as_str().to_string(), description: "".to_string(), data_schema: None};
 
-        self.service_registry
+        let subcription = self.service_registry
             .register_local_event_subscription( &topic_path, callback.into(), Some(metadata))
-            .await
+            .await?;
+
+        //if started... need to increment  -> registry_version
+        if self.running.load(Ordering::SeqCst) {
+            self.registry_version.fetch_add(1, Ordering::SeqCst);
+            self.notify_node_change().await;
+        }
+
+        Ok(subcription)
     }
 
     async fn subscribe_with_options(
@@ -1721,9 +1754,17 @@ impl NodeDelegate for Node {
 
         let metadata = EventMetadata{path:topic_path.as_str().to_string(), description: "".to_string(), data_schema: None};
 
-        self.service_registry
+        let subcription = self.service_registry
             .register_local_event_subscription( &topic_path, callback.into(), Some(metadata))
-            .await
+            .await?;
+
+        //if started... need to increment  -> registry_version
+        if self.running.load(Ordering::SeqCst) {
+            self.registry_version.fetch_add(1, Ordering::SeqCst);
+            self.notify_node_change().await;
+        }
+
+        Ok(subcription)
     }
 
     async fn unsubscribe(&self, subscription_id: Option<&str>) -> Result<()> {
@@ -1738,16 +1779,21 @@ impl NodeDelegate for Node {
                         "Successfully unsubscribed locally from  with id {}",
                         id
                     ));
-                    Ok(())
                 }
                 Err(e) => {
                     self.logger.error(format!(
                         "Failed to unsubscribe locally from  with id {}: {}",
                         id, e
                     ));
-                    Err(anyhow!("Failed to unsubscribe locally: {}", e))
+                    return Err(anyhow!("Failed to unsubscribe locally: {}", e))
                 }
             }
+            //if started... need to increment  -> registry_version
+            if self.running.load(Ordering::SeqCst) {
+                self.registry_version.fetch_add(1, Ordering::SeqCst);
+                self.notify_node_change().await;
+            }
+            Ok(())
         } else {
             Err(anyhow!("Subscription ID is required"))
         }
@@ -1816,24 +1862,36 @@ impl RegistryDelegate for Node {
         &self,
         topic_path: &TopicPath,
         handler: ActionHandler,
-        remote_service: Arc<RemoteService>,
     ) -> Result<()> {
         // Delegate to the service registry
         self.service_registry
-            .register_remote_action_handler(topic_path, handler, remote_service)
+            .register_remote_action_handler(topic_path, handler)
+            .await
+    }
+
+    /// Remove a remote action handler
+    async fn remove_remote_action_handler(&self, topic_path: &TopicPath) -> Result<()> {
+        // Delegate to the service registry
+        self.service_registry
+            .remove_remote_action_handler(topic_path)
             .await
     }
 } 
 
 // Implement Clone for Node
 impl Clone for Node {
+    // The debounce_notify_task is NOT cloned (new Arc/Mutex/None) because debounce is per-instance, not shared.
+    // This is intentional: cloned nodes start with no pending debounce.
+
     fn clone(&self) -> Self {
         Self {
+            debounce_notify_task: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             network_id: self.network_id.clone(),
             network_ids: self.network_ids.clone(),
             peer_id: self.peer_id.clone(),
             config: self.config.clone(),
             service_registry: self.service_registry.clone(),
+            known_peers: self.known_peers.clone(),
             logger: self.logger.clone(),
             running: AtomicBool::new(self.running.load(Ordering::SeqCst)),
             supports_networking: self.supports_networking,
@@ -1842,6 +1900,7 @@ impl Clone for Node {
             load_balancer: self.load_balancer.clone(), 
             pending_requests: self.pending_requests.clone(),
             serializer: self.serializer.clone(),
+            registry_version: self.registry_version.clone(),
         }
     }
 }

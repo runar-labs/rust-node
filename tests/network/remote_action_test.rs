@@ -49,7 +49,8 @@ async fn test_remote_action_call() -> Result<()> {
         .with_certificate_verifier(Arc::new(SkipServerVerification {}))
         .with_keep_alive_interval(Duration::from_secs(1))
         .with_connection_idle_timeout(Duration::from_secs(60))
-        .with_stream_idle_timeout(Duration::from_secs(30));
+        .with_stream_idle_timeout(Duration::from_secs(30))
+        .with_quinn_log_level(log::LevelFilter::Warn); // Reduce noisy Quinn connection logs
 
     // Create node configurations with network enabled
     let node1_config = NodeConfig::new("node1", "test")
@@ -73,7 +74,8 @@ async fn test_remote_action_call() -> Result<()> {
         .with_certificate_verifier(Arc::new(SkipServerVerification {}))
         .with_keep_alive_interval(Duration::from_secs(1))
         .with_connection_idle_timeout(Duration::from_secs(60))
-        .with_stream_idle_timeout(Duration::from_secs(30));
+        .with_stream_idle_timeout(Duration::from_secs(30))
+        .with_quinn_log_level(log::LevelFilter::Warn); // Reduce noisy Quinn connection logs
 
 
     let node2_config = NodeConfig::new("node2", "test")
@@ -103,7 +105,7 @@ async fn test_remote_action_call() -> Result<()> {
 
     // Wait for discovery and connection to happen (simple sleep)
     logger.info("Waiting for nodes to discover each other...");
-    sleep(Duration::from_secs(5)).await;
+    sleep(Duration::from_secs(3)).await;
 
     // Test calling math service1 (on node1) from node2
     logger.info("Testing remote action call from node2 to node1...");
@@ -134,6 +136,29 @@ async fn test_remote_action_call() -> Result<()> {
         let result: f64 = result_value.as_type()?;
         assert_eq!(result, 28.0);
         logger.info(format!("Multiply operation succeeded: 4 * 7 = {}", result));
+    } else {
+        return Err(anyhow::anyhow!("Unexpected response type: {:?}", response.data));
+    }
+
+    // add a new service to node1 and test remote call
+    let new_service = MathService::new("math3", "math3");
+    node1.add_service(new_service).await?;
+
+    //wait over 3 seconds (deboiunbce is 2 seconds)
+    sleep(Duration::from_secs(3)).await;
+
+    // Test calling math service3 (on node1) from node2
+    logger.info("Testing remote action call from node2 to node1...");
+    let add_params = ArcValueType::new_map(hmap! {
+        "a" => 5.0,
+        "b" => 3.0
+    });
+
+    let response = node2.request("math3/add", add_params).await?;
+    if let Some(mut result_value) = response.data {
+        let result: f64 = result_value.as_type()?;
+        assert_eq!(result, 8.0);
+        logger.info(format!("Add operation succeeded: 5 + 3 = {}", result));
     } else {
         return Err(anyhow::anyhow!("Unexpected response type: {:?}", response.data));
     }

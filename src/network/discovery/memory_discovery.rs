@@ -116,22 +116,22 @@ impl MemoryDiscovery {
         let mut nodes_map = nodes.write().unwrap();
 
         // Collect keys of stale nodes first to avoid borrowing issues
-        let stale_keys: Vec<String> = nodes_map
-            .iter()
-            .filter_map(|(key, info)| {
-                info.last_seen
-                    .elapsed()
-                    .ok()
-                    .filter(|elapsed| *elapsed > ttl)
-                    .map(|_| key.clone())
-            })
-            .collect();
+        // let stale_keys: Vec<String> = nodes_map
+        //     .iter()
+        //     .filter_map(|(key, info)| {
+        //         info.version
+        //             .elapsed()
+        //             .ok()
+        //             .filter(|elapsed| *elapsed > ttl)
+        //             .map(|_| key.clone())
+        //     })
+        //     .collect();
 
-        // Remove stale nodes
-        for key in stale_keys {
-            logger.debug(format!("Removing stale node: {}", key));
-            nodes_map.remove(&key);
-        }
+        // // Remove stale nodes
+        // for key in stale_keys {
+        //     logger.debug(format!("Removing stale node: {}", key));
+        //     nodes_map.remove(&key);
+        // }
     }
 
     /// Adds a node to the discovery registry.
@@ -285,7 +285,7 @@ mod tests {
             network_ids: vec!["net1".to_string()],
             addresses: vec!["127.0.0.1:8000".to_string()],
             services: vec![],
-            last_seen: SystemTime::now(),
+            version: 0,
         };
         discovery.set_local_node(local_node);
 
@@ -295,7 +295,7 @@ mod tests {
             network_ids: vec!["net1".to_string()], // Added network_ids
             addresses: vec!["addr1".to_string()],
             services: vec![],
-            last_seen: SystemTime::now(),
+            version:0,
         };
         // discovery.register_node(node_info_1).await.unwrap();
 

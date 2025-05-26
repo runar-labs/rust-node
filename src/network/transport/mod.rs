@@ -270,6 +270,9 @@ pub trait NetworkTransport: Send + Sync {
     
     /// Get the local address this transport is bound to as a string
     fn get_local_address(&self) -> String;
+
+    /// Update the list of connected peers with the latest node info
+    async fn update_peers(&self, node_info: NodeInfo) -> Result<(), NetworkError>;
     
     // /// Register a message handler for incoming messages
     // async fn register_message_handler(
