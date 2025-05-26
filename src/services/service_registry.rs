@@ -20,21 +20,17 @@
 // Request routing and handling is also the Node's responsibility.
 
 use anyhow::{anyhow, Result};
-use log::debug;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap};
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::network::transport::PeerId;
 use crate::routing::{PathTrie, TopicPath};
-use std::str::FromStr;
 use crate::services::abstract_service::{AbstractService, ServiceState};
 use runar_common::types::schemas::{ActionMetadata, EventMetadata, ServiceMetadata};
 use crate::services::{
-    ActionHandler, EventContext, RegistryDelegate, RemoteService, ServiceResponse,
-    SubscriptionOptions,
+    ActionHandler, EventContext, RemoteService, ServiceResponse,
 };
 use runar_common::logging::Logger;
 use runar_common::types::ArcValueType;
@@ -135,37 +131,34 @@ impl std::fmt::Debug for ServiceEntry {
 pub struct ServiceRegistry {
     /// Local action handlers organized by path (using PathTrie instead of HashMap)
     /// Store both the handler and the original registration topic path for parameter extraction
-    local_action_handlers: RwLock<PathTrie<(ActionHandler, TopicPath, Option<ActionMetadata>)>>,
+    local_action_handlers: Arc<RwLock<PathTrie<(ActionHandler, TopicPath, Option<ActionMetadata>)>>>,
 
     //reverse index where we store the events that a service listens to
-    local_events_by_service: RwLock<PathTrie<Vec<EventMetadata>>>,
+    local_events_by_service: Arc<RwLock<PathTrie<Vec<EventMetadata>>>>,
 
     /// Remote action handlers organized by path (using PathTrie instead of HashMap)
-    remote_action_handlers: RwLock<PathTrie<Vec<ActionHandler>>>,
+    remote_action_handlers: Arc<RwLock<PathTrie<Vec<ActionHandler>>>>,
 
     /// Local event subscriptions (using PathTrie instead of WildcardSubscriptionRegistry)
-    local_event_subscriptions: RwLock<PathTrie<Vec<(String, EventCallback, Option<EventMetadata>)>>>,
+    local_event_subscriptions: Arc<RwLock<PathTrie<Vec<(String, EventCallback, Option<EventMetadata>)>>>>,
 
     /// Remote event subscriptions (using PathTrie instead of WildcardSubscriptionRegistry)
-    remote_event_subscriptions: RwLock<PathTrie<Vec<(String, EventCallback)>>>,
+    remote_event_subscriptions: Arc<RwLock<PathTrie<Vec<(String, EventCallback)>>>>,
 
     /// Map subscription IDs back to TopicPath for efficient unsubscription
     /// (Single HashMap for both local and remote subscriptions)
-    subscription_id_to_topic_path: RwLock<HashMap<String, TopicPath>>,
+    subscription_id_to_topic_path: Arc<RwLock<HashMap<String, TopicPath>>>,
 
     /// Map subscription IDs back to the service TopicPath for efficient unsubscription
-    subscription_id_to_service_topic_path: RwLock<HashMap<String, TopicPath>>,
+    subscription_id_to_service_topic_path: Arc<RwLock<HashMap<String, TopicPath>>>,
 
     /// Local services registry (using PathTrie instead of HashMap)
-    local_services: RwLock<PathTrie<Arc<ServiceEntry>>>,
+    local_services: Arc<RwLock<PathTrie<Arc<ServiceEntry>>>>,
 
-    local_services_list: RwLock<HashMap<TopicPath, Arc<ServiceEntry>>>,
+    local_services_list: Arc<RwLock<HashMap<TopicPath, Arc<ServiceEntry>>>>,
     
     /// Remote services registry (using PathTrie instead of HashMap)
-    remote_services: RwLock<PathTrie<Vec<Arc<RemoteService>>>>,
-
-    /// Remote services registry indexed by peer ID
-    remote_services_by_peer: RwLock<HashMap<PeerId, HashSet<String>>>,
+    remote_services: Arc<RwLock<PathTrie<Arc<RemoteService>>>>,
 
     /// Service lifecycle states - moved from Node
     service_states_by_service_path: Arc<RwLock<HashMap<String, ServiceState>>>,
@@ -176,25 +169,18 @@ pub struct ServiceRegistry {
 
 impl Clone for ServiceRegistry {
     fn clone(&self) -> Self {
-        // Note: We create new RwLocks with new PathTrie inside
-        // WARNING: This implementation CREATES EMPTY REGISTRY MAPS
-        // This means that any handlers registered on the original registry
-        // will NOT be available in the cloned registry
-        debug!("WARNING: ServiceRegistry clone was called - creating empty registry!");
-
         ServiceRegistry {
-            local_action_handlers: RwLock::new(PathTrie::new()),
-            local_events_by_service: RwLock::new(PathTrie::new()),
-            remote_action_handlers: RwLock::new(PathTrie::new()),
-            local_event_subscriptions: RwLock::new(PathTrie::new()),
-            remote_event_subscriptions: RwLock::new(PathTrie::new()),
-            subscription_id_to_topic_path: RwLock::new(HashMap::new()),
-            subscription_id_to_service_topic_path: RwLock::new(HashMap::new()),
-            local_services: RwLock::new(PathTrie::new()),
-            local_services_list: RwLock::new(HashMap::new()),
-            remote_services: RwLock::new(PathTrie::new()),
-            remote_services_by_peer: RwLock::new(HashMap::new()),
-            service_states_by_service_path: Arc::new(RwLock::new(HashMap::new())),
+            local_action_handlers:  self.local_action_handlers.clone(),
+            local_events_by_service: self.local_events_by_service.clone(),
+            remote_action_handlers: self.remote_action_handlers.clone(),
+            local_event_subscriptions: self.local_event_subscriptions.clone(),
+            remote_event_subscriptions: self.remote_event_subscriptions.clone(),
+            subscription_id_to_topic_path: self.subscription_id_to_topic_path.clone(),
+            subscription_id_to_service_topic_path: self.subscription_id_to_service_topic_path.clone(),
+            local_services: self.local_services.clone(),
+            local_services_list: self.local_services_list.clone(),
+            remote_services: self.remote_services.clone(),
+            service_states_by_service_path: self.service_states_by_service_path.clone(),
             logger: self.logger.clone(),
         }
     }
@@ -213,17 +199,16 @@ impl ServiceRegistry {
     /// component (typically the Node). This ensures proper logger hierarchy.
     pub fn new(logger: Arc<Logger>) -> Self {
         Self {
-            local_action_handlers: RwLock::new(PathTrie::new()),
-            local_events_by_service: RwLock::new(PathTrie::new()),
-            remote_action_handlers: RwLock::new(PathTrie::new()),
-            local_event_subscriptions: RwLock::new(PathTrie::new()),
-            remote_event_subscriptions: RwLock::new(PathTrie::new()),
-            subscription_id_to_topic_path: RwLock::new(HashMap::new()),
-            subscription_id_to_service_topic_path: RwLock::new(HashMap::new()),
-            local_services: RwLock::new(PathTrie::new()),
-            local_services_list: RwLock::new(HashMap::new()),
-            remote_services: RwLock::new(PathTrie::new()),
-            remote_services_by_peer: RwLock::new(HashMap::new()),
+            local_action_handlers:  Arc::new(RwLock::new(PathTrie::new())),
+            local_events_by_service: Arc::new(RwLock::new(PathTrie::new())),
+            remote_action_handlers: Arc::new(RwLock::new(PathTrie::new())),
+            local_event_subscriptions: Arc::new(RwLock::new(PathTrie::new())),
+            remote_event_subscriptions: Arc::new(RwLock::new(PathTrie::new())),
+            subscription_id_to_topic_path: Arc::new(RwLock::new(HashMap::new())),
+            subscription_id_to_service_topic_path: Arc::new(RwLock::new(HashMap::new())),
+            local_services: Arc::new(RwLock::new(PathTrie::new())),
+            local_services_list: Arc::new(RwLock::new(HashMap::new())),
+            remote_services: Arc::new(RwLock::new(PathTrie::new())),
             service_states_by_service_path: Arc::new(RwLock::new(HashMap::new())),
             logger,
         }
@@ -253,7 +238,7 @@ impl ServiceRegistry {
         self.local_services
             .write()
             .await
-            .add_content(service_topic.clone(), service);
+            .set_value(service_topic.clone(), service);
 
         self.update_service_state(&service_topic, service_entry.service_state)
             .await?;
@@ -263,6 +248,43 @@ impl ServiceRegistry {
             .await
             .insert(service_topic, service_entry.clone());
 
+        Ok(())
+    }
+
+    pub async fn remove_remote_service(&self, service_topic: &TopicPath) -> Result<()> {
+
+        //get the service.. so we can call .stop() on it
+        let services = self.remote_services
+            .read()
+            .await
+            .find(service_topic);
+
+        if services.is_empty() {
+            return Err(anyhow!("Service not found for topic: {}", service_topic));
+        }
+
+        let registry_delegate = Arc::new(self.clone());
+        for service in services {
+
+            let context = super::RemoteLifecycleContext::new(&service.service_topic, self.logger.clone())
+                .with_registry_delegate(registry_delegate.clone());
+
+            // Initialize the service - this triggers handler registration via the context
+            if let Err(e) = service.stop(context).await {
+                self.logger.error(format!(
+                    "Failed to stop remote service '{}' error: {}",
+                    service.path(),
+                    e
+                ));
+            }
+        }
+
+        //this function will do the oposite of the register_remote_service function
+        self.remote_services
+            .write()
+            .await
+            .remove_values(service_topic);
+        
         Ok(())
     }
 
@@ -279,13 +301,6 @@ impl ServiceRegistry {
             service_path, peer_id
         ));
 
-        // Add to peer services registry indexed by peer ID
-        {
-            let mut peer_services = self.remote_services_by_peer.write().await;
-            let services = peer_services.entry(peer_id).or_insert_with(HashSet::new);
-            services.insert(service_path);
-        }
-
         // Add to remote services using PathTrie
         {
             let mut services = self.remote_services.write().await;
@@ -293,24 +308,16 @@ impl ServiceRegistry {
 
             if matches.is_empty() {
                 // No existing services for this topic
-                services.add_content(service_topic, vec![service]);
+                services.set_value(service_topic, service);
             } else {
-                // Get the existing services for this topic
-                let mut existing_services = matches[0].content.clone();
-
-                // Check if this service is already registered
-                if !existing_services.iter().any(|s| s.path() == service.path()) {
-                    existing_services.push(service);
-
-                    // Update the services in the trie
-                    services.add_content(service_topic, existing_services);
-                }
+                //return an error.. just one service shuold exist for a given topic
+                return Err(anyhow!("Service already exists for topic: {}", service_topic));
             }
         }
 
         Ok(())
     }
-
+ 
     /// Register a local action handler
     ///
     /// INTENTION: Register a handler for a specific action path that will be executed locally.
@@ -329,7 +336,25 @@ impl ServiceRegistry {
         self.local_action_handlers
             .write()
             .await
-            .add_content(topic_path.clone(), (handler, topic_path.clone(), metadata));
+            .set_value(topic_path.clone(), (handler, topic_path.clone(), metadata));
+
+        Ok(())
+    }
+
+    pub async fn remove_remote_action_handler(
+        &self,
+        topic_path: &TopicPath,
+    ) -> Result<()> {
+        self.logger.debug(format!(
+            "Removing remote action handler for: {}",
+            topic_path
+        ));
+
+        // Remove from remote action handlers trie
+        self.remote_action_handlers
+            .write()
+            .await
+            .remove_values(topic_path);
 
         Ok(())
     }
@@ -341,7 +366,6 @@ impl ServiceRegistry {
         &self,
         topic_path: &TopicPath,
         handler: ActionHandler,
-        remote_service: Arc<RemoteService>,
     ) -> Result<()> {
         self.logger.debug(format!(
             "Registering remote action handler for: {}",
@@ -355,45 +379,16 @@ impl ServiceRegistry {
 
             if matches.is_empty() {
                 // No handlers yet for this path
-                handlers_trie.add_content(topic_path.clone(), vec![handler.clone()]);
+                handlers_trie.set_value(topic_path.clone(), vec![handler.clone()]);
             } else {
                 // Get existing handlers and add the new one
                 let mut existing_handlers = matches[0].content.clone();
                 existing_handlers.push(handler.clone());
 
                 // Update the handlers in the trie
-                handlers_trie.add_content(topic_path.clone(), existing_handlers);
+                handlers_trie.set_value(topic_path.clone(), existing_handlers);
             }
-        }
-
-        // Store the remote service reference if needed
-        {
-            let service_topic_path = TopicPath::new(
-                &topic_path.service_path(),
-                &topic_path.network_id()
-            ).map_err(|e| anyhow::anyhow!("Failed to create service topic path: {}", e))?;
-            let mut services = self.remote_services.write().await;
-            let matches = services.find_matches(&service_topic_path);
-
-            if matches.is_empty() {
-                // No existing services for this topic
-                services.add_content(service_topic_path.clone(), vec![remote_service]);
-            } else {
-                // Get the existing services for this topic
-                let mut existing_services = matches[0].content.clone();
-
-                // Check if this service is already registered
-                if !existing_services
-                    .iter()
-                    .any(|s| s.peer_id() == remote_service.peer_id())
-                {
-                    existing_services.push(remote_service);
-
-                    // Update the services in the trie
-                    services.add_content(service_topic_path.clone(), existing_services);
-                }
-            }
-        }
+        } 
 
         Ok(())
     }
@@ -474,7 +469,7 @@ impl ServiceRegistry {
 
             if matches.is_empty() {
                 // No existing subscriptions for this topic
-                subscriptions.add_content(
+                subscriptions.set_value(
                     topic_path.clone(),
                     vec![(subscription_id.clone(), callback.clone(), metadata.clone())],
                 );
@@ -485,7 +480,7 @@ impl ServiceRegistry {
 
                 // First remove the old handlers, then add the updated ones
                 subscriptions.remove_handler(topic_path, |_| true);
-                subscriptions.add_content(topic_path.clone(), updated_subscriptions);
+                subscriptions.set_value(topic_path.clone(), updated_subscriptions);
             }
         }
 
@@ -510,7 +505,7 @@ impl ServiceRegistry {
             if matches.is_empty() {
                 // No existing events for this service
                 //add a vec with one item -> topic_path indexed by the source_service_path
-                events.add_content(
+                events.set_value(
                     service_topic.clone(),
                     vec![metadata],
                 );
@@ -521,7 +516,7 @@ impl ServiceRegistry {
 
                 // First remove the old handlers, then add the updated ones
                 events.remove_handler(&service_topic, |_| true);
-                events.add_content(service_topic.clone(), updated_events);
+                events.set_value(service_topic.clone(), updated_events);
             }
         }
 
@@ -552,7 +547,7 @@ impl ServiceRegistry {
 
             if matches.is_empty() {
                 // No existing subscriptions for this topic
-                subscriptions.add_content(
+                subscriptions.set_value(
                     topic_path.clone(),
                     vec![(subscription_id.clone(), callback.clone())],
                 );
@@ -563,7 +558,7 @@ impl ServiceRegistry {
 
                 // First remove the old handlers, then add the updated ones
                 subscriptions.remove_handler(topic_path, |_| true);
-                subscriptions.add_content(topic_path.clone(), updated_subscriptions);
+                subscriptions.set_value(topic_path.clone(), updated_subscriptions);
             }
         }
 
@@ -750,7 +745,7 @@ impl ServiceRegistry {
 
                 if !updated_subscriptions.is_empty() {
                     // If we still have subscriptions for this topic, add them back
-                    subscriptions.add_content(topic_path.clone(), updated_subscriptions);
+                    subscriptions.set_value(topic_path.clone(), updated_subscriptions);
                 }
 
                 if removed {
@@ -797,7 +792,7 @@ impl ServiceRegistry {
                             }
                             events.remove_handler(&service_topic_path, |_| true);
                             if !updated_list.is_empty() {
-                                events.add_content(service_topic_path.clone(), updated_list);
+                                events.set_value(service_topic_path.clone(), updated_list);
                             }
                         }
                     }
@@ -873,7 +868,7 @@ impl ServiceRegistry {
 
                 if !updated_subscriptions.is_empty() {
                     // If we still have subscriptions for this topic, add them back
-                    subscriptions.add_content(topic_path.clone(), updated_subscriptions);
+                    subscriptions.set_value(topic_path.clone(), updated_subscriptions);
                 }
 
                 if removed {
@@ -1049,10 +1044,14 @@ impl crate::services::RegistryDelegate for ServiceRegistry {
         &self,
         topic_path: &TopicPath,
         handler: ActionHandler,
-        remote_service: Arc<RemoteService>,
     ) -> Result<()> {
         // This is just a proxy to the instance method
-        self.register_remote_action_handler(topic_path, handler, remote_service)
+        self.register_remote_action_handler(topic_path, handler)
+            .await
+    }
+
+    async fn remove_remote_action_handler(&self, topic_path: &TopicPath) -> Result<()> {
+        self.remove_remote_action_handler(topic_path)
             .await
     }
 }

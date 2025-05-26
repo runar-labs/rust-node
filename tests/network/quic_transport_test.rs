@@ -88,7 +88,7 @@ async fn test_quic_transport_connection_end_to_end() {
         network_ids: vec!["default".to_string()],  // Use "default" to match what QuicTransport uses internally
         addresses: vec![node_a_addr.to_string()],
         services: capabilities.clone(),
-        last_seen: std::time::SystemTime::now(),
+        version: 0,
     };
     
     let node_b_info = NodeInfo {
@@ -96,7 +96,7 @@ async fn test_quic_transport_connection_end_to_end() {
         network_ids: vec!["default".to_string()],  // Use "default" to match what QuicTransport uses internally
         addresses: vec![node_b_addr.to_string()],
         services: capabilities.clone(),
-        last_seen: std::time::SystemTime::now(),
+        version: 0,
     };
     
     // Log test setup information
@@ -222,12 +222,9 @@ async fn test_quic_transport_connection_end_to_end() {
                             assert!(peer_node_info.addresses.contains(&expected_addr), 
                                   "Addresses in received NodeInfo doesn't contain expected address: {}", expected_addr);
                             
-                            // Validate last_seen is recent (within the last minute)
-                            let now = std::time::SystemTime::now();
-                            let one_minute_ago = now.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() - 60;
-                            let peer_last_seen = peer_node_info.last_seen.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-                            assert!(peer_last_seen >= one_minute_ago, 
-                                  "Last seen timestamp is too old: {:?}", peer_node_info.last_seen);
+                             // Validate version
+                             assert!(peer_node_info.version == 0, 
+                                "Version is not 0: {:?}", peer_node_info.version);
                             
                             println!("Successfully received and validated peer node info for B");
                         },
@@ -263,12 +260,9 @@ async fn test_quic_transport_connection_end_to_end() {
                             assert!(peer_node_info.addresses.contains(&expected_addr), 
                                   "Addresses in received NodeInfo doesn't contain expected address: {}", expected_addr);
                             
-                            // Validate last_seen is recent (within the last minute)
-                            let now = std::time::SystemTime::now();
-                            let one_minute_ago = now.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() - 60;
-                            let peer_last_seen = peer_node_info.last_seen.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-                            assert!(peer_last_seen >= one_minute_ago, 
-                                  "Last seen timestamp is too old: {:?}", peer_node_info.last_seen);
+                            // Validate version
+                             assert!(peer_node_info.version == 0, 
+                                  "Version is not 0: {:?}", peer_node_info.version);
                             
                             println!("Successfully received and validated peer node info for A");
                         },

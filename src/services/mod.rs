@@ -762,8 +762,9 @@ pub trait RegistryDelegate: Send + Sync {
         &self,
         topic_path: &TopicPath,
         handler: ActionHandler,
-        remote_service: Arc<RemoteService>,
     ) -> Result<()>;
+
+    async fn remove_remote_action_handler(&self, topic_path: &TopicPath) -> Result<()>;
 }
 
 /// Remote service lifecycle context
@@ -838,6 +839,17 @@ impl RemoteLifecycleContext {
         self.logger.error(message);
     }
 
+    pub async fn remove_remote_action_handler(&self, topic_path: &TopicPath) -> Result<()> {
+        // Get the registry delegate
+        let delegate = match &self.registry_delegate {
+            Some(d) => d,
+            None => return Err(anyhow!("No registry delegate available")),
+        };
+
+        // Call the delegate to remove the remote action handler
+        delegate.remove_remote_action_handler(topic_path).await
+    }
+
     /// Register a remote action handler
     ///
     /// INTENTION: Allow a remote service to register a handler function for a specific action.
@@ -845,7 +857,6 @@ impl RemoteLifecycleContext {
         &self,
         topic_path: &TopicPath,
         handler: ActionHandler,
-        remote_service: Arc<RemoteService>,
     ) -> Result<()> {
         // Get the registry delegate
         let delegate = match &self.registry_delegate {
@@ -855,7 +866,7 @@ impl RemoteLifecycleContext {
 
         // Call the delegate to register the remote action handler
         delegate
-            .register_remote_action_handler(topic_path, handler, remote_service)
+            .register_remote_action_handler(topic_path, handler)
             .await
     }
 }

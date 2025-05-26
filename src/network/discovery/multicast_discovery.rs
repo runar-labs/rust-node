@@ -401,6 +401,13 @@ impl MulticastDiscovery {
                 
                 
                 let peer_public_key = discovery_msg.public_key.clone();
+                
+                // Check if this is a new peer before responding
+                let is_new_peer = {
+                    let nodes_read = nodes.read().await;
+                    !nodes_read.contains_key(&peer_public_key)
+                };
+                
                 // Store the peer info - clone peer_public_key before using it outside this block
                 {
                     let mut nodes_write = nodes.write().await; 
@@ -416,22 +423,26 @@ impl MulticastDiscovery {
                     }
                 }
                 
-                // Automatically respond with our own info to facilitate bidirectional discovery
-                // Build a discovery message with our own info
-                let local_info_msg = PeerInfo::new(
-                    local_peer_public_key,
-                    local_addresses
-                );
+                // Only respond if this is a new peer we haven't seen before
+                if is_new_peer {
+                    // Build a discovery message with our own info
+                    let local_info_msg = PeerInfo::new(
+                        local_peer_public_key,
+                        local_addresses
+                    );
 
-                logger.debug(format!("Auto-responding to announcement with our own info: {}", local_info_msg.public_key));
-                let response_msg = MulticastMessage::Announce(local_info_msg);
-                if let Ok(data) = bincode::serialize(&response_msg) {
-                    // Small delay to avoid collision
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    // Respond directly to the sender
-                    if let Err(e) = socket.send_to(&data, src).await {
-                        logger.error(format!("Failed to send auto-response to {}: {}", src, e));
+                    logger.debug(format!("Auto-responding to new peer announcement with our own info: {}", local_info_msg.public_key));
+                    let response_msg = MulticastMessage::Announce(local_info_msg);
+                    if let Ok(data) = bincode::serialize(&response_msg) {
+                        // Small delay to avoid collision
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        // Respond directly to the sender
+                        if let Err(e) = socket.send_to(&data, src).await {
+                            logger.error(format!("Failed to send auto-response to {}: {}", src, e));
+                        }
                     }
+                } else {
+                    logger.debug(format!("Skipping auto-response for already known peer: {}", peer_public_key));
                 }
                  
             }, 

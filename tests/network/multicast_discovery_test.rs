@@ -61,7 +61,7 @@ async fn create_test_discovery(network_id: &str, node_id: &str) -> Result<Multic
                 ],
             }
         ],
-        last_seen: SystemTime::now(),
+        version:0,
     };
     
     // Create the discovery instance with proper parameters
