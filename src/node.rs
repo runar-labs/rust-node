@@ -26,8 +26,10 @@ use crate::network::discovery::{
     DiscoveryOptions, MulticastDiscovery, NodeDiscovery, NodeInfo,
 };
 use crate::network::transport::{
-    NetworkMessage, NetworkMessagePayloadItem,
-    NetworkTransport, PeerId, QuicTransport,
+ 
+      NetworkMessage, NetworkMessagePayloadItem, 
+    NetworkTransport, PeerId, QuicTransport, QuicTransportOptions,
+ 
 };
 // Certificate and PrivateKey types are now imported via the cert_utils module
 use crate::network::network_config::{NetworkConfig, DiscoveryProviderConfig, TransportType};
@@ -43,8 +45,6 @@ use crate::services::{
     RemoteLifecycleContext, RequestContext, ServiceResponse, SubscriptionOptions,
 };
 use crate::TransportOptions;
-
-// LoadBalancingStrategy and RoundRobinLoadBalancer have been moved to services/load_balancing.rs
 
 /// Node Configuration
 ///
@@ -169,6 +169,8 @@ pub struct Node {
     /// Network transport for connecting to remote nodes
     pub(crate) network_transport: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>,
 
+    pub(crate) network_discovery_providers: Arc<RwLock<Option<Vec<Arc<dyn NodeDiscovery>>>>>,
+
     /// Load balancer for selecting remote handlers
     pub(crate) load_balancer: Arc<RwLock<dyn LoadBalancingStrategy>>,
 
@@ -291,6 +293,7 @@ impl Node {
             running: AtomicBool::new(false),
             supports_networking: networking_enabled,
             network_transport: Arc::new(RwLock::new(None)),
+            network_discovery_providers: Arc::new(RwLock::new(None)),
             load_balancer: Arc::new(RwLock::new(RoundRobinLoadBalancer::new())), 
             pending_requests: Arc::new(RwLock::new(HashMap::new())),
             serializer: Arc::new(RwLock::new(SerializerRegistry::with_defaults(serializer_logger))),
@@ -592,52 +595,51 @@ impl Node {
                 return Err(anyhow!("No discovery providers configured"));
             }
 
+            let node_arc = Arc::new(self.clone());
+            let mut discovery_providers: Vec<Arc<dyn NodeDiscovery>> = Vec::new();
             // Iterate through all discovery providers and initialize each one
             for provider_config in &network_config.discovery_providers {
                 // Create a discovery provider instance
                 let provider_type = format!("{:?}", provider_config);
 
-                match self
-                    .create_discovery_provider(provider_config, Some(discovery_options.clone()))
-                    .await
-                {
-                    Ok(discovery) => {
-                        // Configure discovery listener for this provider
-                        let node_clone = self.clone();
-                        let provider_type_clone = provider_type.clone();
+                // Create network transport using the factory pattern based on transport_type
+                // let node_identifier = self.peer_id.clone();
+                let discovery_provider = self.create_discovery_provider(provider_config, Some(discovery_options.clone())).await?;
 
-                        discovery
-                            .set_discovery_listener(Arc::new(move |peer_info| {
-                                let node = node_clone.clone();
-                                let provider_type_clone = provider_type_clone.clone();
-                                Box::pin(async move {
-                                    if let Err(e) = node.handle_discovered_node(peer_info).await {
-                                        node.logger.error(format!(
-                                            "Failed to handle node discovered by {} provider: {}",
-                                            provider_type_clone, e
-                                        ));
-                                    }
-                                })
-                            }))
-                            .await?;
+                // // Configure discovery listener for this provider
+                let node_arc = node_arc.clone();
+                let provider_type_clone = provider_type.clone();
 
-                        // Start announcing on this provider
-                        self.logger.info(format!(
-                            "Starting to announce on {:?} discovery provider",
-                            provider_type
-                        ));
-                        discovery.start_announcing().await?;
-                    }
-                    Err(e) => {
-                        // Log the error but continue with other providers
-                        self.logger.error(format!(
-                            "Failed to initialize {:?} discovery provider: {}",
-                            provider_type, e
-                        ));
-                        // Don't return immediately, try other providers
-                    }
-                }
+                discovery_provider
+                    .set_discovery_listener(Arc::new(move |peer_info| {
+                        let node_arc = node_arc.clone();
+                        let provider_type_clone = provider_type_clone.clone();
+                        Box::pin(async move {
+                            if let Err(e) = node_arc.handle_discovered_node(peer_info).await {
+                                node_arc.logger.error(format!(
+                                    "Failed to handle node discovered by {} provider: {}",
+                                    provider_type_clone, e
+                                ));
+                            }
+                        })
+                    }))
+                    .await?;
+
+                // Start announcing on this provider
+                self.logger.info(format!(
+                    "Starting to announce on {:?} discovery provider",
+                    provider_type
+                ));
+                discovery_provider.start_announcing().await?; 
+
+                discovery_providers.push(discovery_provider);
             }
+
+            // Store the transport
+            let mut discovery_guard = self.network_discovery_providers.write().await;
+            *discovery_guard = Some(discovery_providers);
+            //release lock
+            drop(discovery_guard);
         }
 
         self.logger.info("Networking started successfully");
@@ -701,7 +703,7 @@ impl Node {
         &self,
         provider_config: &DiscoveryProviderConfig,
         discovery_options: Option<DiscoveryOptions>,
-    ) -> Result<Box<dyn NodeDiscovery>> {
+    ) -> Result<Arc<dyn NodeDiscovery>> {
         let node_info = self.get_local_node_info().await?;
 
         match provider_config {
@@ -715,7 +717,7 @@ impl Node {
                     self.logger.with_component(Component::NetworkDiscovery),
                 )
                 .await?;
-                Ok(Box::new(discovery) as Box<dyn NodeDiscovery>)
+                Ok(Arc::new(discovery))
             }
             DiscoveryProviderConfig::Static(_options) => {
                 self.logger.info("Static discovery provider configured");
@@ -1304,7 +1306,7 @@ impl Node {
 
         // Broadcast to remote nodes if requested and network is available
         if options.broadcast && self.supports_networking {
-            if let Some(transport) = &*self.network_transport.read().await {
+            if let Some(_transport) = &*self.network_transport.read().await {
                 //TODO
                 // Log message since we can't implement send yet
                 self.logger
@@ -1517,7 +1519,7 @@ impl Node {
     /// Get a non-loopback IP address from the local network interfaces
     fn get_non_loopback_ip(&self) -> Result<String> {
         use socket2::{Domain, Socket, Type};
-        use std::net::{IpAddr, SocketAddr};
+        use std::net::{ SocketAddr};
 
         // Create a UDP socket
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, None)?;
@@ -1555,46 +1557,50 @@ impl Node {
         self.logger
             .info("Stopping discovery and transport services");
 
-        // Discovery would need to be shut down properly
+        // transport need to be shut down properly
         let transport_guard = self.network_transport.read().await;
-        if let Some(discovery_service) = transport_guard.as_ref() {
-            // The NetworkTransport trait doesn't have a shutdown method
-            // so we're commenting this out to avoid errors
-            // discovery.shutdown().await?;
-
-            // Instead, we'll just log that we would shut it down
-            self.logger.info("Would shut down discovery and transport");
+        if let Some(transport) = transport_guard.as_ref() {
+            transport.stop().await?;
         }
+
+        //discovery stop all =discovery providers
+        let discovery_guard = self.network_discovery_providers.read().await;
+        if let Some(discovery) = discovery_guard.as_ref() {
+            for provider in discovery {
+                provider.shutdown().await?;
+            }
+        }
+
 
         Ok(())
     }
 
-    async fn subscribe(
-        &self,
-        topic: impl Into<String>,
-        callback: Box<
-            dyn Fn(
-                    Arc<EventContext>,
-                    ArcValueType,
-                ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
-                + Send
-                + Sync,
-        >,
-    ) -> Result<String> {
-        let topic_string = topic.into();
-        self.logger
-            .debug(format!("Subscribing to topic: {}", topic_string));
+    // async fn subscribe(
+    //     &self,
+    //     topic: impl Into<String>,
+    //     callback: Box<
+    //         dyn Fn(
+    //                 Arc<EventContext>,
+    //                 ArcValueType,
+    //             ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
+    //             + Send
+    //             + Sync,
+    //     >,
+    // ) -> Result<String> {
+    //     let topic_string = topic.into();
+    //     self.logger
+    //         .debug(format!("Subscribing to topic: {}", topic_string));
 
-        // Convert topic String to TopicPath and callback Box to Arc
-        let topic_path = TopicPath::new(&topic_string, &self.network_id)
-            .map_err(|e| anyhow!("Invalid topic string for subscribe: {}", e))?;
+    //     // Convert topic String to TopicPath and callback Box to Arc
+    //     let topic_path = TopicPath::new(&topic_string, &self.network_id)
+    //         .map_err(|e| anyhow!("Invalid topic string for subscribe: {}", e))?;
         
-        let metadata = EventMetadata{path:topic_path.as_str().to_string(), description: "".to_string(), data_schema: None};
+    //     let metadata = EventMetadata{path:topic_path.as_str().to_string(), description: "".to_string(), data_schema: None};
         
-        self.service_registry
-            .register_local_event_subscription(&topic_path, callback.into(), Some(metadata))
-            .await
-    }
+    //     self.service_registry
+    //         .register_local_event_subscription(&topic_path, callback.into(), Some(metadata))
+    //         .await
+    // }
 
     // async fn subscribe_with_options(
     //     &self,
@@ -1833,6 +1839,7 @@ impl Clone for Node {
             running: AtomicBool::new(self.running.load(Ordering::SeqCst)),
             supports_networking: self.supports_networking,
             network_transport: self.network_transport.clone(),
+            network_discovery_providers: self.network_discovery_providers.clone(),
             load_balancer: self.load_balancer.clone(), 
             pending_requests: self.pending_requests.clone(),
             serializer: self.serializer.clone(),
