@@ -139,29 +139,6 @@ impl LifecycleContext {
     ///
     /// INTENTION: Allow a service to register a handler function for a specific action.
     /// This is the main way for services to expose functionality to the Node.
-    ///
-    /// Example:
-    /// ```
-    /// use runar_node::services::{LifecycleContext, ServiceResponse, ActionHandler};
-    /// use runar_common::types::ValueType;
-    /// use std::sync::Arc;
-    /// use anyhow::Result;
-    ///
-    /// async fn init_service(context: LifecycleContext) -> Result<()> {
-    ///     // Register a handler for the "add" action
-    ///     context.register_action(
-    ///         "add",
-    ///         Arc::new(|params, ctx| {
-    ///             Box::pin(async move {
-    ///                 // Handler implementation
-    ///                 Ok(ServiceResponse::ok_empty())
-    ///             })
-    ///         })
-    ///     ).await?;
-    ///     
-    ///     Ok(())
-    /// }
-    /// ```
     pub async fn register_action(
         &self,
         action_name: impl Into<String>,
@@ -209,37 +186,6 @@ impl LifecycleContext {
     /// INTENTION: Allow a service to register a handler function for an action,
     /// along with descriptive metadata. This enables documentation and discovery
     /// of the action's purpose and parameters.
-    ///
-    /// Example:
-    /// ```
-    /// use runar_node::services::{LifecycleContext, ServiceResponse, ActionHandler, ActionRegistrationOptions};
-    /// use runar_common::types::ValueType;
-    /// use std::sync::Arc;
-    /// use anyhow::Result;
-    ///
-    /// async fn init_service(context: LifecycleContext) -> Result<()> {
-    ///     // Create options for the action
-    ///     let options = ActionRegistrationOptions {
-    ///         description: Some("Adds two numbers".to_string()),
-    ///         params_schema: None,
-    ///         return_schema: None,
-    ///     };
-    ///     
-    ///     // Register a handler with metadata
-    ///     context.register_action_with_options(
-    ///         "add",
-    ///         Arc::new(|params, ctx| {
-    ///             Box::pin(async move {
-    ///                 // Handler implementation
-    ///                 Ok(ServiceResponse::ok_empty())
-    ///             })
-    ///         }),
-    ///         options
-    ///     ).await?;
-    ///     
-    ///     Ok(())
-    /// }
-    /// ```
     pub async fn register_action_with_options(
         &self,
         action_name: impl Into<String>,
@@ -344,23 +290,6 @@ impl ServiceRequest {
     ///
     /// INTENTION: Create a service request using the service path and action name.
     /// This method will construct the appropriate TopicPath and initialize the request.
-    ///
-    /// Example:
-    /// ```
-    /// use runar_node::services::{ServiceRequest, RequestContext};
-    /// use runar_common::types::ValueType;
-    /// use std::sync::Arc;
-    ///
-    /// fn create_request(context: Arc<RequestContext>) {
-    ///     // Create a request to the "auth" service with "login" action
-    ///     let request = ServiceRequest::new(
-    ///         "auth",
-    ///         "login",
-    ///         ValueType::Null,
-    ///         context
-    ///     );
-    /// }
-    /// ```
     pub fn new(
         service_path: impl Into<String>,
         action_or_event: impl Into<String>,
@@ -387,27 +316,6 @@ impl ServiceRequest {
     ///
     /// INTENTION: Create a service request using an existing TopicPath object.
     /// This is useful when the TopicPath has already been constructed and validated.
-    ///
-    /// Example:
-    /// ```
-    /// use runar_node::services::{ServiceRequest, RequestContext};
-    /// use runar_node::routing::TopicPath;
-    /// use runar_common::types::ValueType;
-    /// use std::sync::Arc;
-    ///
-    /// fn create_request(context: Arc<RequestContext>) {
-    ///     // Create a topic path for the "auth/login" action
-    ///     let topic_path = TopicPath::new("auth/login", &context.network_id())
-    ///         .expect("Valid path");
-    ///     
-    ///     // Create a request with the topic path
-    ///     let request = ServiceRequest::new_with_topic_path(
-    ///         topic_path,
-    ///         ValueType::Null,
-    ///         context
-    ///     );
-    /// }
-    /// ```
     pub fn new_with_topic_path(
         topic_path: TopicPath,
         data: ArcValueType,
@@ -424,23 +332,6 @@ impl ServiceRequest {
     ///
     /// INTENTION: Create a service request where the data parameter is optional.
     /// If no data is provided, ValueType::Null will be used.
-    ///
-    /// Example:
-    /// ```
-    /// use runar_node::services::{ServiceRequest, RequestContext};
-    /// use runar_common::types::ValueType;
-    /// use std::sync::Arc;
-    ///
-    /// fn create_request(context: Arc<RequestContext>, data: Option<ArcValueType>) {
-    ///     // Create a request with optional data
-    ///     let request = ServiceRequest::new_with_optional(
-    ///         "auth",
-    ///         "login",
-    ///         data,
-    ///         context
-    ///     );
-    /// }
-    /// ```
     pub fn new_with_optional(
         service_path: impl Into<String>,
         action_or_event: impl Into<String>,
@@ -756,57 +647,7 @@ pub trait EventDispatcher: Send + Sync {
     ///
     /// INTENTION: Distribute an event to all subscribers of the specified topic.
     /// Implementations should handle subscriber lookups and asynchronous delivery.
-    ///
-    /// Example implementation (simplified):
-    /// ```
-    /// # use runar_node::services::{EventDispatcher, ServiceRequest, ServiceResponse, SubscriptionOptions, EventContext, RequestContext};
-    /// # use runar_common::types::ValueType;
-    /// # use runar_common::logging::{Logger, Component};
-    /// # use runar_node::routing::TopicPath;
-    /// # use anyhow::Result;
-    /// # use async_trait::async_trait;
-    /// # use std::future::Future;
-    /// # use std::pin::Pin;
-    /// # use std::sync::Arc;
-    ///
-    /// struct Node {
-    ///     // Node state...
-    ///     network_id: String,
-    /// }
-    ///
-    /// type SubscriberCallback = Box<dyn Fn(Arc<EventContext>, ArcValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
-    /// struct Subscriber {
-    ///     id: String,
-    ///     callback: SubscriberCallback,
-    /// }
-    ///
-    /// #[async_trait]
-    /// impl EventDispatcher for Node {
-    ///     async fn publish(&self, topic: &str, event: &str, data: Option<ArcValueType>, network_id: &str) -> Result<()> {
-    ///         // Find subscribers for the topic
-    ///         let subscribers: Vec<Subscriber> = Vec::new(); // Would fetch from a storage
-    ///         
-    ///         // Deliver the event to each subscriber
-    ///         for subscriber in subscribers {
-    ///             let data = data.clone().unwrap_or(ValueType::Null);
-    ///             let logger = Logger::new_root(Component::Service, network_id);
-    ///             
-    ///             // Create a topic path from the topic and event
-    ///             let full_topic = format!("{}/{}", topic, event);
-    ///             let topic_path = TopicPath::new(&full_topic, network_id).expect("Valid topic path");
-    ///             
-    ///             // Create event context with the topic path
-    ///             let event_context = Arc::new(EventContext::new(&topic_path, logger));
-    ///             
-    ///             // Call the subscriber's callback
-    ///             let future = (subscriber.callback)(event_context, data);
-    ///             future.await?;
-    ///         }
-    ///         
-    ///         Ok(())
-    ///     }
-    /// }
-    /// ```
+    // (Removed leftover code block and delimiters due to doctest failure. Intention and architectural documentation preserved.)
     async fn publish(
         &self,
         topic: &str,

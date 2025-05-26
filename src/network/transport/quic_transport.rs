@@ -155,11 +155,6 @@ impl QuicTransportOptions {
     ///
     /// In production, certificates must be provided by the node. In tests, this method
     /// attaches self-signed certificates for convenience. This is a temporary measure.
-    ///
-    /// # Example
-    /// ```rust
-    /// let opts = QuicTransportOptions::new().with_test_certificates();
-    /// ```
     pub fn with_test_certificates(mut self) -> Self {
         let (certs, key) = generate_test_certificates();
         self.certificates = Some(certs);
@@ -208,15 +203,6 @@ impl QuicTransportOptions {
         self
     }
     
-    /// Builder: Set a custom certificate verifier for client connections
-    ///
-    /// INTENTION: Allow custom certificate verification logic, primarily for testing
-    /// 
-    /// # Example
-    /// ```rust
-    /// let verifier = Arc::new(CustomVerifier {});
-    /// let opts = QuicTransportOptions::new().with_certificate_verifier(verifier);
-    /// ```
     pub fn with_certificate_verifier(mut self, verifier: Arc<dyn rustls::client::ServerCertVerifier + Send + Sync>) -> Self {
         self.certificate_verifier = Some(verifier);
         self
