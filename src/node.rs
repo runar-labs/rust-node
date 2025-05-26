@@ -28,7 +28,7 @@ use crate::network::discovery::{
 use crate::network::transport::{
  
       NetworkMessage, NetworkMessagePayloadItem, 
-    NetworkTransport, PeerId, QuicTransport, QuicTransportOptions,
+    NetworkTransport, PeerId, QuicTransport,
  
 };
 // Certificate and PrivateKey types are now imported via the cert_utils module
@@ -43,8 +43,7 @@ use crate::services::service_registry::{ServiceEntry, ServiceRegistry};
 use crate::services::{
     ActionHandler, EventContext, NodeDelegate, PublishOptions, RegistryDelegate,
     RemoteLifecycleContext, RequestContext, ServiceResponse, SubscriptionOptions,
-};
-use crate::TransportOptions;
+}; 
 
 /// Node Configuration
 ///
@@ -1714,7 +1713,7 @@ impl NodeDelegate for Node {
                 + Send
                 + Sync,
         >,
-        options: SubscriptionOptions,
+        _options: SubscriptionOptions,
     ) -> Result<String> {
         // Parse the topic string into a TopicPath
         let topic_path = TopicPath::new(&topic, &self.network_id)
