@@ -3,21 +3,18 @@
 // These tests verify that the Node properly handles requests
 // and delegates to the ServiceRegistry as needed.
 
-use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::timeout;
-
-use runar_common::logging::{Component, Logger};
+use tokio::time::timeout; 
 use runar_common::types::ArcValueType;
-use runar_common::{hmap, vmap};
+use runar_common::{hmap};
 use runar_node::{Node, NodeConfig};
 use runar_node::config::logging_config::{LogLevel, LoggingConfig};
-use runar_node::routing::TopicPath;
-use runar_node::services::{ActionHandler, EventContext, RequestContext, ServiceResponse};
+ 
+use runar_node::services::{EventContext};
 use runar_node::NodeDelegate;
 
 // Import the test fixtures
@@ -218,7 +215,7 @@ async fn test_node_events() {
         // Create a node with a test network ID
         let mut config = NodeConfig::new("test-node", "test_network");
         config.network_config = None;
-        let mut node = Node::new(config).await.unwrap();
+        let node = Node::new(config).await.unwrap();
 
         // Create a flag to track if the callback was called
         let was_called = Arc::new(AtomicBool::new(false));
