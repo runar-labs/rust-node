@@ -20,22 +20,17 @@
 // Request routing and handling is also the Node's responsibility.
 
 use anyhow::{anyhow, Result};
-use log::debug;
-use uuid::timestamp::context;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap};
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::network::transport::PeerId;
 use crate::routing::{PathTrie, TopicPath};
-use std::str::FromStr;
 use crate::services::abstract_service::{AbstractService, ServiceState};
 use runar_common::types::schemas::{ActionMetadata, EventMetadata, ServiceMetadata};
 use crate::services::{
-    ActionHandler, EventContext, RegistryDelegate, RemoteService, ServiceResponse,
-    SubscriptionOptions,
+    ActionHandler, EventContext, RemoteService, ServiceResponse,
 };
 use runar_common::logging::Logger;
 use runar_common::types::ArcValueType;
@@ -136,34 +131,34 @@ impl std::fmt::Debug for ServiceEntry {
 pub struct ServiceRegistry {
     /// Local action handlers organized by path (using PathTrie instead of HashMap)
     /// Store both the handler and the original registration topic path for parameter extraction
-    local_action_handlers: RwLock<PathTrie<(ActionHandler, TopicPath, Option<ActionMetadata>)>>,
+    local_action_handlers: Arc<RwLock<PathTrie<(ActionHandler, TopicPath, Option<ActionMetadata>)>>>,
 
     //reverse index where we store the events that a service listens to
-    local_events_by_service: RwLock<PathTrie<Vec<EventMetadata>>>,
+    local_events_by_service: Arc<RwLock<PathTrie<Vec<EventMetadata>>>>,
 
     /// Remote action handlers organized by path (using PathTrie instead of HashMap)
-    remote_action_handlers: RwLock<PathTrie<Vec<ActionHandler>>>,
+    remote_action_handlers: Arc<RwLock<PathTrie<Vec<ActionHandler>>>>,
 
     /// Local event subscriptions (using PathTrie instead of WildcardSubscriptionRegistry)
-    local_event_subscriptions: RwLock<PathTrie<Vec<(String, EventCallback, Option<EventMetadata>)>>>,
+    local_event_subscriptions: Arc<RwLock<PathTrie<Vec<(String, EventCallback, Option<EventMetadata>)>>>>,
 
     /// Remote event subscriptions (using PathTrie instead of WildcardSubscriptionRegistry)
-    remote_event_subscriptions: RwLock<PathTrie<Vec<(String, EventCallback)>>>,
+    remote_event_subscriptions: Arc<RwLock<PathTrie<Vec<(String, EventCallback)>>>>,
 
     /// Map subscription IDs back to TopicPath for efficient unsubscription
     /// (Single HashMap for both local and remote subscriptions)
-    subscription_id_to_topic_path: RwLock<HashMap<String, TopicPath>>,
+    subscription_id_to_topic_path: Arc<RwLock<HashMap<String, TopicPath>>>,
 
     /// Map subscription IDs back to the service TopicPath for efficient unsubscription
-    subscription_id_to_service_topic_path: RwLock<HashMap<String, TopicPath>>,
+    subscription_id_to_service_topic_path: Arc<RwLock<HashMap<String, TopicPath>>>,
 
     /// Local services registry (using PathTrie instead of HashMap)
-    local_services: RwLock<PathTrie<Arc<ServiceEntry>>>,
+    local_services: Arc<RwLock<PathTrie<Arc<ServiceEntry>>>>,
 
-    local_services_list: RwLock<HashMap<TopicPath, Arc<ServiceEntry>>>,
+    local_services_list: Arc<RwLock<HashMap<TopicPath, Arc<ServiceEntry>>>>,
     
     /// Remote services registry (using PathTrie instead of HashMap)
-    remote_services: RwLock<PathTrie<Arc<RemoteService>>>,
+    remote_services: Arc<RwLock<PathTrie<Arc<RemoteService>>>>,
 
     /// Service lifecycle states - moved from Node
     service_states_by_service_path: Arc<RwLock<HashMap<String, ServiceState>>>,
@@ -174,24 +169,18 @@ pub struct ServiceRegistry {
 
 impl Clone for ServiceRegistry {
     fn clone(&self) -> Self {
-        // Note: We create new RwLocks with new PathTrie inside
-        // WARNING: This implementation CREATES EMPTY REGISTRY MAPS
-        // This means that any handlers registered on the original registry
-        // will NOT be available in the cloned registry
-        debug!("WARNING: ServiceRegistry clone was called - creating empty registry!");
-
         ServiceRegistry {
-            local_action_handlers: RwLock::new(PathTrie::new()),
-            local_events_by_service: RwLock::new(PathTrie::new()),
-            remote_action_handlers: RwLock::new(PathTrie::new()),
-            local_event_subscriptions: RwLock::new(PathTrie::new()),
-            remote_event_subscriptions: RwLock::new(PathTrie::new()),
-            subscription_id_to_topic_path: RwLock::new(HashMap::new()),
-            subscription_id_to_service_topic_path: RwLock::new(HashMap::new()),
-            local_services: RwLock::new(PathTrie::new()),
-            local_services_list: RwLock::new(HashMap::new()),
-            remote_services: RwLock::new(PathTrie::new()),
-            service_states_by_service_path: Arc::new(RwLock::new(HashMap::new())),
+            local_action_handlers:  self.local_action_handlers.clone(),
+            local_events_by_service: self.local_events_by_service.clone(),
+            remote_action_handlers: self.remote_action_handlers.clone(),
+            local_event_subscriptions: self.local_event_subscriptions.clone(),
+            remote_event_subscriptions: self.remote_event_subscriptions.clone(),
+            subscription_id_to_topic_path: self.subscription_id_to_topic_path.clone(),
+            subscription_id_to_service_topic_path: self.subscription_id_to_service_topic_path.clone(),
+            local_services: self.local_services.clone(),
+            local_services_list: self.local_services_list.clone(),
+            remote_services: self.remote_services.clone(),
+            service_states_by_service_path: self.service_states_by_service_path.clone(),
             logger: self.logger.clone(),
         }
     }
@@ -210,16 +199,16 @@ impl ServiceRegistry {
     /// component (typically the Node). This ensures proper logger hierarchy.
     pub fn new(logger: Arc<Logger>) -> Self {
         Self {
-            local_action_handlers: RwLock::new(PathTrie::new()),
-            local_events_by_service: RwLock::new(PathTrie::new()),
-            remote_action_handlers: RwLock::new(PathTrie::new()),
-            local_event_subscriptions: RwLock::new(PathTrie::new()),
-            remote_event_subscriptions: RwLock::new(PathTrie::new()),
-            subscription_id_to_topic_path: RwLock::new(HashMap::new()),
-            subscription_id_to_service_topic_path: RwLock::new(HashMap::new()),
-            local_services: RwLock::new(PathTrie::new()),
-            local_services_list: RwLock::new(HashMap::new()),
-            remote_services: RwLock::new(PathTrie::new()),
+            local_action_handlers:  Arc::new(RwLock::new(PathTrie::new())),
+            local_events_by_service: Arc::new(RwLock::new(PathTrie::new())),
+            remote_action_handlers: Arc::new(RwLock::new(PathTrie::new())),
+            local_event_subscriptions: Arc::new(RwLock::new(PathTrie::new())),
+            remote_event_subscriptions: Arc::new(RwLock::new(PathTrie::new())),
+            subscription_id_to_topic_path: Arc::new(RwLock::new(HashMap::new())),
+            subscription_id_to_service_topic_path: Arc::new(RwLock::new(HashMap::new())),
+            local_services: Arc::new(RwLock::new(PathTrie::new())),
+            local_services_list: Arc::new(RwLock::new(HashMap::new())),
+            remote_services: Arc::new(RwLock::new(PathTrie::new())),
             service_states_by_service_path: Arc::new(RwLock::new(HashMap::new())),
             logger,
         }
