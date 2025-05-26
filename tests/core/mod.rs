@@ -15,3 +15,4 @@ pub mod topic_path_wildcard_test;
 pub mod path_trie_test;
 pub mod event_metadata_test;
 pub mod service_registry_get_local_services_test;
+pub mod simple_service;
