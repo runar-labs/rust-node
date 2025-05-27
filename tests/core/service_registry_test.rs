@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::future::Future;
 use std::pin::Pin;
 use anyhow::Result;
-use runar_node::ActionMetadata;
+use runar_node::{ActionMetadata, Node, NodeConfig};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::time::timeout;
@@ -292,10 +292,11 @@ async fn test_action_handler_network_isolation() {
         registry.register_local_action_handler(&network2_path, handler2.clone(), None).await.unwrap();
         
         println!("VERIFICATION 2: Testing handler execution with proper context");
-        
+        let node: Arc<Node> = Arc::new(Node::new(NodeConfig::new("test-node", "default")).await.unwrap());
+
         // Execute each handler with the correct network ID in the context
-        let request_ctx1 = RequestContext::new(&network1_path, logger.clone());
-        let request_ctx2 = RequestContext::new(&network2_path, logger.clone());
+        let request_ctx1 = RequestContext::new(&network1_path,node.clone(), logger.clone());
+        let request_ctx2 = RequestContext::new(&network2_path,node, logger.clone());
         
         // Test handler 1 with network1 context
         let result1 = registry.get_local_action_handler(&network1_path).await.unwrap();
@@ -320,9 +321,9 @@ async fn test_action_handler_network_isolation() {
         assert!(handler_when_wrong_network.is_none(), "Should not find handlers from other networks");
         
         println!("\nVERIFICATION 4: Context validation is still good practice");
-        
+        let node: Arc<Node> = Arc::new(Node::new(NodeConfig::new("test-node", "default")).await.unwrap());
         // Create a context with the wrong network ID
-        let wrong_network_context = RequestContext::new(&wrong_network_path, logger.clone());
+        let wrong_network_context = RequestContext::new(&wrong_network_path,node, logger.clone());
         
         // Even though the PathTrie bug is fixed, it's still good practice to validate network IDs
         // in handlers for defense in depth
@@ -569,9 +570,11 @@ async fn test_multiple_network_ids() {
     let network1_path = TopicPath::new("network1:math/add", "default").unwrap();
     let network2_path = TopicPath::new("network2:math/add", "default").unwrap();
     
+    let node = Arc::new(Node::new(NodeConfig::new("test-node", "default")).await.unwrap());
+
     // Request contexts for each network
-    let request_ctx1 = RequestContext::new(&network1_path, logger.clone());
-    let request_ctx2 = RequestContext::new(&network2_path, logger.clone());
+    let request_ctx1 = RequestContext::new(&network1_path,node.clone(), logger.clone());
+    let request_ctx2 = RequestContext::new(&network2_path,node,  logger.clone());
     
     // Create network-specific handlers
     let network1_handler: ActionHandler = Arc::new(move |_params, context| {

@@ -372,11 +372,11 @@ impl Node {
         let init_context = crate::services::LifecycleContext::new(
             &service_topic,
             self.serializer.clone(),
+            Arc::new(self.clone()), // Node delegate
             self.logger
                 .clone()
                 .with_component(runar_common::Component::Service),
-        )
-        .with_node_delegate(Arc::new(self.clone()));
+        );
 
         // Initialize the service using the context
         if let Err(e) = service.init(init_context).await {
@@ -454,6 +454,7 @@ impl Node {
             let start_context = crate::services::LifecycleContext::new(
                 &service_topic,
                 self.serializer.clone(),
+                Arc::new(self.clone()), // Node delegate
                 self.logger
                     .clone()
                     .with_component(runar_common::Component::Service),
@@ -529,6 +530,7 @@ impl Node {
             let stop_context = crate::services::LifecycleContext::new(
                 &service_topic,
                 self.serializer.clone(),
+                Arc::new(self.clone()), // Node delegate
                 self.logger
                     .clone()
                     .with_component(runar_common::Component::Service),

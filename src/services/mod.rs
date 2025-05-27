@@ -29,7 +29,7 @@ pub mod service_registry;
 use crate::routing::TopicPath;
 use anyhow::{anyhow, Result};
 use runar_common::logging::{Component, Logger, LoggingContext};
-use runar_common::types::{ActionMetadata, ArcValueType, FieldSchema, SerializerRegistry};
+use runar_common::types::{ActionMetadata, ArcValueType, EventMetadata, FieldSchema, SerializerRegistry};
 use tokio::sync::RwLock;
 use std::collections::HashMap;
 use std::future::Future;
@@ -79,7 +79,7 @@ pub struct LifecycleContext {
     /// Logger instance with service context
     pub logger: Logger,
     /// Node delegate for node operations
-    node_delegate: Option<Arc<dyn NodeDelegate + Send + Sync>>,
+    node_delegate: Arc<dyn NodeDelegate + Send + Sync>,
     /// Serializer registry for type registration
     pub serializer:Arc<RwLock<SerializerRegistry>>,
 }
@@ -88,13 +88,13 @@ impl LifecycleContext {
     /// Create a new LifecycleContext with a topic path and logger
     ///
     /// This is the primary constructor that takes the minimum required parameters.
-    pub fn new(topic_path: &TopicPath, serializer: Arc<RwLock<SerializerRegistry>>, logger: Logger) -> Self {
+    pub fn new(topic_path: &TopicPath, serializer: Arc<RwLock<SerializerRegistry>>, node_delegate: Arc<dyn NodeDelegate + Send + Sync>, logger: Logger) -> Self {
         Self {
             network_id: topic_path.network_id(),
             service_path: topic_path.service_path(),
             config: None,
             logger,
-            node_delegate: None,
+            node_delegate,
             serializer,
         }
     }
@@ -104,15 +104,6 @@ impl LifecycleContext {
     /// Use builder-style methods instead of specialized constructors.
     pub fn with_config(mut self, config: ArcValueType) -> Self {
         self.config = Some(config);
-        self
-    }
-
-    /// Add a NodeDelegate to a LifecycleContext
-    ///
-    /// INTENTION: Provide access to node operations during service lifecycle events,
-    /// including request processing and event dispatching.
-    pub fn with_node_delegate(mut self, delegate: Arc<dyn NodeDelegate + Send + Sync>) -> Self {
-        self.node_delegate = Some(delegate);
         self
     }
 
@@ -145,12 +136,7 @@ impl LifecycleContext {
         action_name: impl Into<String>,
         handler: ActionHandler,
     ) -> Result<()> {
-        // Get the node delegate
-        let delegate = match &self.node_delegate {
-            Some(d) => d,
-            None => return Err(anyhow!("No node delegate available")),
-        };
-
+        let delegate = &self.node_delegate;
         let action_name_string = action_name.into();
 
         // Create a topic path for this action
@@ -204,10 +190,7 @@ impl LifecycleContext {
         };
 
         // Get the node delegate
-        let delegate = match &self.node_delegate {
-            Some(d) => d,
-            None => return Err(anyhow!("No node delegate available")),
-        };
+        let delegate = &self.node_delegate;
 
         // Create a topic path for this action
         let action_path = format!("{}/{}", self.service_path, action_name_string);
@@ -220,38 +203,20 @@ impl LifecycleContext {
             .await
     }
 
-    /// Register an event with extra metadata
-    ///
-    /// INTENTION: This method allows registering an event with additional
-    /// information such as a description and data schema, which can be used
-    /// for documentation and validation.
-    pub async fn register_event_with_options(
+   pub async fn subscribe(
         &self,
-        event_name: impl Into<String>,
-        options: EventRegistrationOptions,
-    ) -> Result<()> {
-        // let event_name_string = event_name.into();
-
-        // // Create event metadata
-        // let metadata = EventMetadata {
-        //     name: event_name_string.clone(),
-        //     description: options.description.unwrap_or_default(),
-        //     data_schema: options.data_schema.map(arc_value_to_field_schema),
-        // };
-
-        // // Log event registration with metadata
-        // self.logger.debug(&format!(
-        //     "Registered event '{}' with metadata: description='{}', has_schema={}",
-        //     event_name_string,
-        //     metadata.description,
-        //     metadata.data_schema.is_some()
-        // ));
-
-        // Note: The NodeDelegate trait doesn't currently support registering events with metadata.
-        // This information is logged for documentation purposes but not stored in the registry.
-        // When event publishing occurs, this metadata would ideally be accessible.
-
-        Ok(())
+        topic: impl Into<String>,
+        callback: Box<
+            dyn Fn(
+                    Arc<EventContext>,
+                    ArcValueType,
+                ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
+                + Send
+                + Sync,
+        >,
+    ) -> Result<String> {
+        let delegate = &self.node_delegate;  
+        return delegate.subscribe(topic.into(), callback).await;
     }
 }
 
