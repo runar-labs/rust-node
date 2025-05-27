@@ -10,6 +10,7 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use runar_common::types::ArcValueType;
+use std::result;
 use std::sync::{Arc, Mutex};
  
 use runar_node::services::abstract_service::AbstractService;
@@ -86,16 +87,23 @@ impl MathService {
     ///
     /// IMPORTANT: This method demonstrates proper context usage for logging.
     /// It correctly uses the context parameter for all logging operations.
-    fn add(&self, a: f64, b: f64, ctx: &RequestContext) -> f64 {
-        // Increment the counter
-        let mut counter = self.counter.lock().unwrap();
-        *counter += 1;
+    async fn add(&self, a: f64, b: f64, ctx: &RequestContext) -> f64 {
+        // Increment the counter - IMPORTANT: Release the MutexGuard before any .await points
+        {
+            let mut counter = self.counter.lock().unwrap();
+            *counter += 1;
+            // MutexGuard is dropped here at the end of this scope
+        }
 
         // Use the passed context for logging
         ctx.debug(format!("Adding {} + {}", a, b));
 
         // Perform the addition
-        a + b
+        let result = a + b; 
+
+        let _ = ctx.publish("math/added", ArcValueType::new_primitive(result)).await;
+
+        result
     }
 
     /// Subtract two numbers
@@ -184,7 +192,7 @@ impl MathService {
                 return Ok(ServiceResponse::error(400, &format!("Parameter extraction error: {}", e)));
             }
         };
-        let result = self.add(a, b, &context);
+        let result = self.add(a, b, &context).await;
         context.info(format!("Addition successful: {} + {} = {}", a, b, result));
         Ok(ServiceResponse::ok(ArcValueType::new_primitive(result)))
     }
@@ -387,10 +395,13 @@ impl AbstractService for MathService {
             )
             .await?;
 
-        // context.subscribe("math/added", Box::new(move |ctx, value| {
-        //     ctx.info(format!("MathService received math/added event: {}", value));
-        //     Ok(())
-        // }));
+        context.subscribe("math/added", Box::new(move |ctx, value| {
+            // Create a boxed future that returns Result<(), anyhow::Error>
+            Box::pin(async move {
+                ctx.info(format!("MathService received math/added event: {}", value));
+                Ok(()) // Return Result::Ok
+            })
+        })).await?;
 
         // Log successful initialization
         context.info("MathService initialized".to_string());
