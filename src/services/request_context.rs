@@ -13,8 +13,10 @@
 
 use crate::routing::TopicPath;
 use runar_common::{logging::{Component, Logger, LoggingContext}, types::ArcValueType}; 
- 
+use anyhow::{anyhow, Result};
 use std::{collections::HashMap, fmt, sync::Arc};
+
+use super::{NodeDelegate, ServiceResponse};
 
 /// Context for handling service requests
 ///
@@ -41,6 +43,10 @@ pub struct RequestContext {
     pub logger: Arc<Logger>,
     /// Path parameters extracted from template matching
     pub path_params: HashMap<String, String>,
+
+    /// Node delegate for making requests or publishing events
+    pub(crate) node_delegate: Arc<dyn NodeDelegate + Send + Sync>,
+
 }
 
 // Manual implementation of Debug for RequestContext
@@ -65,6 +71,7 @@ impl Clone for RequestContext {
             metadata: self.metadata.clone(),
             logger: self.logger.clone(),
             path_params: self.path_params.clone(),
+            node_delegate: self.node_delegate.clone(),
         }
     }
 }
@@ -84,7 +91,7 @@ impl RequestContext {
     /// Create a new RequestContext with a TopicPath and logger
     ///
     /// This is the primary constructor that takes the minimum required parameters.
-    pub fn new(topic_path: &TopicPath, logger: Arc<Logger>) -> Self {
+    pub fn new(topic_path: &TopicPath,  node_delegate: Arc<dyn NodeDelegate + Send + Sync>, logger: Arc<Logger>) -> Self {
         // Add action path to logger if available from topic_path
         let action_path = topic_path.action_path();
         let action_logger = if !action_path.is_empty() {
@@ -98,6 +105,7 @@ impl RequestContext {
             topic_path: topic_path.clone(),
             metadata: None,
             logger: action_logger,
+            node_delegate: node_delegate,
             path_params: HashMap::new(),
         }
     }
@@ -150,6 +158,83 @@ impl RequestContext {
     /// context's logger, without having to access the logger directly.
     pub fn error(&self, message: impl Into<String>) {
         self.logger.error(message);
+    }
+
+    /// Publish an event
+    ///
+    /// INTENTION: Allow event handlers to publish their own events.
+    /// This method provides a convenient way to publish events from within
+    /// an event handler.
+    ///
+    /// Handles different path formats:
+    /// - Full path with network ID: "network:service/topic" (used as is)
+    /// - Path with service: "service/topic" (network ID added)
+    /// - Simple topic: "topic" (both service path and network ID added)
+    pub async fn publish(&self, topic: impl Into<String>, data: ArcValueType) -> Result<()> {
+        let topic_string = topic.into();
+
+        // Process the topic based on its format
+        let full_topic = if topic_string.contains(':') {
+            // Already has network ID, use as is
+            topic_string
+        } else if topic_string.contains('/') {
+            // Has service/topic but no network ID
+            format!("{}:{}", self.topic_path.network_id(), topic_string)
+        } else {
+            // Simple topic name - add service path and network ID
+            format!(
+                "{}:{}/{}",
+                self.topic_path.network_id(),
+                self.topic_path.service_path(),
+                topic_string
+            )
+        };
+
+        self.logger
+            .debug(format!("Publishing to processed topic: {}", full_topic));
+        self.node_delegate.publish(full_topic, data).await
+
+    }
+
+    /// Make a service request
+    ///
+    /// INTENTION: Allow event handlers to make requests to other services.
+    /// This method provides a convenient way to call service actions from
+    /// within an event handler.
+    ///
+    /// Handles different path formats:
+    /// - Full path with network ID: "network:service/action" (used as is)
+    /// - Path with service: "service/action" (network ID added)
+    /// - Simple action: "action" (both service path and network ID added - calls own service)
+    pub async fn request(
+        &self,
+        path: impl Into<String>,
+        params: ArcValueType,
+    ) -> Result<ServiceResponse> {
+         
+        let path_string = path.into();
+
+        // Process the path based on its format
+        let full_path = if path_string.contains(':') {
+            // Already has network ID, use as is
+            path_string
+        } else if path_string.contains('/') {
+            // Has service/action but no network ID
+            format!("{}:{}", self.topic_path.network_id(), path_string)
+        } else {
+            // Simple action name - add both service path and network ID
+            format!(
+                "{}:{}/{}",
+                self.topic_path.network_id(),
+                self.topic_path.service_path(),
+                path_string
+            )
+        };
+
+        self.logger
+            .debug(format!("Making request to processed path: {}", full_path));
+        self.node_delegate.request(full_path, params).await
+         
     }
 }
 

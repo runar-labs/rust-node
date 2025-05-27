@@ -1175,7 +1175,7 @@ impl Node {
                 .debug(format!("Executing local handler for: {}", topic_path));
 
             // Create request context
-            let mut context = RequestContext::new(&topic_path, self.logger.clone());
+            let mut context = RequestContext::new(&topic_path,Arc::new(self.clone()),  self.logger.clone());
 
             // Extract parameters using the original registration path
             if let Ok(params) = topic_path.extract_params(&registration_path.action_path()) {
@@ -1231,7 +1231,7 @@ impl Node {
                 .debug(format!("Executing local handler for: {}", topic_path));
 
             // Create request context
-            let mut context = RequestContext::new(&topic_path, self.logger.clone());
+            let mut context = RequestContext::new(&topic_path, Arc::new(self.clone()), self.logger.clone());
 
             // Extract parameters using the original registration path
             if let Ok(params) = topic_path.extract_params(&registration_path.action_path()) {
@@ -1263,7 +1263,7 @@ impl Node {
             let load_balancer = self.load_balancer.read().await;
             let handler_index = load_balancer.select_handler(
                 &remote_handlers,
-                &RequestContext::new(&topic_path, self.logger.clone()),
+                &RequestContext::new(&topic_path,Arc::new(self.clone()), self.logger.clone()),
             );
 
             // Get the selected handler
@@ -1277,7 +1277,7 @@ impl Node {
             ));
 
             // Create request context
-            let context = RequestContext::new(&topic_path, self.logger.clone());
+            let context = RequestContext::new(&topic_path, Arc::new(self.clone()), self.logger.clone());
 
             // For remote handlers, we don't have the registration path
             // In the future, we should enhance the remote handler registry to include registration paths
@@ -1352,7 +1352,7 @@ impl Node {
         if let Some(existing_peer) = known_peers.get(&new_peer.peer_id) {
             //check if node info is older then the stored peer
             if new_peer.version > existing_peer.version {
-                self.remove_peer(&existing_peer).await?;
+                self.remove_peer_services(&existing_peer).await?;
                 //remove and add again
                 known_peers.remove(&new_peer.peer_id);
                 known_peers.insert(new_peer.peer_id.clone(), new_peer.clone());
@@ -1366,16 +1366,15 @@ impl Node {
         Ok(Vec::new())
     }
 
-    async fn remove_peer(
+    async fn remove_peer_services(
         &self,
         existing_peer: &NodeInfo,
     ) -> Result<Vec<Arc<RemoteService>>> {
         //remove all the services
         for service_to_remove in &existing_peer.services {
             let service_path = TopicPath::new(&service_to_remove.service_path, service_to_remove.network_id.as_str()).unwrap();
-            self.service_registry.remove_remote_service(&service_path).await;
+            self.service_registry.remove_remote_service(&service_path).await?;
         }
-
         Ok(Vec::new())
     }
 
@@ -1729,7 +1728,7 @@ impl NodeDelegate for Node {
         //if started... need to increment  -> registry_version
         if self.running.load(Ordering::SeqCst) {
             self.registry_version.fetch_add(1, Ordering::SeqCst);
-            self.notify_node_change().await;
+            self.notify_node_change().await?;
         }
 
         Ok(subcription)
@@ -1761,7 +1760,7 @@ impl NodeDelegate for Node {
         //if started... need to increment  -> registry_version
         if self.running.load(Ordering::SeqCst) {
             self.registry_version.fetch_add(1, Ordering::SeqCst);
-            self.notify_node_change().await;
+            self.notify_node_change().await?;
         }
 
         Ok(subcription)
@@ -1791,7 +1790,7 @@ impl NodeDelegate for Node {
             //if started... need to increment  -> registry_version
             if self.running.load(Ordering::SeqCst) {
                 self.registry_version.fetch_add(1, Ordering::SeqCst);
-                self.notify_node_change().await;
+                self.notify_node_change().await?;
             }
             Ok(())
         } else {
