@@ -1,4 +1,4 @@
-name: Rust CI
+name: Rust Node CI
 
 on:
   push:
@@ -19,7 +19,6 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-Dwarnings"
-  WORKSPACE_ROOT: ${{ github.workspace }}
 
 jobs:
   check:
@@ -28,83 +27,41 @@ jobs:
     steps:
       - uses: actions/checkout@v3
         with:
-          repository: runar-labs/rust-mono
+          fetch-depth: 0  # Fetch all history for all branches and tags
           submodules: recursive
-          token: ${{ secrets.GITHUB_TOKEN }}
-          path: .
       
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
       
       - name: Check code format
-        run: |
-          cd ${{ github.workspace }}
-          cargo fmt --all -- --check
+        run: cargo fmt --all -- --check
       
       - name: Check with clippy
-        run: |
-          cd ${{ github.workspace }}
-          cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
-  cross-platform-test:
-    name: Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    steps:
-      - uses: actions/checkout@v3
-        with:
-          repository: runar-labs/rust-mono
-          submodules: recursive
-          token: ${{ secrets.GITHUB_TOKEN }}
-          path: .
-      
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ runner.os }}
-      
-      - name: Run tests
-        run: |
-          cd ${{ github.workspace }}
-          cargo test --all-features --workspace
-
-  coverage:
-    name: Code Coverage
+  test:
+    name: Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
         with:
-          repository: runar-labs/rust-mono
+          fetch-depth: 0
           submodules: recursive
-          token: ${{ secrets.GITHUB_TOKEN }}
-          path: .
       
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
       
-      - uses: Swatinem/rust-cache@v2
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
       
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
-      
-      - name: Generate code coverage
-        run: |
-          cd ${{ github.workspace }}
-          cd rust-node
-          cargo llvm-cov --all-features --lcov --output-path lcov.info
-      
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v3
-        with:
-          files: ${{ github.workspace }}/rust-node/lcov.info
-          fail_ci_if_error: true
+      - name: Run tests
+        run: cargo test --all-features --workspace
 
-  cross-platform-build:
-    name: Build (${{ matrix.os }})
+  build:
+    name: Build
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -113,44 +70,19 @@ jobs:
     steps:
       - uses: actions/checkout@v3
         with:
-          repository: runar-labs/rust-mono
+          fetch-depth: 0
           submodules: recursive
-          token: ${{ secrets.GITHUB_TOKEN }}
-          path: .
       
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
         with:
           key: ${{ runner.os }}
       
       - name: Build
-        run: |
-          cd ${{ github.workspace }}
-          cargo build --package runar_node --verbose
+        run: cargo build --package runar_node --verbose
       
       - name: Build release
-        run: |
-          cd ${{ github.workspace }}
-          cargo build --release --package runar_node --verbose
-
-  benchmarks:
-    name: Benchmarks
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-        with:
-          repository: runar-labs/rust-mono
-          submodules: recursive
-          token: ${{ secrets.GITHUB_TOKEN }}
-          path: .
-      
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: nightly
-      
-      - uses: Swatinem/rust-cache@v2
-      
-      - name: Run benchmarks
-        run: |
-          cd ${{ github.workspace }}/rust-node
-          cargo +nightly bench
+        run: cargo build --release --package runar_node --verbose
