@@ -44,12 +44,12 @@ jobs:
       - name: Check code format
         run: |
           cd ${{ env.WORKSPACE_ROOT }}
-          cargo fmt --manifest-path=${{ env.MODULE_PATH }}/Cargo.toml -- --check
+          cargo fmt --manifest-path=Cargo.toml -- --check
       
       - name: Check with clippy
         run: |
           cd ${{ env.WORKSPACE_ROOT }}
-          cargo clippy --manifest-path=${{ env.MODULE_PATH }}/Cargo.toml --all-targets --all-features -- -D warnings
+          cargo clippy --manifest-path=Cargo.toml --all-targets --all-features -- -D warnings
 
   test:
     name: Test
