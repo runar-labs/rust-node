@@ -4,19 +4,22 @@ on:
   push:
     branches: [ main, master ]
     paths:
-      - '**'
-      - '!**/target/**'
-      - '!**/.github/**'
+      - 'rust-node/**'
+      - 'rust-common/**'
+      - 'rust-macros/**'
+      - '.github/workflows/ci.yml'
   pull_request:
     branches: [ main, master ]
     paths:
-      - '**'
-      - '!**/target/**'
-      - '!**/.github/**'
+      - 'rust-node/**'
+      - 'rust-common/**'
+      - 'rust-macros/**'
+      - '.github/workflows/ci.yml'
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-Dwarnings"
+  WORKSPACE_ROOT: ${{ github.workspace }}
 
 jobs:
   check:
@@ -25,13 +28,19 @@ jobs:
     steps:
       - uses: actions/checkout@v3
         with:
+          repository: runar-labs/rust-mono
           submodules: recursive
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: .
+      
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      
       - name: Check code format
         run: |
           cd ${{ github.workspace }}
           cargo fmt --all -- --check
+      
       - name: Check with clippy
         run: |
           cd ${{ github.workspace }}
@@ -47,11 +56,16 @@ jobs:
     steps:
       - uses: actions/checkout@v3
         with:
+          repository: runar-labs/rust-mono
           submodules: recursive
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: .
+      
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ runner.os }}
+      
       - name: Run tests
         run: |
           cd ${{ github.workspace }}
@@ -63,18 +77,26 @@ jobs:
     steps:
       - uses: actions/checkout@v3
         with:
+          repository: runar-labs/rust-mono
           submodules: recursive
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: .
+      
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
+      
       - uses: Swatinem/rust-cache@v2
+      
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
+      
       - name: Generate code coverage
         run: |
           cd ${{ github.workspace }}
           cd rust-node
           cargo llvm-cov --all-features --lcov --output-path lcov.info
+      
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v3
         with:
@@ -91,15 +113,21 @@ jobs:
     steps:
       - uses: actions/checkout@v3
         with:
+          repository: runar-labs/rust-mono
           submodules: recursive
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: .
+      
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ runner.os }}
+      
       - name: Build
         run: |
           cd ${{ github.workspace }}
           cargo build --package runar_node --verbose
+      
       - name: Build release
         run: |
           cd ${{ github.workspace }}
@@ -111,11 +139,17 @@ jobs:
     steps:
       - uses: actions/checkout@v3
         with:
+          repository: runar-labs/rust-mono
           submodules: recursive
+          token: ${{ secrets.GITHUB_TOKEN }}
+          path: .
+      
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: nightly
+      
       - uses: Swatinem/rust-cache@v2
+      
       - name: Run benchmarks
         run: |
           cd ${{ github.workspace }}/rust-node
