@@ -22,9 +22,6 @@ jobs:
   check:
     name: Check
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ../..
     steps:
       - uses: actions/checkout@v3
         with:
@@ -32,9 +29,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Check code format
-        run: cargo fmt --all -- --check
+        run: |
+          cd ${{ github.workspace }}
+          cargo fmt --all -- --check
       - name: Check with clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: |
+          cd ${{ github.workspace }}
+          cargo clippy --all-targets --all-features -- -D warnings
 
   cross-platform-test:
     name: Test (${{ matrix.os }})
@@ -43,9 +44,6 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-    defaults:
-      run:
-        working-directory: ../..
     steps:
       - uses: actions/checkout@v3
         with:
@@ -55,14 +53,13 @@ jobs:
         with:
           key: ${{ runner.os }}
       - name: Run tests
-        run: cargo test --all-features --workspace
+        run: |
+          cd ${{ github.workspace }}
+          cargo test --all-features --workspace
 
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ../..
     steps:
       - uses: actions/checkout@v3
         with:
@@ -75,12 +72,13 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Generate code coverage
         run: |
+          cd ${{ github.workspace }}
           cd rust-node
           cargo llvm-cov --all-features --lcov --output-path lcov.info
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v3
         with:
-          files: rust-node/lcov.info
+          files: ${{ github.workspace }}/rust-node/lcov.info
           fail_ci_if_error: true
 
   cross-platform-build:
@@ -90,9 +88,6 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-    defaults:
-      run:
-        working-directory: ../..
     steps:
       - uses: actions/checkout@v3
         with:
@@ -102,16 +97,17 @@ jobs:
         with:
           key: ${{ runner.os }}
       - name: Build
-        run: cargo build --package runar_node --verbose
+        run: |
+          cd ${{ github.workspace }}
+          cargo build --package runar_node --verbose
       - name: Build release
-        run: cargo build --release --package runar_node --verbose
+        run: |
+          cd ${{ github.workspace }}
+          cargo build --release --package runar_node --verbose
 
   benchmarks:
     name: Benchmarks
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ../..
     steps:
       - uses: actions/checkout@v3
         with:
@@ -122,5 +118,5 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run benchmarks
         run: |
-          cd rust-node
+          cd ${{ github.workspace }}/rust-node
           cargo +nightly bench

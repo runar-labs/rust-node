@@ -3,6 +3,7 @@
 // This module provides the Node which is the primary entry point for the Runar system.
 // The Node is responsible for managing the service registry, handling requests, and
 // coordinating event publishing and subscriptions.
+//
 
 use anyhow::{anyhow, Result};
 use std::pin::Pin;
