@@ -14,7 +14,7 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-Dwarnings"
   # Use the parent directory as the workspace root
-  WORKSPACE_ROOT: ${{ github.workspace }}/..
+  WORKSPACE_ROOT: ${{ github.workspace }}
   # The current module path relative to workspace root
   MODULE_PATH: rust-node
 
