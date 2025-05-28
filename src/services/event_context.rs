@@ -163,7 +163,7 @@ impl EventContext {
 
             self.logger
                 .debug(format!("Publishing to processed topic: {}", full_topic));
-            delegate.publish(full_topic, data).await
+            delegate.publish(full_topic, Some(data)).await
         } else {
             Err(anyhow!("No node delegate available in this context"))
         }
@@ -206,7 +206,7 @@ impl EventContext {
 
             self.logger
                 .debug(format!("Making request to processed path: {}", full_path));
-            delegate.request(full_path, params).await
+            delegate.request(full_path, Some(params)).await
         } else {
             Err(anyhow!("No node delegate available in this context"))
         }

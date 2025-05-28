@@ -30,7 +30,7 @@ use crate::routing::{PathTrie, TopicPath};
 use crate::services::abstract_service::{AbstractService, ServiceState};
 use runar_common::types::schemas::{ActionMetadata, EventMetadata, ServiceMetadata};
 use crate::services::{
-    ActionHandler, EventContext, RemoteService, ServiceResponse,
+    ActionHandler, EventContext, RemoteService, 
 };
 use runar_common::logging::Logger;
 use runar_common::types::ArcValueType;
@@ -41,7 +41,7 @@ use runar_common::types::ArcValueType;
 /// The callback takes an event context and payload and returns a future that
 /// resolves once the event has been processed.
 pub type EventCallback = Arc<
-    dyn Fn(Arc<EventContext>, ArcValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
+    dyn Fn(Arc<EventContext>, Option<ArcValueType>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
         + Send
         + Sync,
 >;
@@ -51,7 +51,7 @@ pub type EventCallback = Arc<
 /// INTENTION: Provide a sharable type similar to ActionHandler that can be referenced
 /// by multiple subscribers and cloned as needed. This fixes lifetime issues by using Arc.
 pub type EventHandler = Arc<
-    dyn Fn(Arc<EventContext>, ArcValueType) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
+    dyn Fn(Arc<EventContext>, Option<ArcValueType>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
         + Send
         + Sync,
 >;
@@ -60,7 +60,7 @@ pub type EventHandler = Arc<
 use std::future::Future;
 
 /// Future returned by service operations
-pub type ServiceFuture = Pin<Box<dyn Future<Output = Result<ServiceResponse>> + Send>>;
+pub type ServiceFuture = Pin<Box<dyn Future<Output = Result<Option<ArcValueType>>> + Send>>;
 
 /// Type for event subscription callbacks
 pub type EventSubscriber = Arc<

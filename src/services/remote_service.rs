@@ -18,7 +18,7 @@ use crate::network::transport::{
 };
 use crate::routing::TopicPath;
 use crate::services::abstract_service::AbstractService;
-use crate::services::{ActionHandler, LifecycleContext, ServiceResponse};
+use crate::services::{ActionHandler, LifecycleContext};
 use runar_common::logging::Logger;
 use runar_common::types::{ActionMetadata, ArcValueType, SerializerRegistry, ServiceMetadata};
 
@@ -51,7 +51,7 @@ pub struct RemoteService {
 
     /// Pending requests awaiting responses
     pending_requests:
-        Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<Result<ServiceResponse>>>>>,
+        Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<Result<Option<ArcValueType>>>>>>,
 
     /// Request timeout in milliseconds
     request_timeout_ms: u64,
@@ -69,7 +69,7 @@ impl RemoteService {
         serializer: Arc<RwLock<SerializerRegistry>>,
         local_node_id: PeerId,
         pending_requests:
-        Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<Result<ServiceResponse>>>>>,
+        Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<Result<Option<ArcValueType>>>>>>,
         logger: Arc<Logger>,
         request_timeout_ms: u64,
     ) -> Self {
@@ -100,7 +100,7 @@ impl RemoteService {
         network_transport: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>,
         serializer: Arc<RwLock<SerializerRegistry>>,
         pending_requests:
-        Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<Result<ServiceResponse>>>>>,
+        Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<Result<Option<ArcValueType>>>>>>,
         logger: Arc<Logger>,
         local_node_id: PeerId,
         request_timeout_ms: u64,
@@ -188,19 +188,7 @@ impl RemoteService {
         Arc::new(move |params, context| {
             // let service_clone = service.clone();
             let action = action_name.clone();
-            
-            // Create a new TopicPath for this action using the helper method
-            let action_topic_path = match service.service_topic.new_action_topic(&action) {
-                Ok(path) => path,
-                Err(e) => {
-                    return Box::pin(async move {
-                        Ok(ServiceResponse::error(
-                            400,
-                            format!("Invalid action path: {}", e),
-                        ))
-                    });
-                }
-            };
+            let action_topic_path = service.service_topic.new_action_topic(&action)?;
 
             // Clone all necessary fields before the async block
             let peer_id = service.peer_id.clone();
@@ -254,16 +242,10 @@ impl RemoteService {
                             .write()
                             .await
                             .remove(&request_id);
-                        return Ok(ServiceResponse::error(
-                            500,
-                            format!("Failed to send request: {}", e),
-                        ));
+                        return Err(anyhow::anyhow!("Failed to send request: {}", e));
                     }
                 } else {
-                    return Ok(ServiceResponse::error(
-                        500,
-                        "Network transport not available",
-                    ));
+                    return Err(anyhow::anyhow!("Network transport not available"));
                 }
 
                 // Wait for the response with a timeout
@@ -274,17 +256,14 @@ impl RemoteService {
                 .await
                 {
                     Ok(Ok(Ok(response))) => Ok(response),
-                    Ok(Ok(Err(e))) => Ok(ServiceResponse::error(
-                        500,
-                        format!("Remote service error: {}", e),
-                    )),
+                    Ok(Ok(Err(e))) => Err(anyhow::anyhow!("Remote service error: {}", e)),
                     Ok(Err(_)) => {
                         // Clean up the pending request
                         pending_requests
                             .write()
                             .await
                             .remove(&request_id);
-                        Ok(ServiceResponse::error(500, "Response channel closed"))
+                        Err(anyhow::anyhow!("Response channel closed"))
                     }
                     Err(_) => {
                         // Clean up the pending request
@@ -292,7 +271,7 @@ impl RemoteService {
                             .write()
                             .await
                             .remove(&request_id);
-                        Ok(ServiceResponse::error(504, "Request timeout"))
+                        Err(anyhow::anyhow!("Request timeout"))
                     }
                 }
             })

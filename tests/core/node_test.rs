@@ -126,7 +126,7 @@ async fn test_node_request() {
         });
 
         // Make a request to the math service's add action
-        let response = node.request("math/add", params).await.unwrap();
+        let response = node.request("math/add", Some(params)).await.unwrap();
         if let Some(mut value) = response.data {
             // For ArcValueType, we need to use as_type to extract the value
             let result: f64 = value.as_type().unwrap();
@@ -248,7 +248,7 @@ async fn test_node_events() {
 
         // Publish an event to the topic
         let data = ArcValueType::new_primitive("test data".to_string());
-        node.publish(topic, data).await.unwrap();
+        node.publish(topic, Some(data)).await.unwrap();
 
         // Small delay to allow async handler to execute
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -285,7 +285,7 @@ async fn test_path_params_in_context() {
 
     // Make a request to a path that matches the template
     let response = node
-        .request("test/abc123/items/xyz789", ArcValueType::null())
+        .request("test/abc123/items/xyz789", None)
         .await
         .unwrap();
 

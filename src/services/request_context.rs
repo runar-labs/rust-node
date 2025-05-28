@@ -16,7 +16,7 @@ use runar_common::{logging::{Component, Logger, LoggingContext}, types::ArcValue
 use anyhow::{anyhow, Result};
 use std::{collections::HashMap, fmt, sync::Arc};
 
-use super::{NodeDelegate, ServiceResponse};
+use super::{NodeDelegate};
 
 /// Context for handling service requests
 ///
@@ -170,7 +170,7 @@ impl RequestContext {
     /// - Full path with network ID: "network:service/topic" (used as is)
     /// - Path with service: "service/topic" (network ID added)
     /// - Simple topic: "topic" (both service path and network ID added)
-    pub async fn publish(&self, topic: impl Into<String>, data: ArcValueType) -> Result<()> {
+    pub async fn publish(&self, topic: impl Into<String>, data: Option<ArcValueType>) -> Result<()> {
         let topic_string = topic.into();
 
         // Process the topic based on its format
@@ -209,8 +209,8 @@ impl RequestContext {
     pub async fn request(
         &self,
         path: impl Into<String>,
-        params: ArcValueType,
-    ) -> Result<ServiceResponse> {
+        params: Option<ArcValueType>,
+    ) -> Result<Option<ArcValueType>> {
          
         let path_string = path.into();
 

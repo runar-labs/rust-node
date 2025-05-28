@@ -101,7 +101,7 @@ impl MathService {
         // Perform the addition
         let result = a + b; 
 
-        let _ = ctx.publish("math/added", ArcValueType::new_primitive(result)).await;
+        let _ = ctx.publish("math/added", Some(ArcValueType::new_primitive(result))).await;
 
         result
     }

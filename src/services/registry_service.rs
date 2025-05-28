@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use crate::routing::TopicPath;
 use crate::services::abstract_service::{AbstractService};
-use crate::services::{LifecycleContext, RegistryDelegate, RequestContext, ServiceResponse};
+use crate::services::{LifecycleContext, RegistryDelegate, RequestContext};
 use crate::ServiceState;
 use runar_common::logging::Logger;
 use runar_common::types::{ArcValueType}; 
@@ -163,7 +163,7 @@ impl RegistryService {
         &self,
         _params: ArcValueType,
         ctx: RequestContext,
-    ) -> Result<ServiceResponse> {
+    ) -> Result<Option<ArcValueType>> {
         ctx.logger.debug("Listing all services");
 
         // Get all service metadata directly
@@ -173,7 +173,7 @@ impl RegistryService {
         let metadata_vec: Vec<_> = service_metadata.values().cloned().collect();
         
         // Return the list of service metadata
-        Ok(ServiceResponse::ok(ArcValueType::from_list(metadata_vec)))
+        Ok(Some(ArcValueType::from_list(metadata_vec)))
     }
 
     /// Handler for getting detailed information about a specific service
@@ -181,33 +181,28 @@ impl RegistryService {
         &self,
         _params: ArcValueType,
         ctx: RequestContext,
-    ) -> Result<ServiceResponse> {
+    ) -> Result<Option<ArcValueType>> {
         // Extract the service path from path parameters
         let actual_service_path = match self.extract_service_path(&ctx) {
             Ok(path) => path,
-            Err(_) => {
-                return Ok(ServiceResponse::error(
-                    400,
-                    "Missing required 'service_path' parameter",
-                ));
-            }
+            Err(error) => return Err(error),
         };
 
         // Get the service metadata for the specific service path
-        let service_topic = match TopicPath::new(&actual_service_path, &ctx.network_id()) {
+        let network_id_string = ctx.network_id().clone();
+        let service_topic = match TopicPath::new(&actual_service_path, &network_id_string) {
             Ok(topic) => topic,
-            Err(_) => {
-                return Ok(ServiceResponse::error(500, "Invalid service path format"));
+            Err(e) => {
+                return Err(anyhow!("Invalid service path format: {}", e));
             }
         };
         
+        // Return the service metadata if found, or None if not found
         if let Some(service_metadata) = self.registry_delegate.get_service_metadata(&service_topic).await {
-            return Ok(ServiceResponse::ok(ArcValueType::from_struct(service_metadata)));
+            Ok(Some(ArcValueType::from_struct(service_metadata)))
         } else {
-            return Ok(ServiceResponse::error(
-                404,
-                &format!("Service '{}' not found", actual_service_path),
-            ));
+            ctx.logger.debug(format!("Service '{}' not found", actual_service_path));
+            Ok(None)
         }
     }
 
@@ -215,28 +210,24 @@ impl RegistryService {
     async fn handle_service_state(
         &self,  
         ctx: RequestContext,
-    ) -> Result<ServiceResponse> {
+    ) -> Result<Option<ArcValueType>> {
         // Extract the service path from path parameters
         let service_path = match self.extract_service_path(&ctx) {
             Ok(path) => path,
-            Err(_) => {
-                return Ok(ServiceResponse::error(
-                    400,
-                    "Missing required 'service_path' parameter",
-                ));
+            Err(error) => {
+                return Err(anyhow!("Missing required 'service_path' parameter: {}", error));
             }
         };
-        let service_topic = TopicPath::new_service(&ctx.network_id(), &service_path);
+        let network_id_string = ctx.network_id().clone();
+        let service_topic = TopicPath::new_service(&network_id_string, &service_path);
 
         // Get service state directly from the registry delegate 
         if let Some(service_state) = self.registry_delegate.get_service_state(&service_topic).await {
-            let state_info =ArcValueType::from_struct(service_state);
-            Ok(ServiceResponse::ok(state_info))
+            let state_info = ArcValueType::from_struct(service_state);
+            Ok(Some(state_info))
         } else {
-            Ok(ServiceResponse::error(
-                404,
-                &format!("Service '{}' not found", service_path),
-            ))
+            ctx.logger.debug(format!("Service '{}' not found", service_path));
+            Ok(None)
         }
     }
 }

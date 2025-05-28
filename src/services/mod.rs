@@ -209,7 +209,7 @@ impl LifecycleContext {
         callback: Box<
             dyn Fn(
                     Arc<EventContext>,
-                    ArcValueType,
+                    Option<ArcValueType>,
                 ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
                 + Send
                 + Sync,
@@ -347,74 +347,74 @@ impl ServiceRequest {
 }
 
 /// Response from a service handler
-#[derive(Debug, Clone)]
-pub struct ServiceResponse {
-    /// HTTP-like status code
-    pub status: u32,
-    /// Response data if any (immutable)
-    pub data: Option<ArcValueType>,
-    /// Error message if any (immutable)
-    pub error: Option<String>,
-}
+// #[derive(Debug, Clone)]
+// pub struct ServiceResponse {
+//     /// HTTP-like status code
+//     pub status: u32,
+//     /// Response data if any (immutable)
+//     pub data: Option<ArcValueType>,
+//     /// Error message if any (immutable)
+//     pub error: Option<String>,
+// }
 
-impl ServiceResponse {
-    /// Create a new successful response with the given data
-    pub fn ok(data: ArcValueType) -> Self {
-        Self {
-            status: 200,
-            data: Some(data),
-            error: None,
-        }
-    }
+// impl ServiceResponse {
+//     /// Create a new successful response with the given data
+//     pub fn ok(data: ArcValueType) -> Self {
+//         Self {
+//             status: 200,
+//             data: Some(data),
+//             error: None,
+//         }
+//     }
 
-    /// Create a new successful response without data
-    pub fn ok_empty() -> Self {
-        Self {
-            status: 200,
-            data: None,
-            error: None,
-        }
-    }
+//     /// Create a new successful response without data
+//     pub fn ok_empty() -> Self {
+//         Self {
+//             status: 200,
+//             data: None,
+//             error: None,
+//         }
+//     }
 
-    /// Create a new error response with the given message
-    pub fn error(status: i32, message: impl Into<String>) -> Self {
-        Self {
-            status: status as u32,
-            data: None,
-            error: Some(message.into()),
-        }
-    }
+//     /// Create a new error response with the given message
+//     pub fn error(status: i32, message: impl Into<String>) -> Self {
+//         Self {
+//             status: status as u32,
+//             data: None,
+//             error: Some(message.into()),
+//         }
+//     }
 
-    /// Create a standard bad request error response
-    pub fn bad_request(message: impl Into<String>) -> Self {
-        Self::error(400, message)
-    }
+//     /// Create a standard bad request error response
+//     pub fn bad_request(message: impl Into<String>) -> Self {
+//         Self::error(400, message)
+//     }
 
-    /// Create a standard not found error response
-    pub fn not_found(message: impl Into<String>) -> Self {
-        Self::error(404, message)
-    }
+//     /// Create a standard not found error response
+//     pub fn not_found(message: impl Into<String>) -> Self {
+//         Self::error(404, message)
+//     }
 
-    /// Create a standard internal server error response
-    pub fn internal_error(message: impl Into<String>) -> Self {
-        Self::error(500, message)
-    }
+//     /// Create a standard internal server error response
+//     pub fn internal_error(message: impl Into<String>) -> Self {
+//         Self::error(500, message)
+//     }
 
-    /// Create a standard method not allowed error response
-    pub fn method_not_allowed(message: impl Into<String>) -> Self {
-        Self::error(405, message)
-    }
+//     /// Create a standard method not allowed error response
+//     pub fn method_not_allowed(message: impl Into<String>) -> Self {
+//         Self::error(405, message)
+//     }
 
-    /// Check if the response is successful
-    pub fn is_success(&self) -> bool {
-        self.status >= 200 && self.status < 300
-    }
+//     /// Check if the response is successful
+//     pub fn is_success(&self) -> bool {
+//         self.status >= 200 && self.status < 300
+//     }
 
-    /// Check if the response is an error
-    pub fn is_error(&self) -> bool {
-        !self.is_success()
-    }
-}
+//     /// Check if the response is an error
+//     pub fn is_error(&self) -> bool {
+//         !self.is_success()
+//     }
+// }
 
 /// Options for a subscription
 #[derive(Debug, Clone, Default)]
@@ -512,10 +512,10 @@ impl Default for EventRegistrationOptions {
 #[async_trait::async_trait]
 pub trait NodeRequestHandler: Send + Sync {
     /// Process a service request
-    async fn request(&self, path: String, params: ArcValueType) -> Result<ServiceResponse>;
+    async fn request(&self, path: String, params: Option<ArcValueType>) -> Result<Option<ArcValueType>>;
 
     /// Publish an event to a topic
-    async fn publish(&self, topic: String, data: ArcValueType) -> Result<()>;
+    async fn publish(&self, topic: String, data: Option<ArcValueType>) -> Result<()>;
 
     /// Subscribe to a topic
     ///
@@ -594,7 +594,7 @@ impl ArcContextLogging for Arc<RequestContext> {
 ///
 /// INTENTION: Provide a consistent return type for asynchronous service methods,
 /// simplifying method signatures and ensuring uniformity across the codebase.
-pub type ServiceFuture = Pin<Box<dyn Future<Output = Result<ServiceResponse>> + Send>>;
+pub type ServiceFuture = Pin<Box<dyn Future<Output = Result<Option<ArcValueType>>> + Send>>;
 
 /// Event Dispatcher trait
 ///
@@ -636,10 +636,10 @@ pub trait EventDispatcher: Send + Sync {
 #[async_trait::async_trait]
 pub trait NodeDelegate: Send + Sync {
     /// Process a service request
-    async fn request(&self, path: String, params: ArcValueType) -> Result<ServiceResponse>;
+    async fn request(&self, path: String, params: Option<ArcValueType>) -> Result<Option<ArcValueType>>;
 
     /// Simplified publish for common cases
-    async fn publish(&self, topic: String, data: ArcValueType) -> Result<()>;
+    async fn publish(&self, topic: String, data: Option<ArcValueType>) -> Result<()>;
 
     /// Subscribe to a topic
     async fn subscribe(
@@ -648,7 +648,7 @@ pub trait NodeDelegate: Send + Sync {
         callback: Box<
             dyn Fn(
                     Arc<EventContext>,
-                    ArcValueType,
+                    Option<ArcValueType>,
                 ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
                 + Send
                 + Sync,
@@ -662,7 +662,7 @@ pub trait NodeDelegate: Send + Sync {
         callback: Box<
             dyn Fn(
                     Arc<EventContext>,
-                    ArcValueType,
+                    Option<ArcValueType>,
                 ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
                 + Send
                 + Sync,
@@ -842,7 +842,7 @@ pub type ServiceHandler = Box<
     dyn Fn(
             Option<ArcValueType>,
             Arc<RequestContext>,
-        ) -> Pin<Box<dyn Future<Output = ServiceResponse> + Send>>
+        ) -> Pin<Box<dyn Future<Output = Option<ArcValueType>> + Send>>
         + Send
         + Sync,
 >;

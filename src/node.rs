@@ -42,7 +42,7 @@ use crate::services::remote_service::RemoteService;
 use crate::services::service_registry::{ServiceEntry, ServiceRegistry};
 use crate::services::{
     ActionHandler, EventContext, NodeDelegate, PublishOptions, RegistryDelegate,
-    RemoteLifecycleContext, RequestContext, ServiceResponse, SubscriptionOptions,
+    RemoteLifecycleContext, RequestContext, SubscriptionOptions,
 }; 
 
 /// Node Configuration
@@ -183,7 +183,7 @@ pub struct Node {
 
     /// Pending requests waiting for responses, keyed by correlation ID
     pub(crate) pending_requests:
-        Arc<RwLock<HashMap<String, oneshot::Sender<Result<ServiceResponse>>>>>,
+        Arc<RwLock<HashMap<String, oneshot::Sender<Result<Option<ArcValueType>>>>>>,
 
     pub serializer: Arc<RwLock<SerializerRegistry>>,
 
@@ -862,17 +862,22 @@ impl Node {
                         return Err(anyhow!("Failed to deserialize request payload: {}", e));
                     }
                 };
+            let params_option = if params.is_null() {
+                None
+            } else {
+                Some(params)
+            };
  
             let local_peer_id = self.peer_id.clone(); 
 
             // Process the request locally using extracted topic and params
             self.logger
                 .debug(format!("Processing network request for topic: {}", path));
-            match self.local_request(path.as_str(), params).await {
+            match self.local_request(path.as_str(), params_option).await {
                 Ok(response) => {
                     // Serialize the response data
-                    let serialized_data = if let Some(data) = &response.data {
-                        match serializer.serialize_value(data) {
+                    let serialized_data = if let Some(data) = response {
+                        match serializer.serialize_value(&data) {
                             Ok(bytes) => bytes.to_vec(),
                             Err(e) => {
                                 self.logger
@@ -1045,7 +1050,7 @@ impl Node {
                 };
 
                 // Create a success response
-                let response = ServiceResponse::ok(payload_data);
+                let response = Some(payload_data);
 
                 // Send the response through the oneshot channel
                 match pending_request_sender.send(Ok(response)) {
@@ -1129,14 +1134,16 @@ impl Node {
                     .debug(format!("No subscribers found for topic: {}", topic));
                 continue;
             }
-
+            let payload_option = if payload.is_null() {
+                None
+            } else {
+                Some(payload)
+            };
             // Notify all subscribers
             for (_subscription_id, callback) in subscribers {
                 let ctx = event_context.clone();
-                let payload_clone = payload.clone();
-
                 // Invoke callback. errors are logged but not propagated to avoid affecting other subscribers
-                let result = callback(ctx, payload_clone).await;
+                let result = callback(ctx, payload_option.clone()).await;
                 if let Err(e) = result {
                     self.logger
                         .error(format!("Error in subscriber callback: {}", e));
@@ -1150,8 +1157,8 @@ impl Node {
     pub async fn local_request(
         &self,
         path: impl Into<String>,
-        payload: ArcValueType,
-    ) -> Result<ServiceResponse> {
+        payload: Option<ArcValueType>,
+    ) -> Result<Option<ArcValueType>> {
         let path_string = path.into();
         let topic_path = match TopicPath::new(&path_string, &self.network_id) {
             Ok(tp) => tp,
@@ -1190,7 +1197,7 @@ impl Node {
             }
 
             // Execute the handler and return result
-            return handler(Some(payload), context).await;
+            return handler(payload, context).await;
         } else {
             return Err(anyhow!("No local handler found for topic: {}", topic_path));
         }
@@ -1206,8 +1213,8 @@ impl Node {
     pub async fn request(
         &self,
         path: impl Into<String>,
-        payload: ArcValueType,
-    ) -> Result<ServiceResponse> {
+        payload: Option<ArcValueType>,
+    ) -> Result<Option<ArcValueType>> {
         let path_string = path.into();
         let topic_path = match TopicPath::new(&path_string, &self.network_id) {
             Ok(tp) => tp,
@@ -1246,7 +1253,7 @@ impl Node {
             }
 
             // Execute the handler and return result
-            return handler(Some(payload), context).await;
+            return handler(payload, context).await;
         }
 
         // If no local handler found, look for remote handlers
@@ -1285,7 +1292,7 @@ impl Node {
             // In the future, we should enhance the remote handler registry to include registration paths
 
             // Execute the selected handler
-            return handler(Some(payload), context).await;
+            return handler(payload, context).await;
         }
 
         // No handler found
@@ -1296,7 +1303,7 @@ impl Node {
     async fn publish_with_options(
         &self,
         topic: impl Into<String>,
-        data: ArcValueType,
+        data: Option<ArcValueType>,
         options: PublishOptions,
     ) -> Result<()> {
         let topic_string = topic.into();
@@ -1688,12 +1695,12 @@ impl Node {
 
 #[async_trait]
 impl NodeDelegate for Node {
-    async fn request(&self, path: String, params: ArcValueType) -> Result<ServiceResponse> {
+    async fn request(&self, path: String, params: Option<ArcValueType>) -> Result<Option<ArcValueType>> {
         // Delegate directly to our implementation using the path string and params
         self.request(path, params).await
     }
 
-    async fn publish(&self, topic: String, data: ArcValueType) -> Result<()> {
+    async fn publish(&self, topic: String, data: Option<ArcValueType>) -> Result<()> {
         // Create default options
         let options = PublishOptions {
             broadcast: true,
@@ -1711,7 +1718,7 @@ impl NodeDelegate for Node {
         callback: Box<
             dyn Fn(
                     Arc<EventContext>,
-                    ArcValueType,
+                    Option<ArcValueType>,
                 ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
                 + Send
                 + Sync,
@@ -1742,7 +1749,7 @@ impl NodeDelegate for Node {
         callback: Box<
             dyn Fn(
                     Arc<EventContext>,
-                    ArcValueType,
+                    Option<ArcValueType>,
                 ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
                 + Send
                 + Sync,
