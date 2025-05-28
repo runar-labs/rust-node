@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
  
 use runar_node::services::abstract_service::AbstractService;
-use runar_node::services::{LifecycleContext, RequestContext, ServiceResponse};
+use runar_node::services::{LifecycleContext, RequestContext};
 
 /// A simple service for testing path parameters extraction
 ///
@@ -56,9 +56,9 @@ impl PathParamsService {
     /// Handle the extract action - returns all path parameters
     async fn handle_extract(
         &self,
-        params: Option<ArcValueType>,
+        _params: Option<ArcValueType>,
         context: RequestContext,
-    ) -> Result<ServiceResponse> {
+    ) -> Result<Option<ArcValueType>> {
         // Log that we're handling the request
         context.info("Handling extract path parameters request".to_string());
 
@@ -70,7 +70,7 @@ impl PathParamsService {
         context.info(format!("Extracted parameters: {:?}", param_values));
 
         // Return the parameters
-        Ok(ServiceResponse::ok(ArcValueType::from_map(param_values)))
+        Ok(Some(ArcValueType::from_map(param_values)))
     }
 }
 

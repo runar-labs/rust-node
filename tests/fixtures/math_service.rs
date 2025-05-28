@@ -14,7 +14,7 @@ use std::result;
 use std::sync::{Arc, Mutex};
  
 use runar_node::services::abstract_service::AbstractService;
-use runar_node::services::{LifecycleContext, RequestContext, ServiceResponse};
+use runar_node::services::{LifecycleContext, RequestContext};
 
 /// A simple math service for testing
 ///
@@ -170,7 +170,7 @@ impl MathService {
         &self,
         params: Option<ArcValueType>,
         context: RequestContext,
-    ) -> Result<ServiceResponse> {
+    ) -> Result<Option<ArcValueType>> {
         context.info("Handling add operation request".to_string());
         let zero = 0.0;
         let mut data = params.unwrap_or_else(|| ArcValueType::null());
@@ -189,12 +189,12 @@ impl MathService {
             }
             Err(e) => {
                 context.error(format!("Parameter extraction error: {}", e));
-                return Ok(ServiceResponse::error(400, &format!("Parameter extraction error: {}", e)));
+                return Err(anyhow!(format!("Parameter extraction error: {}", e)));
             }
         };
         let result = self.add(a, b, &context).await;
         context.info(format!("Addition successful: {} + {} = {}", a, b, result));
-        Ok(ServiceResponse::ok(ArcValueType::new_primitive(result)))
+        Ok(Some(ArcValueType::new_primitive(result)))
     }
 
     /// Handle the subtract operation
@@ -202,7 +202,7 @@ impl MathService {
         &self,
         params: Option<ArcValueType>,
         context: RequestContext,
-    ) -> Result<ServiceResponse> {
+    ) -> Result<Option<ArcValueType>> {
         context.info("Handling subtract operation request".to_string());
         let zero = 0.0;
         let mut data = params.unwrap_or_else(|| ArcValueType::null());
@@ -221,12 +221,12 @@ impl MathService {
             }
             Err(e) => {
                 context.error(format!("Parameter extraction error: {}", e));
-                return Ok(ServiceResponse::error(400, &format!("Parameter extraction error: {}", e)));
+                return Err(anyhow!(format!("Parameter extraction error: {}", e)));
             }
         };
         let result = self.subtract(a, b, &context);
         context.info(format!("Subtraction successful: {} - {} = {}", a, b, result));
-        Ok(ServiceResponse::ok(ArcValueType::new_primitive(result)))
+        Ok(Some(ArcValueType::new_primitive(result)))
     }
 
     /// Handle the multiply operation
@@ -234,7 +234,7 @@ impl MathService {
         &self,
         params: Option<ArcValueType>,
         context: RequestContext,
-    ) -> Result<ServiceResponse> {
+    ) -> Result<Option<ArcValueType>> {
         context.info("Handling multiply operation request".to_string());
         let zero = 0.0;
         let mut data = params.unwrap_or_else(|| ArcValueType::null());
@@ -253,12 +253,12 @@ impl MathService {
             }
             Err(e) => {
                 context.error(format!("Parameter extraction error: {}", e));
-                return Ok(ServiceResponse::error(400, &format!("Parameter extraction error: {}", e)));
+                return Err(anyhow!(format!("Parameter extraction error: {}", e)));
             }
         };
         let result = self.multiply(a, b, &context);
         context.info(format!("Multiplication successful: {} * {} = {}", a, b, result));
-        Ok(ServiceResponse::ok(ArcValueType::new_primitive(result)))
+        Ok(Some(ArcValueType::new_primitive(result)))
     }
 
     /// Handle the divide operation
@@ -266,7 +266,7 @@ impl MathService {
         &self,
         params: Option<ArcValueType>,
         context: RequestContext,
-    ) -> Result<ServiceResponse> {
+    ) -> Result<Option<ArcValueType>> {
         context.info("Handling divide operation request".to_string());
         let mut data = params.unwrap_or_else(|| ArcValueType::null());
         let zero = 0.0;
@@ -284,17 +284,17 @@ impl MathService {
             }
             Err(e) => {
                 context.error(format!("Parameter extraction error: {}", e));
-                return Ok(ServiceResponse::error(400, &format!("Parameter extraction error: {}", e)));
+                return Err(anyhow!(format!("Parameter extraction error: {}", e)));
             }
         };
         match self.divide(a, b, &context) {
             Ok(result) => {
                 context.info(format!("Division successful: {} / {} = {}", a, b, result));
-                Ok(ServiceResponse::ok(ArcValueType::new_primitive(result)))
+                Ok(Some(ArcValueType::new_primitive(result)))
             }
             Err(e) => {
                 context.error(format!("Division error: {}", e));
-                Ok(ServiceResponse::error(400, &format!("Division error: {}", e)))
+                Err(anyhow!(format!("Division error: {}", e)))
             }
         }
     }
@@ -398,7 +398,7 @@ impl AbstractService for MathService {
         context.subscribe("math/added", Box::new(move |ctx, value| {
             // Create a boxed future that returns Result<(), anyhow::Error>
             Box::pin(async move {
-                ctx.info(format!("MathService received math/added event: {}", value));
+                ctx.info(format!("MathService received math/added event: {}", value.unwrap()));
                 Ok(()) // Return Result::Ok
             })
         })).await?;

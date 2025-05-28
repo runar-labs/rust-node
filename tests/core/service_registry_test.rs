@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::future::Future;
 use std::pin::Pin;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use runar_node::{ActionMetadata, Node, NodeConfig};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -35,7 +35,7 @@ fn create_test_handler(name: &str, expected_network_id: &str) -> ActionHandler {
                 return Err(anyhow::anyhow!("Network ID mismatch"));
             }
             
-            Ok(ServiceResponse::ok(ArcValueType::new_primitive(name.to_string())))
+            Ok(Some(ArcValueType::new_primitive(name.to_string())))
         })
     })
 }
@@ -60,7 +60,7 @@ async fn test_subscribe_and_unsubscribe() {
         let was_called_clone = was_called.clone();
         
         // Create a callback that would be invoked when an event is published
-        let callback = Arc::new(move |_ctx: Arc<EventContext>, _: ArcValueType| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
+        let callback = Arc::new(move |_ctx: Arc<EventContext>, _: Option<ArcValueType>| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
             let was_called = was_called_clone.clone();
             Box::pin(async move {
                 // Set the flag to true when called
@@ -102,7 +102,7 @@ async fn test_wildcard_subscriptions() {
         let registry = ServiceRegistry::new_with_default_logger();
         
         // Create a callback
-        let callback = Arc::new(move |_ctx: Arc<EventContext>, _: ArcValueType| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
+        let callback = Arc::new(move |_ctx: Arc<EventContext>, _: Option<ArcValueType>| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
             Box::pin(async move {
                 Ok(())
             })
@@ -163,7 +163,7 @@ async fn test_register_and_get_action_handler() {
         let handler: ActionHandler = Arc::new(|params, _context| {
             Box::pin(async move {
                 println!("Handler called with params: {:?}", params);
-                Ok(ServiceResponse::ok_empty())
+                Ok(None)
             })
         });
         
@@ -212,21 +212,21 @@ async fn test_multiple_action_handlers() {
         let add_handler: ActionHandler = Arc::new(|params, _context| {
             Box::pin(async move {
                 println!("Add handler called with params: {:?}", params);
-                Ok(ServiceResponse::ok_empty())
+                Ok(None)
             })
         });
         
         let subtract_handler: ActionHandler = Arc::new(|params, _context| {
             Box::pin(async move {
                 println!("Subtract handler called with params: {:?}", params);
-                Ok(ServiceResponse::ok_empty())
+                Ok(None)
             })
         });
         
         let concat_handler: ActionHandler = Arc::new(|params, _context| {
             Box::pin(async move {
                 println!("Concat handler called with params: {:?}", params);
-                Ok(ServiceResponse::ok_empty())
+                Ok(None)
             })
         });
         
@@ -362,7 +362,7 @@ async fn test_multiple_event_handlers() {
         let received_topic2_clone = received_topic2.clone();
         
         // Create a first event handler to track events with "topic1"
-        let handler1 = Arc::new(move |_ctx: Arc<EventContext>, _data: ArcValueType| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
+        let handler1 = Arc::new(move |_ctx: Arc<EventContext>, _data: Option<ArcValueType>| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
             let received = received_topic1_clone.clone();
             Box::pin(async move {
                 received.store(true, Ordering::SeqCst);
@@ -371,7 +371,7 @@ async fn test_multiple_event_handlers() {
         });
         
         // Create a second event handler to track events with "topic2"
-        let handler2 = Arc::new(move |_ctx: Arc<EventContext>, _data: ArcValueType| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
+        let handler2 = Arc::new(move |_ctx: Arc<EventContext>, _data: Option<ArcValueType>| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
             let received = received_topic2_clone.clone();
             Box::pin(async move {
                 received.store(true, Ordering::SeqCst);
@@ -432,10 +432,10 @@ async fn test_path_template_parameters() {
                 
                 // Validate that the parameter was captured
                 if service_path == "unknown" {
-                    return Ok(ServiceResponse::error(400, "Missing service_path parameter"));
+                    return Err(anyhow!("Missing service_path parameter"));
                 }
                 
-                Ok(ServiceResponse::ok_empty())
+                Ok(None)
             })
         });
         
@@ -449,10 +449,10 @@ async fn test_path_template_parameters() {
                 
                 // Validate that the parameter was captured
                 if service_path == "unknown" {
-                    return Ok(ServiceResponse::error(400, "Missing service_path parameter"));
+                    return Err(anyhow!("Missing service_path parameter"));
                 }
                 
-                Ok(ServiceResponse::ok_empty())
+                Ok(None)
             })
         });
         
@@ -471,10 +471,10 @@ async fn test_path_template_parameters() {
                 
                 // Validate that all parameters were captured
                 if service_type == "unknown" || action_name == "unknown" {
-                    return Ok(ServiceResponse::error(400, "Missing parameters"));
+                    return Err(anyhow!("Missing parameters"));
                 }
                 
-                Ok(ServiceResponse::ok_empty())
+                Ok(None)
             })
         });
         
@@ -532,7 +532,7 @@ async fn test_local_remote_action_handler_separation() {
         let local_handler: ActionHandler = Arc::new(|_params, _context| {
             Box::pin(async move {
                 println!("Local handler called");
-                Ok(ServiceResponse::ok_empty())
+                Ok(None)
             })
         });
         
@@ -582,7 +582,7 @@ async fn test_multiple_network_ids() {
         assert_eq!(network_id, "network1");
         
         Box::pin(async move {
-            Ok(ServiceResponse::ok(ArcValueType::new_primitive(format!("Response from {}", network_id))))
+            Ok(Some(ArcValueType::new_primitive(format!("Response from {}", network_id))))
         })
          
     });
@@ -593,7 +593,7 @@ async fn test_multiple_network_ids() {
         assert_eq!(network_id, "network2");
         
         Box::pin(async move {
-            Ok(ServiceResponse::ok(ArcValueType::new_primitive(format!("Response from {}", network_id))))
+            Ok(Some(ArcValueType::new_primitive(format!("Response from {}", network_id))))
         })
          
     });
@@ -636,21 +636,21 @@ async fn test_get_actions_metadata() {
         // Create action handlers
         let add_handler: ActionHandler = Arc::new(|_params, _context| {
             Box::pin(async move {
-                Ok(ServiceResponse::ok_empty())
+                Ok(None)
             })
         });
         let add_metadata = ActionMetadata{name:add_action_path.as_str().to_string(), description:"Add action".to_string(), input_schema:None, output_schema:None};
         
         let subtract_handler: ActionHandler = Arc::new(|_params, _context| {
             Box::pin(async move {
-                Ok(ServiceResponse::ok_empty())
+                Ok(None)
             })
         });
         let subtract_metadata = ActionMetadata{name:subtract_action_path.as_str().to_string(), description:"Subtract action".to_string(), input_schema:None, output_schema:None};
         
         let multiply_handler: ActionHandler = Arc::new(|_params, _context| {
             Box::pin(async move {
-                Ok(ServiceResponse::ok_empty())
+                Ok(None)
             })
         });
         let multiply_metadata = ActionMetadata{name:multiply_action_path.as_str().to_string(), description:"Multiply action".to_string(), input_schema:None, output_schema:None};

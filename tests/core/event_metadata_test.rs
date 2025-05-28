@@ -38,21 +38,21 @@ async fn test_get_events_metadata_by_subscriber() {
         let pressure_event_path = TopicPath::new("sensor-service/pressure_changed", "test-network").unwrap();
         
         // Create event callbacks
-        let temperature_callback = Arc::new(|_ctx: Arc<EventContext>, _: ArcValueType| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
+        let temperature_callback = Arc::new(|_ctx: Arc<EventContext>, _: Option<ArcValueType>| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
             Box::pin(async move {
                 // Do nothing for test
                 Ok(())
             })
         });
         
-        let humidity_callback = Arc::new(|_ctx: Arc<EventContext>, _: ArcValueType| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
+        let humidity_callback = Arc::new(|_ctx: Arc<EventContext>, _: Option<ArcValueType>| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
             Box::pin(async move {
                 // Do nothing for test
                 Ok(())
             })
         });
         
-        let pressure_callback = Arc::new(|_ctx: Arc<EventContext>, _: ArcValueType| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
+        let pressure_callback = Arc::new(|_ctx: Arc<EventContext>, _: Option<ArcValueType>| -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
             Box::pin(async move {
                 // Do nothing for test
                 Ok(())

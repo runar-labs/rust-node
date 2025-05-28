@@ -290,7 +290,7 @@ mod service_registry_wildcard_tests {
         
         // Create a callback that increments the counter
         let counter_clone = counter.clone();
-        let callback = Arc::new(move |_ctx: Arc<EventContext>, _data: ArcValueType| {
+        let callback = Arc::new(move |_ctx: Arc<EventContext>, _data: Option<ArcValueType>| {
             let counter = counter_clone.clone();
             Box::pin(async move {
                 let mut lock = counter.lock().await;
@@ -335,7 +335,7 @@ mod service_registry_wildcard_tests {
         assert_eq!(handlers1.len(), 1);
         for (_, handler) in handlers1 {
             let context = Arc::new(EventContext::new(&topic1, Logger::new_root(Component::Service, "test")));
-            handler(context, data.clone()).await?;
+            handler(context, Some(data.clone())).await?;
         }
         
         // Should match pattern1 (services/*/state)
@@ -343,7 +343,7 @@ mod service_registry_wildcard_tests {
         assert_eq!(handlers2.len(), 1);
         for (_, handler) in handlers2 {
             let context = Arc::new(EventContext::new(&topic2, Logger::new_root(Component::Service, "test")));
-            handler(context, data.clone()).await?;
+            handler(context, Some(data.clone())).await?;
         }
         
         // Should match pattern2 (events/>)
@@ -351,7 +351,7 @@ mod service_registry_wildcard_tests {
         assert_eq!(handlers3.len(), 1);
         for (_, handler) in handlers3 {
             let context = Arc::new(EventContext::new(&topic3, Logger::new_root(Component::Service, "test")));
-            handler(context, data.clone()).await?;
+            handler(context, Some(data.clone())).await?;
         }
         
         // Should match pattern2 (events/>)
@@ -359,7 +359,7 @@ mod service_registry_wildcard_tests {
         assert_eq!(handlers4.len(), 1);
         for (_, handler) in handlers4 {
             let context = Arc::new(EventContext::new(&topic4, Logger::new_root(Component::Service, "test")));
-            handler(context, data.clone()).await?;
+            handler(context, Some(data.clone())).await?;
         }
         
         // Should match specific_path (services/math/add)
@@ -367,7 +367,7 @@ mod service_registry_wildcard_tests {
         assert_eq!(handlers5.len(), 1);
         for (_, handler) in handlers5 {
             let context = Arc::new(EventContext::new(&topic5, Logger::new_root(Component::Service, "test")));
-            handler(context, data.clone()).await?;
+            handler(context, Some(data.clone())).await?;
         }
         
         // Should not match any patterns
@@ -388,7 +388,7 @@ mod service_registry_wildcard_tests {
         let registry = ServiceRegistry::new_with_default_logger();
         
         // Create a callback
-        let callback = Arc::new(move |_ctx: Arc<EventContext>, _data: ArcValueType| {
+        let callback = Arc::new(move |_ctx: Arc<EventContext>, _data: Option<ArcValueType>| {
             Box::pin(async move { Ok(()) }) as Pin<Box<dyn Future<Output = Result<()>> + Send>>
         });
         
@@ -424,7 +424,7 @@ mod service_registry_wildcard_tests {
         
         // Callback 1
         let counter1_clone = counter1.clone();
-        let callback1 = Arc::new(move |_ctx: Arc<EventContext>, _data: ArcValueType| {
+        let callback1 = Arc::new(move |_ctx: Arc<EventContext>, _data: Option<ArcValueType>| {
             let counter = counter1_clone.clone();
             Box::pin(async move {
                 let mut lock = counter.lock().await;
@@ -435,7 +435,7 @@ mod service_registry_wildcard_tests {
         
         // Callback 2
         let counter2_clone = counter2.clone();
-        let callback2 = Arc::new(move |_ctx: Arc<EventContext>, _data: ArcValueType| {
+        let callback2 = Arc::new(move |_ctx: Arc<EventContext>, _data: Option<ArcValueType>| {
             let counter = counter2_clone.clone();
             Box::pin(async move {
                 let mut lock = counter.lock().await;
@@ -459,7 +459,7 @@ mod service_registry_wildcard_tests {
         
         for (_, handler) in handlers {
             let context = Arc::new(EventContext::new(&topic, Logger::new_root(Component::Service, "test")));
-            handler(context, data.clone()).await?;
+            handler(context, Some(data.clone())).await?;
         }
         
         // Check counters

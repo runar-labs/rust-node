@@ -115,13 +115,13 @@ async fn test_remote_action_call() -> Result<()> {
     });
 
     // Use the proper network path format - with network ID for remote actions
-    let response = node2.request("math1/add", add_params).await?;
-    if let Some(mut result_value) = response.data {
+    let response = node2.request("math1/add", Some(add_params)).await?;
+    if let Some(mut result_value) = response {
         let result: f64 = result_value.as_type()?;
         assert_eq!(result, 8.0);
         logger.info(format!("Add operation succeeded: 5 + 3 = {}", result));
     } else {
-        return Err(anyhow::anyhow!("Unexpected response type: {:?}", response.data));
+        return Err(anyhow::anyhow!("Unexpected response type: {:?}", response));
     }
 
     // Test calling math service2 (on node2) from node1
@@ -131,13 +131,13 @@ async fn test_remote_action_call() -> Result<()> {
         "b" => 7.0
     });
     
-    let response = node1.request("math2/multiply", multiply_params).await?;
-    if let Some(mut result_value) = response.data {
+    let response = node1.request("math2/multiply", Some(multiply_params)).await?;
+    if let Some(mut result_value) = response {
         let result: f64 = result_value.as_type()?;
         assert_eq!(result, 28.0);
         logger.info(format!("Multiply operation succeeded: 4 * 7 = {}", result));
     } else {
-        return Err(anyhow::anyhow!("Unexpected response type: {:?}", response.data));
+        return Err(anyhow::anyhow!("Unexpected response type: {:?}", response));
     }
 
     // add a new service to node1 and test remote call
@@ -154,13 +154,13 @@ async fn test_remote_action_call() -> Result<()> {
         "b" => 3.0
     });
 
-    let response = node2.request("math3/add", add_params).await?;
-    if let Some(mut result_value) = response.data {
+    let response = node2.request("math3/add", Some(add_params)).await?;
+    if let Some(mut result_value) = response {
         let result: f64 = result_value.as_type()?;
         assert_eq!(result, 8.0);
         logger.info(format!("Add operation succeeded: 5 + 3 = {}", result));
     } else {
-        return Err(anyhow::anyhow!("Unexpected response type: {:?}", response.data));
+        return Err(anyhow::anyhow!("Unexpected response type: {:?}", response));
     }
 
     // Shut down nodes

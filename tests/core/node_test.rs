@@ -127,7 +127,7 @@ async fn test_node_request() {
 
         // Make a request to the math service's add action
         let response = node.request("math/add", Some(params)).await.unwrap();
-        if let Some(mut value) = response.data {
+        if let Some(mut value) = response {
             // For ArcValueType, we need to use as_type to extract the value
             let result: f64 = value.as_type().unwrap();
             assert_eq!(result, 8.0);
@@ -226,12 +226,12 @@ async fn test_node_events() {
 
         // Create a handler function for subscription
         // Note: Using the full handler signature with Arc<EventContext> for the node API
-        let handler = move |_ctx: Arc<EventContext>, mut data: ArcValueType| {
+        let handler = move |_ctx: Arc<EventContext>, mut data: Option<ArcValueType>| {
             println!("Received event data: {:?}", data);
 
             // Verify the data matches what we published
             // For ArcValueType, extract the string value
-            if let Ok(s) = data.as_type::<String>() {
+            if let Ok(s) = data.expect("REASON").as_type::<String>() {
                 assert_eq!(s, "test data");
                 // Mark that the handler was called with correct data
                 was_called_clone.store(true, Ordering::SeqCst);
@@ -289,11 +289,8 @@ async fn test_path_params_in_context() {
         .await
         .unwrap();
 
-    // Verify the response status is successful
-    assert_eq!(response.status, 200, "Request failed: {:?}", response);
-
     // Verify the path parameters were correctly extracted
-    if let Some(data) = &response.data {
+    if let Some(data) = &response {
         // Convert to HashMap<String, String>
         let params_map = data.clone()
             .as_map_ref::<String, String>()
