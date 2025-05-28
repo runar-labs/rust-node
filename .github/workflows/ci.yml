@@ -4,49 +4,27 @@ on:
   push:
     branches: [ main, master ]
     paths:
-      - 'rust-node/**'
-      - 'rust-common/**'
-      - 'rust-macros/**'
-      - '.github/workflows/ci.yml'
+      - '**'  # Watch all files in the submodule
   pull_request:
     branches: [ main, master ]
     paths:
-      - 'rust-node/**'
-      - 'rust-common/**'
-      - 'rust-macros/**'
-      - '.github/workflows/ci.yml'
+      - '**'  # Watch all files in the submodule
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-Dwarnings"
+  # Use the parent directory as the workspace root
+  WORKSPACE_ROOT: ${{ github.workspace }}/..
+  # The current module path relative to workspace root
+  MODULE_PATH: rust-node
 
 jobs:
   check:
     name: Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-        with:
-          fetch-depth: 0  # Fetch all history for all branches and tags
-          submodules: recursive
-      
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-      
-      - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@v2
-      
-      - name: Check code format
-        run: cargo fmt --all -- --check
-      
-      - name: Check with clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v3
         with:
           fetch-depth: 0
           submodules: recursive
@@ -55,20 +33,61 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       
       - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@v2
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Check code format
+        run: |
+          cd ${{ env.WORKSPACE_ROOT }}
+          cargo fmt --manifest-path=${{ env.MODULE_PATH }}/Cargo.toml -- --check
+      
+      - name: Check with clippy
+        run: |
+          cd ${{ env.WORKSPACE_ROOT }}
+          cargo clippy --manifest-path=${{ env.MODULE_PATH }}/Cargo.toml --all-targets --all-features -- -D warnings
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+          submodules: recursive
+      
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Cache cargo registry and target
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       
       - name: Run tests
-        run: cargo test --all-features --workspace
+        run: |
+          cd ${{ env.WORKSPACE_ROOT }}
+          cargo test --manifest-path=${{ env.MODULE_PATH }}/Cargo.toml --all-features
 
   build:
-    name: Build
+    name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v3
         with:
           fetch-depth: 0
           submodules: recursive
@@ -77,12 +96,20 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       
       - name: Cache cargo registry and target
-        uses: Swatinem/rust-cache@v2
+        uses: actions/cache@v3
         with:
-          key: ${{ runner.os }}
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       
       - name: Build
-        run: cargo build --package runar_node --verbose
+        run: |
+          cd ${{ env.WORKSPACE_ROOT }}
+          cargo build --manifest-path=${{ env.MODULE_PATH }}/Cargo.toml --package runar_node --verbose
       
       - name: Build release
-        run: cargo build --release --package runar_node --verbose
+        run: |
+          cd ${{ env.WORKSPACE_ROOT }}
+          cargo build --release --manifest-path=${{ env.MODULE_PATH }}/Cargo.toml --package runar_node --verbose
