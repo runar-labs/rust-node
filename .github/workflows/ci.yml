@@ -5,10 +5,14 @@ on:
     branches: [ main, master ]
     paths:
       - '**'
+      - '!**/target/**'
+      - '!**/.github/**'
   pull_request:
     branches: [ main, master ]
     paths:
       - '**'
+      - '!**/target/**'
+      - '!**/.github/**'
 
 env:
   CARGO_TERM_COLOR: always
@@ -18,14 +22,19 @@ jobs:
   check:
     name: Check
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ../..
     steps:
       - uses: actions/checkout@v3
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Check code format
-        run: cargo fmt -- --check
+        run: cargo fmt --all -- --check
       - name: Check with clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
 
   cross-platform-test:
     name: Test (${{ matrix.os }})
@@ -34,20 +43,30 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+    defaults:
+      run:
+        working-directory: ../..
     steps:
       - uses: actions/checkout@v3
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ runner.os }}
       - name: Run tests
-        run: cargo test --all-features
+        run: cargo test --all-features --workspace
 
   coverage:
     name: Code Coverage
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ../..
     steps:
       - uses: actions/checkout@v3
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
@@ -55,11 +74,13 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
       - name: Generate code coverage
-        run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+        run: |
+          cd rust-node
+          cargo llvm-cov --all-features --lcov --output-path lcov.info
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v3
         with:
-          files: ./lcov.info
+          files: rust-node/lcov.info
           fail_ci_if_error: true
 
   cross-platform-build:
@@ -69,25 +90,37 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+    defaults:
+      run:
+        working-directory: ../..
     steps:
       - uses: actions/checkout@v3
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ runner.os }}
       - name: Build
-        run: cargo build --verbose
+        run: cargo build --package runar_node --verbose
       - name: Build release
-        run: cargo build --release --verbose
+        run: cargo build --release --package runar_node --verbose
 
   benchmarks:
     name: Benchmarks
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ../..
     steps:
       - uses: actions/checkout@v3
+        with:
+          submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: nightly
       - uses: Swatinem/rust-cache@v2
       - name: Run benchmarks
-        run: cargo +nightly bench
+        run: |
+          cd rust-node
+          cargo +nightly bench
