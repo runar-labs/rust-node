@@ -49,7 +49,7 @@ pub use services::abstract_service::{AbstractService, ServiceState};
 pub use services::service_registry::ServiceRegistry;
 pub use services::{
     ActionHandler, EventContext, LifecycleContext, NodeDelegate, PublishOptions, RegistryDelegate,
-    RequestContext, ServiceRequest, ServiceResponse, SubscriptionOptions,
+    RequestContext, ServiceRequest, SubscriptionOptions,
 };
 
 // Re-export the schema types from runar_common

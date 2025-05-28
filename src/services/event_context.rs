@@ -12,7 +12,7 @@
 
 use crate::routing::TopicPath;
 use crate::services::NodeDelegate;
-use crate::services::{PublishOptions, ServiceResponse};
+use crate::services::{PublishOptions};
 use anyhow::{anyhow, Result};
 use runar_common::logging::{Component, Logger, LoggingContext};
 use runar_common::types::ArcValueType;
@@ -140,7 +140,7 @@ impl EventContext {
     /// - Full path with network ID: "network:service/topic" (used as is)
     /// - Path with service: "service/topic" (network ID added)
     /// - Simple topic: "topic" (both service path and network ID added)
-    pub async fn publish(&self, topic: impl Into<String>, data: ArcValueType) -> Result<()> {
+    pub async fn publish(&self, topic: impl Into<String>, data: Option<ArcValueType>) -> Result<()> {
         if let Some(delegate) = &self.node_delegate {
             let topic_string = topic.into();
 
@@ -163,7 +163,7 @@ impl EventContext {
 
             self.logger
                 .debug(format!("Publishing to processed topic: {}", full_topic));
-            delegate.publish(full_topic, Some(data)).await
+            delegate.publish(full_topic, data).await
         } else {
             Err(anyhow!("No node delegate available in this context"))
         }
@@ -182,8 +182,8 @@ impl EventContext {
     pub async fn request(
         &self,
         path: impl Into<String>,
-        params: ArcValueType,
-    ) -> Result<ServiceResponse> {
+        params: Option<ArcValueType>,
+    ) -> Result<Option<ArcValueType>> {
         if let Some(delegate) = &self.node_delegate {
             let path_string = path.into();
 
@@ -206,7 +206,7 @@ impl EventContext {
 
             self.logger
                 .debug(format!("Making request to processed path: {}", full_path));
-            delegate.request(full_path, Some(params)).await
+            delegate.request(full_path, params).await
         } else {
             Err(anyhow!("No node delegate available in this context"))
         }

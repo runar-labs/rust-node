@@ -188,7 +188,12 @@ impl RemoteService {
         Arc::new(move |params, context| {
             // let service_clone = service.clone();
             let action = action_name.clone();
-            let action_topic_path = service.service_topic.new_action_topic(&action)?;
+            
+            // Handle the Result explicitly instead of using the ? operator
+            let action_topic_path = match service.service_topic.new_action_topic(&action) {
+                Ok(path) => path,
+                Err(e) => return Box::pin(async move { Err(anyhow::anyhow!(e)) })
+            };
 
             // Clone all necessary fields before the async block
             let peer_id = service.peer_id.clone();
@@ -197,7 +202,7 @@ impl RemoteService {
             let network_transport = service.network_transport.clone();
             let serializer = service.serializer.clone();
             let request_timeout_ms = service.request_timeout_ms;
-            
+                
             Box::pin(async move {
                 // Generate a unique request ID
                 let request_id = Uuid::new_v4().to_string();
