@@ -5,12 +5,10 @@ on:
     branches: [ main, master ]
     paths:
       - '**'
-      - '!**/Cargo.lock'
   pull_request:
     branches: [ main, master ]
     paths:
       - '**'
-      - '!**/Cargo.lock'
 
 env:
   CARGO_TERM_COLOR: always
