@@ -2,10 +2,10 @@
 //!
 //! INTENTION: Handles lifecycle, lookup, and management of all peer connections for QUIC transport.
 
-use std::sync::Arc;
+use crate::network::transport::{NetworkError, PeerId, PeerState};
 use dashmap::DashMap;
 use runar_common::logging::Logger;
-use crate::network::transport::{PeerState, NetworkError, PeerId};
+use std::sync::Arc;
 
 /// ConnectionPool - Manages active connections
 ///
@@ -41,12 +41,17 @@ impl ConnectionPool {
         peer_id: PeerId,
         address: String,
         max_idle_streams: usize,
-        logger: Arc<Logger>
+        logger: Arc<Logger>,
     ) -> Arc<PeerState> {
         if let Some(existing) = self.peers.get(&peer_id) {
             existing.clone()
         } else {
-            let peer_state = Arc::new(PeerState::new(peer_id.clone(), address, max_idle_streams, logger));
+            let peer_state = Arc::new(PeerState::new(
+                peer_id.clone(),
+                address,
+                max_idle_streams,
+                logger,
+            ));
             self.peers.insert(peer_id.clone(), peer_state.clone());
             peer_state
         }
@@ -95,9 +100,7 @@ impl ConnectionPool {
         }
         connected_peers
     }
- 
 }
-
 
 impl std::fmt::Debug for ConnectionPool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

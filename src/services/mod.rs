@@ -29,17 +29,19 @@ pub mod service_registry;
 use crate::routing::TopicPath;
 use anyhow::{anyhow, Result};
 use runar_common::logging::{Component, Logger, LoggingContext};
-use runar_common::types::{ActionMetadata, ArcValueType, EventMetadata, FieldSchema, SerializerRegistry};
-use tokio::sync::RwLock;
+use runar_common::types::{
+    ActionMetadata, ArcValueType, EventMetadata, FieldSchema, SerializerRegistry,
+};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 // Import types from submodules
 use crate::services::abstract_service::ServiceState;
-use runar_common::types::schemas::ServiceMetadata;
 use crate::services::remote_service::RemoteService;
+use runar_common::types::schemas::ServiceMetadata;
 
 // Re-export the context types from their dedicated modules
 pub use crate::services::event_context::EventContext;
@@ -81,14 +83,19 @@ pub struct LifecycleContext {
     /// Node delegate for node operations
     node_delegate: Arc<dyn NodeDelegate + Send + Sync>,
     /// Serializer registry for type registration
-    pub serializer:Arc<RwLock<SerializerRegistry>>,
+    pub serializer: Arc<RwLock<SerializerRegistry>>,
 }
 
 impl LifecycleContext {
     /// Create a new LifecycleContext with a topic path and logger
     ///
     /// This is the primary constructor that takes the minimum required parameters.
-    pub fn new(topic_path: &TopicPath, serializer: Arc<RwLock<SerializerRegistry>>, node_delegate: Arc<dyn NodeDelegate + Send + Sync>, logger: Logger) -> Self {
+    pub fn new(
+        topic_path: &TopicPath,
+        serializer: Arc<RwLock<SerializerRegistry>>,
+        node_delegate: Arc<dyn NodeDelegate + Send + Sync>,
+        logger: Logger,
+    ) -> Self {
         Self {
             network_id: topic_path.network_id(),
             service_path: topic_path.service_path(),
@@ -157,7 +164,10 @@ impl LifecycleContext {
 
         let metadata = ActionMetadata {
             name: action_name_string.clone(),
-            description: format!("Action {} for service {}", action_name_string, self.service_path),
+            description: format!(
+                "Action {} for service {}",
+                action_name_string, self.service_path
+            ),
             input_schema: None,
             output_schema: None,
         };
@@ -203,7 +213,7 @@ impl LifecycleContext {
             .await
     }
 
-   pub async fn subscribe(
+    pub async fn subscribe(
         &self,
         topic: impl Into<String>,
         callback: Box<
@@ -215,7 +225,7 @@ impl LifecycleContext {
                 + Sync,
         >,
     ) -> Result<String> {
-        let delegate = &self.node_delegate;  
+        let delegate = &self.node_delegate;
         return delegate.subscribe(topic.into(), callback).await;
     }
 }
@@ -512,7 +522,11 @@ impl Default for EventRegistrationOptions {
 #[async_trait::async_trait]
 pub trait NodeRequestHandler: Send + Sync {
     /// Process a service request
-    async fn request(&self, path: String, params: Option<ArcValueType>) -> Result<Option<ArcValueType>>;
+    async fn request(
+        &self,
+        path: String,
+        params: Option<ArcValueType>,
+    ) -> Result<Option<ArcValueType>>;
 
     /// Publish an event to a topic
     async fn publish(&self, topic: String, data: Option<ArcValueType>) -> Result<()>;
@@ -636,7 +650,11 @@ pub trait EventDispatcher: Send + Sync {
 #[async_trait::async_trait]
 pub trait NodeDelegate: Send + Sync {
     /// Process a service request
-    async fn request(&self, path: String, params: Option<ArcValueType>) -> Result<Option<ArcValueType>>;
+    async fn request(
+        &self,
+        path: String,
+        params: Option<ArcValueType>,
+    ) -> Result<Option<ArcValueType>>;
 
     /// Simplified publish for common cases
     async fn publish(&self, topic: String, data: Option<ArcValueType>) -> Result<()>;
@@ -692,14 +710,10 @@ pub trait NodeDelegate: Send + Sync {
 /// the functionality needed by registry operations.
 #[async_trait::async_trait]
 pub trait RegistryDelegate: Send + Sync {
-
     async fn get_service_state(&self, service_path: &TopicPath) -> Option<ServiceState>;
 
     /// Get metadata for a specific service
-    async fn get_service_metadata(
-        &self,
-        service_path: &TopicPath,
-    ) -> Option<ServiceMetadata>;
+    async fn get_service_metadata(&self, service_path: &TopicPath) -> Option<ServiceMetadata>;
 
     /// Get metadata for all registered services with an option to filter internal services
     ///
@@ -709,15 +723,12 @@ pub trait RegistryDelegate: Send + Sync {
         &self,
         include_internal_services: bool,
     ) -> HashMap<String, ServiceMetadata>;
-    
+
     /// Get metadata for all actions under a specific service path
     ///
     /// INTENTION: Retrieve metadata for all actions registered under a service path.
     /// This is useful for service discovery and introspection.
-    async fn get_actions_metadata(
-        &self,
-        service_topic_path: &TopicPath,
-    ) -> Vec<ActionMetadata>;
+    async fn get_actions_metadata(&self, service_topic_path: &TopicPath) -> Vec<ActionMetadata>;
 
     /// Register a remote action handler
     ///
@@ -846,4 +857,3 @@ pub type ServiceHandler = Box<
         + Send
         + Sync,
 >;
- 

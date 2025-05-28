@@ -12,7 +12,7 @@
 
 use crate::routing::TopicPath;
 use crate::services::NodeDelegate;
-use crate::services::{PublishOptions};
+use crate::services::PublishOptions;
 use anyhow::{anyhow, Result};
 use runar_common::logging::{Component, Logger, LoggingContext};
 use runar_common::types::ArcValueType;
@@ -140,7 +140,11 @@ impl EventContext {
     /// - Full path with network ID: "network:service/topic" (used as is)
     /// - Path with service: "service/topic" (network ID added)
     /// - Simple topic: "topic" (both service path and network ID added)
-    pub async fn publish(&self, topic: impl Into<String>, data: Option<ArcValueType>) -> Result<()> {
+    pub async fn publish(
+        &self,
+        topic: impl Into<String>,
+        data: Option<ArcValueType>,
+    ) -> Result<()> {
         if let Some(delegate) = &self.node_delegate {
             let topic_string = topic.into();
 

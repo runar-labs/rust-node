@@ -65,7 +65,7 @@ pub use network::{
 };
 // Re-export peer registry types from transport
 pub use network::transport::{PeerEntry, PeerRegistry, PeerStatus};
- 
+
 // Re-export common macros for convenience
 pub use runar_common::vmap;
 

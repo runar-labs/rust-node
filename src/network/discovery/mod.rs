@@ -8,11 +8,11 @@ use anyhow::Result;
 use async_trait::async_trait;
 use multicast_discovery::PeerInfo;
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 use std::sync::Arc;
+use std::time::Duration;
 
-use runar_common::types::ServiceMetadata;
 use crate::network::transport::PeerId;
+use runar_common::types::ServiceMetadata;
 
 pub mod memory_discovery;
 pub mod mock;
@@ -80,7 +80,8 @@ use std::future::Future;
 use std::pin::Pin;
 
 /// Callback function type for discovery events (async)
-pub type DiscoveryListener = Arc<dyn Fn(PeerInfo) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+pub type DiscoveryListener =
+    Arc<dyn Fn(PeerInfo) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// Interface for node discovery mechanisms
 #[async_trait]
@@ -94,7 +95,7 @@ pub trait NodeDiscovery: Send + Sync {
     /// Stop announcing this node's presence
     async fn stop_announcing(&self) -> Result<()>;
 
-        /// Set a listener to be called when nodes are discovered or updated (async)
+    /// Set a listener to be called when nodes are discovered or updated (async)
     async fn set_discovery_listener(&self, listener: DiscoveryListener) -> Result<()>;
 
     /// Shutdown the discovery mechanism

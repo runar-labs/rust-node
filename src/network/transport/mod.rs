@@ -16,9 +16,9 @@ use std::time::Duration;
 use thiserror::Error;
 
 // Internal module declarations
-pub mod peer_registry;
 pub mod cert_utils;
 pub mod connection_pool;
+pub mod peer_registry;
 pub mod peer_state;
 pub mod quic_transport;
 pub mod stream_pool;
@@ -58,9 +58,10 @@ pub(crate) fn generate_test_certificates() -> (Vec<rustls::Certificate>, rustls:
     params.alg = &rcgen::PKCS_ECDSA_P256_SHA256;
     params.not_before = rcgen::date_time_ymd(2023, 1, 1);
     params.not_after = rcgen::date_time_ymd(2026, 1, 1);
-    let cert = rcgen::Certificate::from_params(params)
-        .expect("Failed to generate certificate");
-    let cert_der = cert.serialize_der().expect("Failed to serialize certificate");
+    let cert = rcgen::Certificate::from_params(params).expect("Failed to generate certificate");
+    let cert_der = cert
+        .serialize_der()
+        .expect("Failed to serialize certificate");
     let key_der = cert.serialize_private_key_der();
     let rustls_cert = rustls::Certificate(cert_der);
     let rustls_key = rustls::PrivateKey(key_der);
@@ -76,8 +77,7 @@ pub use quic_transport::{QuicTransport, QuicTransportOptions};
 
 use super::discovery::multicast_discovery::PeerInfo;
 // Import NodeInfo from the discovery module
-use super::discovery::{ NodeInfo};
-
+use super::discovery::NodeInfo;
 
 /// Type alias for async-returning function
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -261,27 +261,24 @@ pub trait NetworkTransport: Send + Sync {
     async fn send_message(&self, message: NetworkMessage) -> Result<(), NetworkError>;
 
     /// connect to a discovered node
-    /// 
+    ///
     /// Returns the NodeInfo of the connected peer after successful handshake
-    async fn connect_peer(
-        &self,
-        discovery_msg: PeerInfo,
-    ) -> Result<(), NetworkError>;
-    
+    async fn connect_peer(&self, discovery_msg: PeerInfo) -> Result<(), NetworkError>;
+
     /// Get the local address this transport is bound to as a string
     fn get_local_address(&self) -> String;
 
     /// Update the list of connected peers with the latest node info
     async fn update_peers(&self, node_info: NodeInfo) -> Result<(), NetworkError>;
-    
+
     // /// Register a message handler for incoming messages
     // async fn register_message_handler(
     //     &self,
     //     handler: Box<dyn Fn(NetworkMessage) -> Result<(), NetworkError> + Send + Sync + 'static>,
     // ) -> Result<(), NetworkError>;
-    
+
     /// Subscribe to peer node info updates
-    /// 
+    ///
     /// INTENTION: Allow callers to subscribe to peer node info updates when they are received
     /// during handshakes. This is used by the Node to create RemoteService instances.
     async fn subscribe_to_peer_node_info(&self) -> tokio::sync::broadcast::Receiver<NodeInfo>;
@@ -301,5 +298,3 @@ pub enum NetworkError {
     #[error("Configuration error: {0}")]
     ConfigurationError(String),
 }
-
- 

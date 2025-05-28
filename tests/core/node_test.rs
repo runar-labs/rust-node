@@ -3,18 +3,18 @@
 // These tests verify that the Node properly handles requests
 // and delegates to the ServiceRegistry as needed.
 
+use runar_common::hmap;
+use runar_common::types::ArcValueType;
+use runar_node::config::logging_config::{LogLevel, LoggingConfig};
+use runar_node::{Node, NodeConfig};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::timeout; 
-use runar_common::types::ArcValueType;
-use runar_common::{hmap};
-use runar_node::{Node, NodeConfig};
-use runar_node::config::logging_config::{LogLevel, LoggingConfig};
- 
-use runar_node::services::{EventContext};
+use tokio::time::timeout;
+
+use runar_node::services::EventContext;
 use runar_node::NodeDelegate;
 
 // Import the test fixtures
@@ -292,7 +292,8 @@ async fn test_path_params_in_context() {
     // Verify the path parameters were correctly extracted
     if let Some(data) = &response {
         // Convert to HashMap<String, String>
-        let params_map = data.clone()
+        let params_map = data
+            .clone()
             .as_map_ref::<String, String>()
             .expect("Failed to extract map from ArcValueType");
 

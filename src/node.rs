@@ -6,7 +6,6 @@
 //
 
 use anyhow::{anyhow, Result};
-use std::pin::Pin;
 use async_trait::async_trait;
 use runar_common::logging::{Component, Logger};
 use runar_common::types::schemas::{ActionMetadata, ServiceMetadata};
@@ -15,36 +14,32 @@ use socket2;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::future::Future;
+use std::pin::Pin;
 use tokio::time::{sleep, Duration};
- 
+
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{oneshot, RwLock};
 use uuid::Uuid;
 
 use crate::network::discovery::multicast_discovery::PeerInfo;
-use crate::network::discovery::{
-    DiscoveryOptions, MulticastDiscovery, NodeDiscovery, NodeInfo,
-};
+use crate::network::discovery::{DiscoveryOptions, MulticastDiscovery, NodeDiscovery, NodeInfo};
 use crate::network::transport::{
- 
-      NetworkMessage, NetworkMessagePayloadItem, 
-    NetworkTransport, PeerId, QuicTransport,
- 
+    NetworkMessage, NetworkMessagePayloadItem, NetworkTransport, PeerId, QuicTransport,
 };
 // Certificate and PrivateKey types are now imported via the cert_utils module
-use crate::network::network_config::{NetworkConfig, DiscoveryProviderConfig, TransportType};
 use crate::config::LoggingConfig;
-use crate::services::load_balancing::{LoadBalancingStrategy, RoundRobinLoadBalancer};
+use crate::network::network_config::{DiscoveryProviderConfig, NetworkConfig, TransportType};
 use crate::routing::TopicPath;
 use crate::services::abstract_service::{AbstractService, ServiceState};
+use crate::services::load_balancing::{LoadBalancingStrategy, RoundRobinLoadBalancer};
 use crate::services::registry_service::RegistryService;
 use crate::services::remote_service::RemoteService;
 use crate::services::service_registry::{ServiceEntry, ServiceRegistry};
 use crate::services::{
     ActionHandler, EventContext, NodeDelegate, PublishOptions, RegistryDelegate,
     RemoteLifecycleContext, RequestContext, SubscriptionOptions,
-}; 
+};
 
 /// Node Configuration
 ///
@@ -203,54 +198,61 @@ impl Node {
         if let Some(transport) = transport.as_ref() {
             // Subscribe to peer node info updates directly using the Transport trait
             let mut receiver = transport.subscribe_to_peer_node_info().await;
-            
+
             // Clone what we need for the task
             let node = self.clone();
             let logger = self.logger.clone();
-            
+
             // Spawn a task to listen for peer node info updates
             tokio::spawn(async move {
                 logger.info("Started peer node info listener");
-                
+
                 loop {
                     // The broadcast channel's recv() returns a Result, not an Option
                     match receiver.recv().await {
                         Ok(peer_node_info) => {
-                            logger.info(format!("Received peer node info from {}", peer_node_info.peer_id));
-                            
+                            logger.info(format!(
+                                "Received peer node info from {}",
+                                peer_node_info.peer_id
+                            ));
+
                             // Process the peer node info
                             if let Err(e) = node.process_remote_capabilities(peer_node_info).await {
-                                logger.error(format!("Failed to process remote capabilities: {}", e));
+                                logger
+                                    .error(format!("Failed to process remote capabilities: {}", e));
                             }
-                        },
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                             logger.info("Peer node info channel closed");
                             break;
-                        },
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                            logger.warn(format!("Peer node info receiver lagged, skipped {} messages", skipped));
+                            logger.warn(format!(
+                                "Peer node info receiver lagged, skipped {} messages",
+                                skipped
+                            ));
                             // Continue receiving messages
                         }
                     }
                 }
-                
+
                 logger.info("Peer node info listener stopped");
             });
-            
+
             self.logger.info("starting network transport layer...");
             transport
                 .start()
                 .await
                 .map_err(|e| anyhow!("Failed to initialize transport: {}", e))?;
-            
+
             return Ok(());
         }
-        
+
         // If we get here, we couldn't set up the listener
         self.logger.warn("Could not set up peer node info listener");
         Ok(())
     }
-    
+
     /// Create a new Node with the given configuration
     ///
     /// INTENTION: Initialize a new Node with the specified configuration, setting up
@@ -291,7 +293,7 @@ impl Node {
 
         let service_registry = Arc::new(ServiceRegistry::new(logger.clone()));
         let peer_id = PeerId::new(node_id.clone());
-        let serializer_logger = Arc::new(  logger.with_component(Component::Custom("Serializer")));
+        let serializer_logger = Arc::new(logger.with_component(Component::Custom("Serializer")));
         // Create the node (with network fields now included)
         let mut node = Self {
             debounce_notify_task: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
@@ -306,9 +308,11 @@ impl Node {
             supports_networking: networking_enabled,
             network_transport: Arc::new(RwLock::new(None)),
             network_discovery_providers: Arc::new(RwLock::new(None)),
-            load_balancer: Arc::new(RwLock::new(RoundRobinLoadBalancer::new())), 
+            load_balancer: Arc::new(RwLock::new(RoundRobinLoadBalancer::new())),
             pending_requests: Arc::new(RwLock::new(HashMap::new())),
-            serializer: Arc::new(RwLock::new(SerializerRegistry::with_defaults(serializer_logger))),
+            serializer: Arc::new(RwLock::new(SerializerRegistry::with_defaults(
+                serializer_logger,
+            ))),
             registry_version: Arc::new(AtomicI64::new(0)),
         };
 
@@ -399,7 +403,7 @@ impl Node {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-            
+
         let service_entry = ServiceEntry {
             service: Arc::new(service),
             service_topic,
@@ -410,7 +414,6 @@ impl Node {
         registry
             .register_local_service(Arc::new(service_entry))
             .await?;
-
 
         //if started... need to increment  -> registry_version
         if self.running.load(Ordering::SeqCst) {
@@ -449,7 +452,7 @@ impl Node {
             self.logger
                 .info(format!("Initializing service: {}", service_topic));
 
-            let service = service_entry.service.clone(); 
+            let service = service_entry.service.clone();
 
             // Create a lifecycle context for starting
             let start_context = crate::services::LifecycleContext::new(
@@ -525,7 +528,6 @@ impl Node {
 
             // Extract the service from the entry
             let service = service_entry.service.clone();
- 
 
             // Create a lifecycle context for stopping
             let stop_context = crate::services::LifecycleContext::new(
@@ -594,20 +596,16 @@ impl Node {
 
             // Create network transport using the factory pattern based on transport_type
             // let node_identifier = self.peer_id.clone();
-            let transport = self
-                .create_transport(network_config)
-                .await?;
+            let transport = self.create_transport(network_config).await?;
 
             // Store the transport
             let mut transport_guard = self.network_transport.write().await;
             *transport_guard = Some(transport);
             //release lock
             drop(transport_guard);
-            
-            
+
             // Set up the peer node info listener
             self.setup_peer_node_info_listener().await?;
-
         }
 
         // Initialize discovery if enabled
@@ -628,7 +626,9 @@ impl Node {
 
                 // Create network transport using the factory pattern based on transport_type
                 // let node_identifier = self.peer_id.clone();
-                let discovery_provider = self.create_discovery_provider(provider_config, Some(discovery_options.clone())).await?;
+                let discovery_provider = self
+                    .create_discovery_provider(provider_config, Some(discovery_options.clone()))
+                    .await?;
 
                 // // Configure discovery listener for this provider
                 let node_arc = node_arc.clone();
@@ -654,7 +654,7 @@ impl Node {
                     "Starting to announce on {:?} discovery provider",
                     provider_type
                 ));
-                discovery_provider.start_announcing().await?; 
+                discovery_provider.start_announcing().await?;
 
                 discovery_providers.push(discovery_provider);
             }
@@ -693,14 +693,18 @@ impl Node {
 
                 // Use bind address and options from config
                 let bind_addr = network_config.transport_options.bind_address;
-                let quic_options = network_config.quic_options.clone()
+                let quic_options = network_config
+                    .quic_options
+                    .clone()
                     .ok_or_else(|| anyhow!("QUIC options not provided"))?;
 
                 let message_handler = Box::new(move |message: NetworkMessage| {
                     let self_arc = self_arc.clone();
                     tokio::spawn(async move {
                         if let Err(e) = self_arc.handle_network_message(message).await {
-                            self_arc.logger.error(format!("Error handling network message: {}", e));
+                            self_arc
+                                .logger
+                                .error(format!("Error handling network message: {}", e));
                         }
                     });
                     // Return success immediately since we've spawned the task
@@ -713,12 +717,12 @@ impl Node {
                     message_handler,
                     quic_options,
                     self.logger.clone(),
-                ).map_err(|e| anyhow!("Failed to create QUIC transport: {}", e))?;
+                )
+                .map_err(|e| anyhow!("Failed to create QUIC transport: {}", e))?;
 
                 self.logger.debug("QUIC transport created");
                 Ok(Box::new(transport))
-            }
-            // Add other transport types here as needed in the future
+            } // Add other transport types here as needed in the future
         }
     }
 
@@ -772,11 +776,13 @@ impl Node {
         let transport = self.network_transport.read().await;
         if let Some(transport) = transport.as_ref() {
             // Check if the transporter is already connected to this peer
-            let is_already_connected = transport.is_connected(PeerId::new(peer_public_key.clone())).await;
-            
+            let is_already_connected = transport
+                .is_connected(PeerId::new(peer_public_key.clone()))
+                .await;
+
             if is_already_connected {
                 self.logger.info(format!(
-                    "Already connected to node: {}, ignoring discovery event", 
+                    "Already connected to node: {}, ignoring discovery event",
                     peer_public_key
                 ));
                 return Ok(());
@@ -786,11 +792,12 @@ impl Node {
             // The peer node info will be received through the peer_node_info_channel
             match transport.connect_peer(peer_info.clone()).await {
                 Ok(()) => {
-                    self.logger.info(format!("Connected to node: {}", peer_public_key));
+                    self.logger
+                        .info(format!("Connected to node: {}", peer_public_key));
                     // Note: Peer node info is sent through the peer_node_info_channel
                     // and will be processed by the peer_node_info_listener task
                     return Ok(());
-                },
+                }
                 Err(e) => {
                     self.logger.warn(format!(
                         "Failed to connect to peer {}: {}",
@@ -863,13 +870,9 @@ impl Node {
                         return Err(anyhow!("Failed to deserialize request payload: {}", e));
                     }
                 };
-            let params_option = if params.is_null() {
-                None
-            } else {
-                Some(params)
-            };
- 
-            let local_peer_id = self.peer_id.clone(); 
+            let params_option = if params.is_null() { None } else { Some(params) };
+
+            let local_peer_id = self.peer_id.clone();
 
             // Process the request locally using extracted topic and params
             self.logger
@@ -947,14 +950,15 @@ impl Node {
                     let error_value = ArcValueType::from_map(error_map);
 
                     // Serialize the error value
-                    let serialized_error = match self.serializer.read().await.serialize_value(&error_value) {
-                        Ok(bytes) => bytes.to_vec(),
-                        Err(e) => {
-                            self.logger
-                                .error(format!("Failed to serialize error response: {}", e));
-                            return Err(anyhow!("Failed to serialize error response: {}", e));
-                        }
-                    };
+                    let serialized_error =
+                        match self.serializer.read().await.serialize_value(&error_value) {
+                            Ok(bytes) => bytes.to_vec(),
+                            Err(e) => {
+                                self.logger
+                                    .error(format!("Failed to serialize error response: {}", e));
+                                return Err(anyhow!("Failed to serialize error response: {}", e));
+                            }
+                        };
 
                     // Create payload item with serialized error
                     let error_payload = NetworkMessagePayloadItem {
@@ -995,7 +999,7 @@ impl Node {
             }
         }
 
-    Ok(())
+        Ok(())
     }
 
     /// Handle a network response
@@ -1024,7 +1028,8 @@ impl Node {
             ));
 
             // Find any pending response handlers
-            if let Some(pending_request_sender) = self.pending_requests.write().await.remove(correlation_id)
+            if let Some(pending_request_sender) =
+                self.pending_requests.write().await.remove(correlation_id)
             {
                 self.logger.debug(format!(
                     "Found response handler for correlation ID: {}",
@@ -1108,7 +1113,11 @@ impl Node {
             };
 
             // Deserialize the payload data
-            let payload = match self.serializer.read().await.deserialize_value(Arc::from(payload_item.value_bytes.clone()))
+            let payload = match self
+                .serializer
+                .read()
+                .await
+                .deserialize_value(Arc::from(payload_item.value_bytes.clone()))
             {
                 Ok(value) => value,
                 Err(e) => {
@@ -1185,7 +1194,8 @@ impl Node {
                 .debug(format!("Executing local handler for: {}", topic_path));
 
             // Create request context
-            let mut context = RequestContext::new(&topic_path,Arc::new(self.clone()),  self.logger.clone());
+            let mut context =
+                RequestContext::new(&topic_path, Arc::new(self.clone()), self.logger.clone());
 
             // Extract parameters using the original registration path
             if let Ok(params) = topic_path.extract_params(&registration_path.action_path()) {
@@ -1241,7 +1251,8 @@ impl Node {
                 .debug(format!("Executing local handler for: {}", topic_path));
 
             // Create request context
-            let mut context = RequestContext::new(&topic_path, Arc::new(self.clone()), self.logger.clone());
+            let mut context =
+                RequestContext::new(&topic_path, Arc::new(self.clone()), self.logger.clone());
 
             // Extract parameters using the original registration path
             if let Ok(params) = topic_path.extract_params(&registration_path.action_path()) {
@@ -1273,7 +1284,7 @@ impl Node {
             let load_balancer = self.load_balancer.read().await;
             let handler_index = load_balancer.select_handler(
                 &remote_handlers,
-                &RequestContext::new(&topic_path,Arc::new(self.clone()), self.logger.clone()),
+                &RequestContext::new(&topic_path, Arc::new(self.clone()), self.logger.clone()),
             );
 
             // Get the selected handler
@@ -1287,7 +1298,8 @@ impl Node {
             ));
 
             // Create request context
-            let context = RequestContext::new(&topic_path, Arc::new(self.clone()), self.logger.clone());
+            let context =
+                RequestContext::new(&topic_path, Arc::new(self.clone()), self.logger.clone());
 
             // For remote handlers, we don't have the registration path
             // In the future, we should enhance the remote handler registry to include registration paths
@@ -1356,7 +1368,6 @@ impl Node {
         &self,
         new_peer: NodeInfo,
     ) -> Result<Vec<Arc<RemoteService>>> {
-
         //check if we alrady know about this service..
         let mut known_peers = self.known_peers.write().await;
         if let Some(existing_peer) = known_peers.get(&new_peer.peer_id) {
@@ -1382,17 +1393,19 @@ impl Node {
     ) -> Result<Vec<Arc<RemoteService>>> {
         //remove all the services
         for service_to_remove in &existing_peer.services {
-            let service_path = TopicPath::new(&service_to_remove.service_path, service_to_remove.network_id.as_str()).unwrap();
-            self.service_registry.remove_remote_service(&service_path).await?;
+            let service_path = TopicPath::new(
+                &service_to_remove.service_path,
+                service_to_remove.network_id.as_str(),
+            )
+            .unwrap();
+            self.service_registry
+                .remove_remote_service(&service_path)
+                .await?;
         }
         Ok(Vec::new())
     }
 
-    async fn add_new_peer(
-        &self,
-        node_info: NodeInfo,
-    ) -> Result<Vec<Arc<RemoteService>>> {
-
+    async fn add_new_peer(&self, node_info: NodeInfo) -> Result<Vec<Arc<RemoteService>>> {
         let capabilities = node_info.services.clone();
         self.logger.info(format!(
             "Processing {} capabilities from node {}",
@@ -1481,8 +1494,8 @@ impl Node {
 
         Ok(remote_services)
     }
- 
-    //this function is debounced since it can be called in rapid suyccession.. it is debounced for 5 seconds.. 
+
+    //this function is debounced since it can be called in rapid suyccession.. it is debounced for 5 seconds..
     // it will then call the notify_node_change_impl  which will use the transposter to send a handshake message with the latest node info to all known peers.
     /// Debounced notification of node change.
     ///
@@ -1491,7 +1504,6 @@ impl Node {
     /// trigger the actual notification. After the debounce period, it delegates to notify_node_change_impl,
     /// which sends the latest node info to all known peers via the transport.
     pub async fn notify_node_change(&self) -> Result<()> {
-        
         let debounce_task = self.debounce_notify_task.clone();
         let this = self.clone();
         // Cancel any existing debounce task
@@ -1506,7 +1518,10 @@ impl Node {
             sleep(Duration::from_secs(2)).await;
             // Ignore errors from notify_node_change_impl; log if needed
             if let Err(e) = this.notify_node_change_impl().await {
-                this.logger.warn(format!("notify_node_change_impl failed after debounce: {}", e));
+                this.logger.warn(format!(
+                    "notify_node_change_impl failed after debounce: {}",
+                    e
+                ));
             }
         });
         // Store the new handle
@@ -1519,9 +1534,12 @@ impl Node {
 
     pub async fn notify_node_change_impl(&self) -> Result<()> {
         let local_node_info = self.get_local_node_info().await?;
-        
-        self.logger.info(format!("Notifying node change - version: {}", local_node_info.version));
-        
+
+        self.logger.info(format!(
+            "Notifying node change - version: {}",
+            local_node_info.version
+        ));
+
         let transport_guard = self.network_transport.read().await;
         if let Some(transport) = transport_guard.as_ref() {
             transport.update_peers(local_node_info).await?;
@@ -1538,7 +1556,8 @@ impl Node {
     ///
     pub async fn collect_local_service_capabilities(&self) -> Result<Vec<ServiceMetadata>> {
         // Get all local services
-        let service_paths: HashMap<TopicPath, Arc<ServiceEntry>> = self.service_registry.get_local_services().await;
+        let service_paths: HashMap<TopicPath, Arc<ServiceEntry>> =
+            self.service_registry.get_local_services().await;
         if service_paths.is_empty() {
             return Ok(Vec::new());
         }
@@ -1558,16 +1577,15 @@ impl Node {
             if let Some(meta) = self
                 .service_registry
                 .get_service_metadata(&service_path)
-                .await {
+                .await
+            {
                 services.push(meta);
             }
         }
 
         // Log all capabilities collected
-        self.logger.info(format!(
-            "Collected {} services metadata",
-            services.len()
-        ));
+        self.logger
+            .info(format!("Collected {} services metadata", services.len()));
         Ok(services)
     }
 
@@ -1636,7 +1654,7 @@ impl Node {
     /// Get a non-loopback IP address from the local network interfaces
     fn get_non_loopback_ip(&self) -> Result<String> {
         use socket2::{Domain, Socket, Type};
-        use std::net::{ SocketAddr};
+        use std::net::SocketAddr;
 
         // Create a UDP socket
         let socket = Socket::new(Domain::IPV4, Type::DGRAM, None)?;
@@ -1688,15 +1706,17 @@ impl Node {
             }
         }
 
-
         Ok(())
     }
- 
 }
 
 #[async_trait]
 impl NodeDelegate for Node {
-    async fn request(&self, path: String, params: Option<ArcValueType>) -> Result<Option<ArcValueType>> {
+    async fn request(
+        &self,
+        path: String,
+        params: Option<ArcValueType>,
+    ) -> Result<Option<ArcValueType>> {
         // Delegate directly to our implementation using the path string and params
         self.request(path, params).await
     }
@@ -1727,12 +1747,17 @@ impl NodeDelegate for Node {
     ) -> Result<String> {
         // Parse the topic string into a TopicPath
         let topic_path = TopicPath::new(&topic, &self.network_id)
-            .map_err(|e| anyhow!("Invalid topic string for subscribe: {}", e))?; 
+            .map_err(|e| anyhow!("Invalid topic string for subscribe: {}", e))?;
 
-        let metadata = EventMetadata{path:topic_path.as_str().to_string(), description: "".to_string(), data_schema: None};
+        let metadata = EventMetadata {
+            path: topic_path.as_str().to_string(),
+            description: "".to_string(),
+            data_schema: None,
+        };
 
-        let subcription = self.service_registry
-            .register_local_event_subscription( &topic_path, callback.into(), Some(metadata))
+        let subcription = self
+            .service_registry
+            .register_local_event_subscription(&topic_path, callback.into(), Some(metadata))
             .await?;
 
         //if started... need to increment  -> registry_version
@@ -1761,10 +1786,15 @@ impl NodeDelegate for Node {
         let topic_path = TopicPath::new(&topic, &self.network_id)
             .map_err(|e| anyhow!("Invalid topic string for subscribe_with_options: {}", e))?;
 
-        let metadata = EventMetadata{path:topic_path.as_str().to_string(), description: "".to_string(), data_schema: None};
+        let metadata = EventMetadata {
+            path: topic_path.as_str().to_string(),
+            description: "".to_string(),
+            data_schema: None,
+        };
 
-        let subcription = self.service_registry
-            .register_local_event_subscription( &topic_path, callback.into(), Some(metadata))
+        let subcription = self
+            .service_registry
+            .register_local_event_subscription(&topic_path, callback.into(), Some(metadata))
             .await?;
 
         //if started... need to increment  -> registry_version
@@ -1794,7 +1824,7 @@ impl NodeDelegate for Node {
                         "Failed to unsubscribe locally from  with id {}: {}",
                         id, e
                     ));
-                    return Err(anyhow!("Failed to unsubscribe locally: {}", e))
+                    return Err(anyhow!("Failed to unsubscribe locally: {}", e));
                 }
             }
             //if started... need to increment  -> registry_version
@@ -1826,17 +1856,13 @@ impl NodeDelegate for Node {
 
 #[async_trait]
 impl RegistryDelegate for Node {
-
     /// Get service state
     async fn get_service_state(&self, service_path: &TopicPath) -> Option<ServiceState> {
         self.service_registry.get_service_state(service_path).await
     }
 
     /// Get metadata for a specific service
-    async fn get_service_metadata(
-        &self,
-        service_path: &TopicPath,
-    ) -> Option<ServiceMetadata> {
+    async fn get_service_metadata(&self, service_path: &TopicPath) -> Option<ServiceMetadata> {
         self.service_registry
             .get_service_metadata(service_path)
             .await
@@ -1853,10 +1879,7 @@ impl RegistryDelegate for Node {
     }
 
     /// Get metadata for all actions under a specific service path
-    async fn get_actions_metadata(
-        &self,
-        service_topic_path: &TopicPath,
-    ) -> Vec<ActionMetadata> {
+    async fn get_actions_metadata(&self, service_topic_path: &TopicPath) -> Vec<ActionMetadata> {
         self.service_registry
             .get_actions_metadata(service_topic_path)
             .await
@@ -1885,7 +1908,7 @@ impl RegistryDelegate for Node {
             .remove_remote_action_handler(topic_path)
             .await
     }
-} 
+}
 
 // Implement Clone for Node
 impl Clone for Node {
@@ -1906,11 +1929,10 @@ impl Clone for Node {
             supports_networking: self.supports_networking,
             network_transport: self.network_transport.clone(),
             network_discovery_providers: self.network_discovery_providers.clone(),
-            load_balancer: self.load_balancer.clone(), 
+            load_balancer: self.load_balancer.clone(),
             pending_requests: self.pending_requests.clone(),
             serializer: self.serializer.clone(),
             registry_version: self.registry_version.clone(),
         }
     }
 }
- 

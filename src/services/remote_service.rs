@@ -68,8 +68,9 @@ impl RemoteService {
         network_transport: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>,
         serializer: Arc<RwLock<SerializerRegistry>>,
         local_node_id: PeerId,
-        pending_requests:
-        Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<Result<Option<ArcValueType>>>>>>,
+        pending_requests: Arc<
+            RwLock<HashMap<String, tokio::sync::oneshot::Sender<Result<Option<ArcValueType>>>>>,
+        >,
         logger: Arc<Logger>,
         request_timeout_ms: u64,
     ) -> Self {
@@ -99,13 +100,13 @@ impl RemoteService {
         capabilities: Vec<ServiceMetadata>,
         network_transport: Arc<RwLock<Option<Box<dyn NetworkTransport>>>>,
         serializer: Arc<RwLock<SerializerRegistry>>,
-        pending_requests:
-        Arc<RwLock<HashMap<String, tokio::sync::oneshot::Sender<Result<Option<ArcValueType>>>>>>,
+        pending_requests: Arc<
+            RwLock<HashMap<String, tokio::sync::oneshot::Sender<Result<Option<ArcValueType>>>>>,
+        >,
         logger: Arc<Logger>,
         local_node_id: PeerId,
         request_timeout_ms: u64,
     ) -> Result<Vec<Arc<RemoteService>>> {
-        
         logger.info(format!(
             "Creating RemoteServices from {} service metadata entries",
             capabilities.len()
@@ -122,16 +123,17 @@ impl RemoteService {
 
         for service_metadata in capabilities {
             // Create a topic path using the service name as the path
-            let service_path = match TopicPath::new(&service_metadata.name, &service_metadata.network_id) {
-                Ok(path) => path,
-                Err(e) => {
-                    logger.error(format!(
-                        "Invalid service path '{}': {}",
-                        service_metadata.name, e
-                    ));
-                    continue;
-                }
-            };
+            let service_path =
+                match TopicPath::new(&service_metadata.name, &service_metadata.network_id) {
+                    Ok(path) => path,
+                    Err(e) => {
+                        logger.error(format!(
+                            "Invalid service path '{}': {}",
+                            service_metadata.name, e
+                        ));
+                        continue;
+                    }
+                };
 
             // Create the remote service
             let service = Arc::new(Self::new(
@@ -155,7 +157,6 @@ impl RemoteService {
             // Add service to the result list
             remote_services.push(service);
         }
-
 
         logger.info(format!(
             "Created {} RemoteService instances",
@@ -182,17 +183,17 @@ impl RemoteService {
 
     /// Create a handler for a remote action
     pub fn create_action_handler(&self, action_name: String) -> ActionHandler {
-        let service = self.clone(); 
+        let service = self.clone();
 
         // Create a handler that forwards requests to the remote service
         Arc::new(move |params, context| {
             // let service_clone = service.clone();
             let action = action_name.clone();
-            
+
             // Handle the Result explicitly instead of using the ? operator
             let action_topic_path = match service.service_topic.new_action_topic(&action) {
                 Ok(path) => path,
-                Err(e) => return Box::pin(async move { Err(anyhow::anyhow!(e)) })
+                Err(e) => return Box::pin(async move { Err(anyhow::anyhow!(e)) }),
             };
 
             // Clone all necessary fields before the async block
@@ -202,7 +203,7 @@ impl RemoteService {
             let network_transport = service.network_transport.clone();
             let serializer = service.serializer.clone();
             let request_timeout_ms = service.request_timeout_ms;
-                
+
             Box::pin(async move {
                 // Generate a unique request ID
                 let request_id = Uuid::new_v4().to_string();
@@ -214,7 +215,7 @@ impl RemoteService {
                 pending_requests
                     .write()
                     .await
-                    .insert(request_id.clone(), tx);                
+                    .insert(request_id.clone(), tx);
 
                 let serializer = serializer.read().await;
                 // Serialize the parameters and convert from Arc<[u8]> to Vec<u8>
@@ -223,7 +224,7 @@ impl RemoteService {
                 } else {
                     serializer.serialize_value(&ArcValueType::null())
                 } {
-                    Ok(bytes) => bytes.to_vec(),  // Convert Arc<[u8]> to Vec<u8>
+                    Ok(bytes) => bytes.to_vec(), // Convert Arc<[u8]> to Vec<u8>
                     Err(e) => return Err(anyhow::anyhow!("Serialization error: {}", e)),
                 };
 
@@ -243,10 +244,7 @@ impl RemoteService {
                 if let Some(transport) = &*network_transport.read().await {
                     if let Err(e) = transport.send_message(message).await {
                         // Clean up the pending request
-                        pending_requests
-                            .write()
-                            .await
-                            .remove(&request_id);
+                        pending_requests.write().await.remove(&request_id);
                         return Err(anyhow::anyhow!("Failed to send request: {}", e));
                     }
                 } else {
@@ -254,35 +252,26 @@ impl RemoteService {
                 }
 
                 // Wait for the response with a timeout
-                match tokio::time::timeout(
-                    std::time::Duration::from_millis(request_timeout_ms),
-                    rx,
-                )
-                .await
+                match tokio::time::timeout(std::time::Duration::from_millis(request_timeout_ms), rx)
+                    .await
                 {
                     Ok(Ok(Ok(response))) => Ok(response),
                     Ok(Ok(Err(e))) => Err(anyhow::anyhow!("Remote service error: {}", e)),
                     Ok(Err(_)) => {
                         // Clean up the pending request
-                        pending_requests
-                            .write()
-                            .await
-                            .remove(&request_id);
+                        pending_requests.write().await.remove(&request_id);
                         Err(anyhow::anyhow!("Response channel closed"))
                     }
                     Err(_) => {
                         // Clean up the pending request
-                        pending_requests
-                            .write()
-                            .await
-                            .remove(&request_id);
+                        pending_requests.write().await.remove(&request_id);
                         Err(anyhow::anyhow!("Request timeout"))
                     }
                 }
             })
         })
     }
- 
+
     /// Get a list of available actions this service can handle
     ///
     /// INTENTION: Provide a way to identify all actions that this remote service
@@ -322,7 +311,7 @@ impl RemoteService {
 
     pub async fn stop(&self, context: crate::services::RemoteLifecycleContext) -> Result<()> {
         let action_names = self.get_available_actions().await;
-    
+
         for action_name in action_names {
             if let Ok(action_topic_path) = self.service_topic.new_action_topic(&action_name) {
                 context
@@ -335,10 +324,9 @@ impl RemoteService {
                 ));
             }
         }
-    
+
         Ok(())
     }
-    
 }
 
 #[async_trait]

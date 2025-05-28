@@ -4,10 +4,10 @@
 // track their status, and provide lookup capabilities to find specific
 // peers based on identifiers or network.
 
+use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 use std::time::{Duration, SystemTime};
-use anyhow::Result;
 
 use super::PeerId;
 use crate::network::discovery::multicast_discovery::PeerInfo;
@@ -49,20 +49,20 @@ impl PeerEntry {
     pub fn new(peer_info: PeerInfo) -> Self {
         Self {
             peer_info: peer_info,
-            last_seen: SystemTime::now(),   
+            last_seen: SystemTime::now(),
             status: PeerStatus::Discovered,
             status_changed: SystemTime::now(),
-            connection_attempts: 0, 
-            metadata: HashMap::new(), 
+            connection_attempts: 0,
+            metadata: HashMap::new(),
         }
     }
- 
+
     /// Update the peer's status
     pub fn set_status(&mut self, status: PeerStatus) {
         self.status = status;
         self.status_changed = SystemTime::now();
     }
- 
+
     /// Add or update metadata for this peer
     pub fn set_metadata(&mut self, key: String, value: String) {
         self.metadata.insert(key, value);
@@ -84,7 +84,7 @@ impl Default for PeerRegistryOptions {
     fn default() -> Self {
         Self {
             max_peers_per_network: 100,
-            peer_ttl: Duration::from_secs(3600), // 1 hour
+            peer_ttl: Duration::from_secs(3600),        // 1 hour
             cleanup_interval: Duration::from_secs(300), // 5 minutes
         }
     }
@@ -117,28 +117,28 @@ impl PeerRegistry {
     pub fn add_peer(&self, discovery_msg: PeerInfo) -> Result<()> {
         // Use public key from the peer_id as the unique identifier
         let peer_public_key = discovery_msg.public_key.clone();
-        
+
         // If we've passed the limit checks, now we can modify the data structures
         let mut peers = self.peers.write().unwrap();
-  
+
         // Add or update peer
         if let Some(existing_peer) = peers.get_mut(&peer_public_key) {
             // Update existing peer
-            existing_peer.last_seen =SystemTime::now();
+            existing_peer.last_seen = SystemTime::now();
             existing_peer.peer_info = discovery_msg;
         } else {
             // Create new peer entry with all its networks
-            let   peer_entry = PeerEntry::new(discovery_msg);
+            let peer_entry = PeerEntry::new(discovery_msg);
             peers.insert(peer_public_key, peer_entry);
         }
-            
+
         Ok(())
     }
 
     /// Update a peer's status
     pub fn update_peer_status(&self, peer_id: &PeerId, status: PeerStatus) -> Result<()> {
         let mut peers = self.peers.write().unwrap();
-        
+
         if let Some(peer) = peers.get_mut(&peer_id.public_key) {
             peer.set_status(status);
             Ok(())
@@ -149,10 +149,9 @@ impl PeerRegistry {
 
     /// Update a peer's last seen time and other information
     pub fn update_peer(&self, peer_info: PeerInfo) -> Result<()> {
- 
-        let peer_public_key =  peer_info.public_key.clone();
-        
-        let mut peers = self.peers.write().unwrap(); 
+        let peer_public_key = peer_info.public_key.clone();
+
+        let mut peers = self.peers.write().unwrap();
         if let Some(entry) = peers.get_mut(&peer_public_key) {
             // Update peer
             entry.last_seen = SystemTime::now();
@@ -168,11 +167,12 @@ impl PeerRegistry {
         let peers = self.peers.read().unwrap();
         peers.get(&peer_public_key).cloned()
     }
-  
+
     /// Find all peers with a specific status
     pub fn find_peers_by_status(&self, status: PeerStatus) -> Vec<PeerEntry> {
         let peers = self.peers.read().unwrap();
-        peers.values()
+        peers
+            .values()
             .filter(|p| p.status == status)
             .cloned()
             .collect()
@@ -186,8 +186,8 @@ impl PeerRegistry {
 
     /// Remove a peer from the registry
     pub fn remove_peer(&self, id: &PeerId) -> Result<()> {
-        let mut peers = self.peers.write().unwrap(); 
-          
+        let mut peers = self.peers.write().unwrap();
+
         // Remove peer
         if peers.remove(&id.public_key).is_some() {
             Ok(())
@@ -197,14 +197,15 @@ impl PeerRegistry {
     }
 
     /// Clean up stale peers that haven't been seen recently
-    pub fn cleanup_stale_peers(&self) -> usize { 
+    pub fn cleanup_stale_peers(&self) -> usize {
         let mut removed_count = 0;
-        
+
         // Identify stale peers
         let stale_keys: Vec<String> = {
             let peers = self.peers.read().unwrap();
-            
-            peers.iter()
+
+            peers
+                .iter()
                 .filter(|(_, peer)| {
                     // Check if the peer has been seen within TTL
                     match peer.last_seen.elapsed() {
@@ -215,18 +216,18 @@ impl PeerRegistry {
                 .map(|(key, _)| key.clone())
                 .collect()
         };
-        
+
         // Remove them
         if !stale_keys.is_empty() {
-            let mut peers = self.peers.write().unwrap(); 
-            
+            let mut peers = self.peers.write().unwrap();
+
             for key in stale_keys {
-                  // Remove peer
+                // Remove peer
                 peers.remove(&key);
                 removed_count += 1;
-            } 
+            }
         }
-        
+
         removed_count
     }
-} 
+}

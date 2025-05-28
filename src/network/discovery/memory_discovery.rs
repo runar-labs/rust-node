@@ -75,7 +75,7 @@ impl MemoryDiscovery {
 
     /// Start a background task to periodically announce our presence
     fn start_announce_task(&self, info: NodeInfo, options: DiscoveryOptions) -> JoinHandle<()> {
-         let interval = options.announce_interval;
+        let interval = options.announce_interval;
         let node_info = info.clone();
         let listeners: Arc<RwLock<Vec<DiscoveryListener>>> = Arc::clone(&self.listeners);
         let logger = self.logger.clone();
@@ -85,8 +85,8 @@ impl MemoryDiscovery {
 
             loop {
                 ticker.tick().await;
- 
-                let peer_info = PeerInfo { 
+
+                let peer_info = PeerInfo {
                     public_key: node_info.peer_id.public_key.clone(),
                     addresses: node_info.addresses.clone(),
                 };
@@ -145,7 +145,7 @@ impl MemoryDiscovery {
         self.logger
             .debug(format!("Added node to registry: {}", node_key));
 
-        let peer_info = PeerInfo { 
+        let peer_info = PeerInfo {
             public_key: node_info.peer_id.public_key.clone(),
             addresses: node_info.addresses.clone(),
         };
@@ -231,8 +231,6 @@ impl NodeDiscovery for MemoryDiscovery {
         Ok(())
     }
 
-
-
     async fn set_discovery_listener(&self, listener: DiscoveryListener) -> Result<()> {
         self.logger.debug("Adding discovery listener".to_string());
         self.listeners.write().unwrap().push(listener);
@@ -295,7 +293,7 @@ mod tests {
             network_ids: vec!["net1".to_string()], // Added network_ids
             addresses: vec!["addr1".to_string()],
             services: vec![],
-            version:0,
+            version: 0,
         };
         // discovery.register_node(node_info_1).await.unwrap();
 

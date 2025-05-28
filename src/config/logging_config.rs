@@ -97,7 +97,7 @@ impl LoggingConfig {
     ///
     /// INTENTION: Configure the global logger solely based on the settings in this
     /// LoggingConfig object. Ignore all environment variables.
-    /// 
+    ///
     /// Note: If the logger is already initialized, this method will silently return
     /// without doing anything to avoid panics in test environments where multiple
     /// tests might try to initialize the logger.

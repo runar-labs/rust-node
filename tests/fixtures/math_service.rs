@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use runar_common::types::ArcValueType;
 use std::result;
 use std::sync::{Arc, Mutex};
- 
+
 use runar_node::services::abstract_service::AbstractService;
 use runar_node::services::{LifecycleContext, RequestContext};
 
@@ -99,9 +99,11 @@ impl MathService {
         ctx.debug(format!("Adding {} + {}", a, b));
 
         // Perform the addition
-        let result = a + b; 
+        let result = a + b;
 
-        let _ = ctx.publish("math/added", Some(ArcValueType::new_primitive(result))).await;
+        let _ = ctx
+            .publish("math/added", Some(ArcValueType::new_primitive(result)))
+            .await;
 
         result
     }
@@ -160,8 +162,6 @@ impl MathService {
         *self.counter.lock().unwrap()
     }
 
-
-
     /// Handle the add operation
     ///
     /// IMPORTANT: This demonstrates proper handler implementation for an operation.
@@ -176,7 +176,6 @@ impl MathService {
         let mut data = params.unwrap_or_else(|| ArcValueType::null());
         let (a, b) = match data.as_map_ref::<String, f64>() {
             Ok(map) => {
-                
                 let a = *map.get("a").unwrap_or_else(|| {
                     context.error("Missing or invalid parameter 'a'".to_string());
                     &zero
@@ -208,7 +207,6 @@ impl MathService {
         let mut data = params.unwrap_or_else(|| ArcValueType::null());
         let (a, b) = match data.as_map_ref::<String, f64>() {
             Ok(map) => {
-                
                 let a = *map.get("a").unwrap_or_else(|| {
                     context.error("Missing or invalid parameter 'a'".to_string());
                     &zero
@@ -225,7 +223,10 @@ impl MathService {
             }
         };
         let result = self.subtract(a, b, &context);
-        context.info(format!("Subtraction successful: {} - {} = {}", a, b, result));
+        context.info(format!(
+            "Subtraction successful: {} - {} = {}",
+            a, b, result
+        ));
         Ok(Some(ArcValueType::new_primitive(result)))
     }
 
@@ -240,7 +241,6 @@ impl MathService {
         let mut data = params.unwrap_or_else(|| ArcValueType::null());
         let (a, b) = match data.as_map_ref::<String, f64>() {
             Ok(map) => {
-                
                 let a = *map.get("a").unwrap_or_else(|| {
                     context.error("Missing or invalid parameter 'a'".to_string());
                     &zero
@@ -257,7 +257,10 @@ impl MathService {
             }
         };
         let result = self.multiply(a, b, &context);
-        context.info(format!("Multiplication successful: {} * {} = {}", a, b, result));
+        context.info(format!(
+            "Multiplication successful: {} * {} = {}",
+            a, b, result
+        ));
         Ok(Some(ArcValueType::new_primitive(result)))
     }
 
@@ -395,13 +398,21 @@ impl AbstractService for MathService {
             )
             .await?;
 
-        context.subscribe("math/added", Box::new(move |ctx, value| {
-            // Create a boxed future that returns Result<(), anyhow::Error>
-            Box::pin(async move {
-                ctx.info(format!("MathService received math/added event: {}", value.unwrap()));
-                Ok(()) // Return Result::Ok
-            })
-        })).await?;
+        context
+            .subscribe(
+                "math/added",
+                Box::new(move |ctx, value| {
+                    // Create a boxed future that returns Result<(), anyhow::Error>
+                    Box::pin(async move {
+                        ctx.info(format!(
+                            "MathService received math/added event: {}",
+                            value.unwrap()
+                        ));
+                        Ok(()) // Return Result::Ok
+                    })
+                }),
+            )
+            .await?;
 
         // Log successful initialization
         context.info("MathService initialized".to_string());

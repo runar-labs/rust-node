@@ -3,13 +3,13 @@
 // INTENTION: Verify that the Registry Service correctly provides
 // information about registered services through standard requests.
 
+use runar_common::logging::{Component, Logger};
+use runar_common::types::ArcValueType;
+use runar_node::config::logging_config::{LogLevel, LoggingConfig};
+use runar_node::services::RegistryDelegate;
+use runar_node::{Node, NodeConfig, ServiceMetadata, ServiceState};
 use std::time::Duration;
 use tokio::time::timeout;
-use runar_node::{Node, NodeConfig, ServiceMetadata, ServiceState};
-use runar_node::config::logging_config::{LogLevel, LoggingConfig};
-use runar_common::logging::{Logger, Component};
-use runar_node::services::RegistryDelegate;
-use runar_common::types::ArcValueType;
 
 // Import the test fixtures
 use crate::fixtures::math_service::MathService;
@@ -25,50 +25,62 @@ async fn test_registry_service_list_services() {
     // Wrap the test in a timeout to prevent it from hanging
     match timeout(Duration::from_secs(10), async {
         // Create a node with a test network ID
-        let config = NodeConfig::new(
-            "node-reg-list".to_string(),
-            "test_network".to_string()
-        );
+        let config = NodeConfig::new("node-reg-list".to_string(), "test_network".to_string());
         let mut node = Node::new(config).await.unwrap();
-        
+
         // Create a test service
         let math_service = MathService::new("Math", "math");
-        
+
         // Add the service to the node
         node.add_service(math_service).await.unwrap();
-        
+
         // Start the node to initialize services
         node.start().await.unwrap();
-        
+
         // Use the request method to query the registry service
-        let response = node.request(
-            "$registry/services/list".to_string(),
-            None
-        ).await.unwrap();
-        
-        
- 
+        let response = node
+            .request("$registry/services/list".to_string(), None)
+            .await
+            .unwrap();
 
         // Parse the response to verify it contains our registered services
         if let Some(mut value) = response {
-            let services = value.as_list_ref::<ServiceMetadata>().expect("Expected array response from registry service");
+            let services = value
+                .as_list_ref::<ServiceMetadata>()
+                .expect("Expected array response from registry service");
             // The services list should contain at least the math service and the registry service itself
-            assert!(services.len() >= 2, "Expected at least 2 services, got {}", services.len());
+            assert!(
+                services.len() >= 2,
+                "Expected at least 2 services, got {}",
+                services.len()
+            );
 
             // Verify the math service is in the list by checking the service_path field
-            let has_math_service = services.iter().any(|service| service.service_path == "math");
-            assert!(has_math_service, "Math service not found in registry service response");
+            let has_math_service = services
+                .iter()
+                .any(|service| service.service_path == "math");
+            assert!(
+                has_math_service,
+                "Math service not found in registry service response"
+            );
 
             // Optionally, validate structure of ServiceMetadata for at least one service
-            let math_service = services.iter().find(|service| service.service_path == "math").expect("Math service not found");
+            let math_service = services
+                .iter()
+                .find(|service| service.service_path == "math")
+                .expect("Math service not found");
             assert_eq!(math_service.name, "Math", "Math service name mismatch");
-            assert_eq!(math_service.version, "1.0.0", "Math service version mismatch");
+            assert_eq!(
+                math_service.version, "1.0.0",
+                "Math service version mismatch"
+            );
             // Add more field checks as desired
-
         } else {
             panic!("Expected array of services in response, got {:?}", response);
         }
-    }).await {
+    })
+    .await
+    {
         Ok(_) => (), // Test completed within the timeout
         Err(_) => panic!("Test timed out after 10 seconds"),
     }
@@ -84,46 +96,47 @@ async fn test_registry_service_get_service_info() {
     // Wrap the test in a timeout to prevent it from hanging
     match timeout(Duration::from_secs(10), async {
         let test_logger = Logger::new_root(Component::Node, "test_name");
-        
-        let logging_config = LoggingConfig::new()
-        .with_default_level(LogLevel::Debug);
+
+        let logging_config = LoggingConfig::new().with_default_level(LogLevel::Debug);
 
         // Create a node with a test network ID
-        let config = NodeConfig::new("node-reg-info", "test_network").with_logging_config(logging_config);
+        let config =
+            NodeConfig::new("node-reg-info", "test_network").with_logging_config(logging_config);
         let mut node = Node::new(config).await.unwrap();
-        
+
         // Create a test service
         let math_service = MathService::new("Math Service", "math");
-        
+
         // Add the service to the node
         node.add_service(math_service).await.unwrap();
-        
+
         // // Debug log service states before starting
         // let states_before = node.get_all_service_states().await;
         // test_logger.debug(format!("Service states BEFORE start: {:?}", states_before));
-        
+
         // Start the services to check that we get the correct state
         node.start().await.unwrap();
-        
+
         // // Debug log service states after starting
         // let states_after = node.get_all_service_states().await;
         // test_logger.debug(format!("Service states AFTER start: {:?}", states_after));
-        
+
         // Debug log available handlers using logger
         let list_response = node.request("$registry/services/list", None).await.unwrap();
         test_logger.debug(format!("Available services: {:?}", list_response));
-        
+
         // Use the request method to query the registry service for the math service
         // Note: We should use the correct parameter path format
         let response = node.request("$registry/services/math", None).await.unwrap();
         test_logger.debug(format!("Service info response: {:?}", response));
-         
-        
+
         // Dump the complete response data for debugging
         if let Some(ref data) = response {
             test_logger.debug(format!("Response data type: {:?}", data));
             let mut value_clone = data.clone();
-            let service_metadata = value_clone.as_type::<ServiceMetadata>().expect("Expected ServiceMetadata in response");
+            let service_metadata = value_clone
+                .as_type::<ServiceMetadata>()
+                .expect("Expected ServiceMetadata in response");
             test_logger.debug(format!("ServiceMetadata: {:?}", service_metadata));
             // Example assertions:
             assert_eq!(service_metadata.service_path, "math");
@@ -131,8 +144,9 @@ async fn test_registry_service_get_service_info() {
             assert_eq!(service_metadata.version, "1.0.0");
             assert_eq!(service_metadata.actions.len(), 4);
         }
-        
-    }).await {
+    })
+    .await
+    {
         Ok(_) => (), // Test completed within the timeout
         Err(_) => panic!("Test timed out after 10 seconds"),
     }
@@ -149,37 +163,52 @@ async fn test_registry_service_get_service_state() {
     match timeout(Duration::from_secs(10), async {
         // Create a test logger for debugging
         let test_logger = Logger::new_root(Component::Node, "test_state");
-        
+
         // Create a node with a test network ID
         let config = NodeConfig::new("node-reg-state", "test_network");
         let mut node = Node::new(config).await.unwrap();
-        
+
         // Create a test service
         let math_service = MathService::new("Math", "math");
-        
+
         // Add the service to the node
         node.add_service(math_service).await.unwrap();
-        
+
         // Start the service
         node.start().await.unwrap();
 
-
         // Use the request method to query the registry service for the math service state
-        let response = node.request("$registry/services/math/state", None).await.unwrap();
+        let response = node
+            .request("$registry/services/math/state", None)
+            .await
+            .unwrap();
         test_logger.debug(format!("Initial service state response: {:?}", response));
-         
+
         // Parse the response to verify it contains service state
         if let Some(mut value) = response {
-            let service_state = value.as_type::<ServiceState>().expect("Expected ServiceState in response");
-            assert_eq!(service_state, ServiceState::Running, "Expected service state to be 'RUNNING'"); 
+            let service_state = value
+                .as_type::<ServiceState>()
+                .expect("Expected ServiceState in response");
+            assert_eq!(
+                service_state,
+                ServiceState::Running,
+                "Expected service state to be 'RUNNING'"
+            );
         } else {
-            panic!("Expected map with state info in response, got {:?}", response);
+            panic!(
+                "Expected map with state info in response, got {:?}",
+                response
+            );
         }
-        
-        let response = node.request("$registry/services/not_exisstent/state", None).await.unwrap();
-        test_logger.debug(format!("Service state after start: {:?}", response)); 
-        
-    }).await {
+
+        let response = node
+            .request("$registry/services/not_exisstent/state", None)
+            .await
+            .unwrap();
+        test_logger.debug(format!("Service state after start: {:?}", response));
+    })
+    .await
+    {
         Ok(_) => (), // Test completed within the timeout
         Err(_) => panic!("Test timed out after 10 seconds"),
     }
@@ -196,55 +225,57 @@ async fn test_registry_service_missing_parameter() {
     match timeout(Duration::from_secs(10), async {
         // Create a test logger for debugging
         let test_logger = Logger::new_root(Component::Node, "test_missing_param");
-        
+
         // Create a node with a test network ID
         let config = NodeConfig::new("node-reg-missing", "test_network");
         let mut node = Node::new(config).await.unwrap();
-        
+
         // Create a test service
         let math_service = MathService::new("Math", "math");
-        
+
         // Add the service to the node
         node.add_service(math_service).await.unwrap();
-        
+
         // Start the node to ensure services are initialized
         node.start().await.unwrap();
-        
+
         // Make an invalid request with missing service_path parameter
         // The registry service expects a path parameter in the URL, but we're using an invalid path
         // that the router won't be able to match to a template with a parameter
         let response = node.request("$registry/services", None).await;
-        
+
         // The request should fail or return an error response
         match response {
             Ok(resp) => {
                 // If it returns a response, it should have an error status code
-                test_logger.debug(format!("Response for missing parameter: {:?}", resp)); 
-            },
+                test_logger.debug(format!("Response for missing parameter: {:?}", resp));
+            }
             Err(e) => {
                 // If it returns an error, that's also acceptable - service not found
                 test_logger.debug(format!("Error for missing parameter: {:?}", e));
                 assert!(true, "Request properly failed with error: {:?}", e);
             }
         }
-        
+
         // Test with an invalid path format for service_path/state endpoint
         let state_response = node.request("$registry/services//state", None).await;
-        
+
         // The request should fail or return an error response
         match state_response {
             Ok(resp) => {
                 // If it returns a response, it should have an error status code
-                test_logger.debug(format!("Response for invalid state path: {:?}", resp)); 
-            },
+                test_logger.debug(format!("Response for invalid state path: {:?}", resp));
+            }
             Err(e) => {
                 // If it returns an error, that's also acceptable - service not found
                 test_logger.debug(format!("Error for invalid state path: {:?}", e));
                 assert!(true, "Request properly failed with error: {:?}", e);
             }
         }
-    }).await {
+    })
+    .await
+    {
         Ok(_) => (), // Test completed within the timeout
         Err(_) => panic!("Test timed out after 10 seconds"),
     }
-} 
+}

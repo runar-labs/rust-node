@@ -4,9 +4,9 @@
 
 use std::sync::Arc;
 
-use tokio::sync::RwLock;
-use runar_common::logging::Logger;
 use crate::network::transport::NetworkError;
+use runar_common::logging::Logger;
+use tokio::sync::RwLock;
 
 /// StreamPool - Manages the reuse of QUIC streams
 ///
@@ -64,7 +64,6 @@ impl StreamPool {
         Ok(())
     }
 }
-
 
 impl std::fmt::Debug for StreamPool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

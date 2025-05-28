@@ -37,11 +37,11 @@
 //             peer_registry: Arc::new(PeerRegistry::new()),
 //         }
 //     }
-    
+
 //     fn set_message_sink(&mut self, sink: mpsc::Sender<NetworkMessage>) {
 //         self.message_sink = Some(sink);
 //     }
-    
+
 //     async fn get_sent_messages(&self) -> Vec<NetworkMessage> {
 //         self.sent_messages.read().await.clone()
 //     }
@@ -176,15 +176,15 @@
 //     async fn init(&self, _options: DiscoveryOptions) -> Result<()> {
 //         Ok(())
 //     }
-    
+
 //     async fn shutdown(&self) -> Result<()> {
 //         Ok(())
 //     }
-    
+
 //     async fn register_node(&self, node_info: NodeInfo) -> Result<()> {
 //         let mut nodes = self.nodes.write().await;
 //         let network_ids = node_info.network_ids.clone();
-        
+
 //         for network_id in network_ids {
 //             if let Some(network_nodes) = nodes.get_mut(&network_id) {
 //                 network_nodes.push(node_info.clone());
@@ -192,37 +192,37 @@
 //                 nodes.insert(network_id, vec![node_info.clone()]);
 //             }
 //         }
-        
+
 //         // Notify listeners
 //         for listener in self.listeners.read().await.iter() {
 //             listener(node_info.clone());
 //         }
-        
+
 //         Ok(())
 //     }
-    
+
 //     async fn set_discovery_listener(&self, listener: DiscoveryListener) -> Result<()> {
 //         self.listeners.write().await.push(listener);
 //         Ok(())
 //     }
-    
+
 //     async fn start_announcing(&self) -> Result<()> {
 //         Ok(())
 //     }
-    
+
 //     async fn stop_announcing(&self) -> Result<()> {
 //         // Implementation not needed for tests
 //         Ok(())
 //     }
-    
+
 //     async fn update_node(&self, _node_info: NodeInfo) -> Result<()> {
 //         // Implementation not needed for tests
 //         Ok(())
 //     }
-    
+
 //     async fn discover_nodes(&self, network_id: Option<&str>) -> Result<Vec<NodeInfo>> {
 //         let nodes = self.nodes.read().await;
-        
+
 //         if let Some(id) = network_id {
 //             if let Some(network_nodes) = nodes.get(id) {
 //                 Ok(network_nodes.clone())
@@ -238,17 +238,17 @@
 //             Ok(all_nodes)
 //         }
 //     }
-    
+
 //     async fn find_node(&self, _network_id: &str, node_id: &str) -> Result<Option<NodeInfo>> {
 //         let nodes = self.nodes.read().await;
-        
+
 //         for network_nodes in nodes.values() {
 //             if let Some(node) = network_nodes.iter()
 //                 .find(|node| node.peer_id.public_key == node_id) {
 //                 return Ok(Some(node.clone()));
 //             }
 //         }
-        
+
 //         Ok(None)
 //     }
 // }
@@ -256,7 +256,7 @@
 // #[tokio::test]
 // async fn test_transport_send_message() -> Result<()> {
 //     let transport = MockTransport::new("unused_network", "node-1");
-    
+
 //     let topic = "test/service/action".to_string();
 //     let correlation_id = "test-correlation-id".to_string();
 //     let params = ValueType::String("test params".to_string());
@@ -266,7 +266,7 @@
 //         message_type: "Request".to_string(),
 //         payloads: vec![(topic.clone(), params.clone(), correlation_id.clone())],
 //     };
-    
+
 //     transport.send_message(message.clone()).await?;
 
 //     let sent_messages = transport.get_sent_messages().await;
@@ -276,7 +276,7 @@
 //     assert_eq!(sent_messages[0].payloads[0].0, topic);
 //     assert_eq!(sent_messages[0].payloads[0].1, params);
 //     assert_eq!(sent_messages[0].payloads[0].2, correlation_id);
-    
+
 //     Ok(())
 // }
 
@@ -284,7 +284,7 @@
 // async fn test_discovery_register_node() -> Result<()> {
 //     let discovery = MockDiscovery::new();
 //     let (tx, mut rx) = mpsc::channel::<NodeInfo>(10);
-    
+
 //     // Set a discovery listener
 //     discovery.set_discovery_listener(Box::new(move |node_info| {
 //         let tx = tx.clone();
@@ -294,7 +294,7 @@
 //             }
 //         });
 //     })).await?;
-    
+
 //     let node_info = NodeInfo {
 //         peer_id: PeerId::new("node-1".to_string()),
 //         network_ids: vec!["test-network".to_string()],
@@ -323,10 +323,10 @@
 //         ],
 //         last_seen: SystemTime::now(),
 //     };
-    
+
 //     // Register node
 //     discovery.register_node(node_info.clone()).await?;
-    
+
 //     // Check if listener was notified
 //     if let Some(received_node_info) = rx.recv().await {
 //         assert_eq!(received_node_info.peer_id.public_key, "node-1");
@@ -334,7 +334,7 @@
 //     } else {
 //         return Err(anyhow!("Discovery listener was not notified"));
 //     }
-    
+
 //     Ok(())
 // }
 
@@ -342,13 +342,13 @@
 // async fn test_transport_handler() -> Result<()> {
 //     // Create a channel
 //     let (tx, mut rx) = mpsc::channel(10);
-    
+
 //     // Use new PeerId constructor
 //     let mut transport = MockTransport::new("unused_network", "node-1");
-    
+
 //     // Set message sink
 //     transport.set_message_sink(tx);
-    
+
 //     // Create a test message using new NetworkMessage structure
 //     let topic = "test/service/action".to_string();
 //     let correlation_id = "test-correlation-id".to_string();
@@ -359,10 +359,10 @@
 //         message_type: "Request".to_string(),
 //         payloads: vec![(topic.clone(), params.clone(), correlation_id.clone())],
 //     };
-    
+
 //     // Send the message using send_message
 //     transport.send_message(message.clone()).await?;
-    
+
 //     // Check if the message was received through the channel
 //     if let Some(received) = rx.recv().await {
 //         assert_eq!(received.source.public_key, "node-2");
@@ -373,6 +373,6 @@
 //     } else {
 //         return Err(anyhow!("No message received"));
 //     }
-    
+
 //     Ok(())
-// } 
+// }

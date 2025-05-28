@@ -2,11 +2,11 @@
 //
 // This module provides configuration options for network functionality in the Runar system.
 
-use std::sync::Arc;
-use std::time::Duration;
 use crate::network::discovery::{DiscoveryOptions, DEFAULT_MULTICAST_ADDR};
 use crate::network::transport::{QuicTransportOptions, TransportOptions};
 use crate::services::load_balancing::RoundRobinLoadBalancer;
+use std::sync::Arc;
+use std::time::Duration;
 
 /// Network configuration options
 #[derive(Clone, Debug)]

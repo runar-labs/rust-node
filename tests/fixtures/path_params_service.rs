@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use runar_common::types::ArcValueType;
 use std::collections::HashMap;
 use std::sync::Arc;
- 
+
 use runar_node::services::abstract_service::AbstractService;
 use runar_node::services::{LifecycleContext, RequestContext};
 
@@ -63,8 +63,7 @@ impl PathParamsService {
         context.info("Handling extract path parameters request".to_string());
 
         // Convert the path parameters to ValueType::String values for the response
-        let param_values: HashMap<String, String> = context
-            .path_params.clone();
+        let param_values: HashMap<String, String> = context.path_params.clone();
 
         // Log the parameters we extracted
         context.info(format!("Extracted parameters: {:?}", param_values));

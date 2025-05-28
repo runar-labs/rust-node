@@ -15,11 +15,11 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 use crate::routing::TopicPath;
-use crate::services::abstract_service::{AbstractService};
+use crate::services::abstract_service::AbstractService;
 use crate::services::{LifecycleContext, RegistryDelegate, RequestContext};
 use crate::ServiceState;
 use runar_common::logging::Logger;
-use runar_common::types::{ArcValueType}; 
+use runar_common::types::ArcValueType;
 
 /// Registry Info Service - provides information about registered services without holding state
 pub struct RegistryService {
@@ -141,13 +141,7 @@ impl RegistryService {
                 "services/{service_path}/state",
                 Arc::new(move |params, ctx| {
                     let inner_self = self_clone.clone();
-                    Box::pin(async move {
-                        inner_self
-                            .handle_service_state(
-                                ctx,
-                            )
-                            .await
-                    })
+                    Box::pin(async move { inner_self.handle_service_state(ctx).await })
                 }),
             )
             .await?;
@@ -168,10 +162,10 @@ impl RegistryService {
 
         // Get all service metadata directly
         let service_metadata = self.registry_delegate.get_all_service_metadata(true).await;
-        
+
         // Convert the HashMap of ServiceMetadata to a Vec
         let metadata_vec: Vec<_> = service_metadata.values().cloned().collect();
-        
+
         // Return the list of service metadata
         Ok(Some(ArcValueType::from_list(metadata_vec)))
     }
@@ -196,37 +190,47 @@ impl RegistryService {
                 return Err(anyhow!("Invalid service path format: {}", e));
             }
         };
-        
+
         // Return the service metadata if found, or None if not found
-        if let Some(service_metadata) = self.registry_delegate.get_service_metadata(&service_topic).await {
+        if let Some(service_metadata) = self
+            .registry_delegate
+            .get_service_metadata(&service_topic)
+            .await
+        {
             Ok(Some(ArcValueType::from_struct(service_metadata)))
         } else {
-            ctx.logger.debug(format!("Service '{}' not found", actual_service_path));
+            ctx.logger
+                .debug(format!("Service '{}' not found", actual_service_path));
             Ok(None)
         }
     }
 
     /// Handler for getting just the state of a service
-    async fn handle_service_state(
-        &self,  
-        ctx: RequestContext,
-    ) -> Result<Option<ArcValueType>> {
+    async fn handle_service_state(&self, ctx: RequestContext) -> Result<Option<ArcValueType>> {
         // Extract the service path from path parameters
         let service_path = match self.extract_service_path(&ctx) {
             Ok(path) => path,
             Err(error) => {
-                return Err(anyhow!("Missing required 'service_path' parameter: {}", error));
+                return Err(anyhow!(
+                    "Missing required 'service_path' parameter: {}",
+                    error
+                ));
             }
         };
         let network_id_string = ctx.network_id().clone();
         let service_topic = TopicPath::new_service(&network_id_string, &service_path);
 
-        // Get service state directly from the registry delegate 
-        if let Some(service_state) = self.registry_delegate.get_service_state(&service_topic).await {
+        // Get service state directly from the registry delegate
+        if let Some(service_state) = self
+            .registry_delegate
+            .get_service_state(&service_topic)
+            .await
+        {
             let state_info = ArcValueType::from_struct(service_state);
             Ok(Some(state_info))
         } else {
-            ctx.logger.debug(format!("Service '{}' not found", service_path));
+            ctx.logger
+                .debug(format!("Service '{}' not found", service_path));
             Ok(None)
         }
     }
@@ -290,8 +294,12 @@ impl AbstractService for RegistryService {
             .info("Registry Service initialization complete");
 
         // registering custom types with the serializer
-        context.serializer.write().await.register::<ServiceState>()?;
-        
+        context
+            .serializer
+            .write()
+            .await
+            .register::<ServiceState>()?;
+
         Ok(())
     }
 

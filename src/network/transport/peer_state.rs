@@ -2,13 +2,13 @@
 //!
 //! INTENTION: Tracks state, manages stream pools, and handles connection health for a single peer.
 
-use std::sync::Arc;
-use std::fmt;
-use tokio::sync::{Mutex, mpsc};
-use tokio::sync::RwLock;
-use runar_common::logging::Logger;
-use crate::network::transport::{StreamPool, NetworkError, PeerId};
 use crate::network::discovery::NodeInfo;
+use crate::network::transport::{NetworkError, PeerId, StreamPool};
+use runar_common::logging::Logger;
+use std::fmt;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tokio::sync::{mpsc, Mutex};
 
 /// PeerState - Manages the state of a connection to a remote peer
 ///
@@ -41,7 +41,12 @@ impl PeerState {
     /// Create a new PeerState with the specified peer ID and address
     ///
     /// INTENTION: Initialize a new peer state with the given parameters.
-    pub fn new(peer_id: PeerId, address: String, max_idle_streams: usize, logger: Arc<Logger>) -> Self {
+    pub fn new(
+        peer_id: PeerId,
+        address: String,
+        max_idle_streams: usize,
+        logger: Arc<Logger>,
+    ) -> Self {
         let (status_tx, status_rx) = mpsc::channel(10);
         Self {
             peer_id,
@@ -55,14 +60,15 @@ impl PeerState {
             node_info: RwLock::new(None),
         }
     }
-    
+
     /// Set the node info for this peer
     ///
     /// INTENTION: Store the node information received during handshake.
     pub async fn set_node_info(&self, node_info: NodeInfo) {
         let mut info = self.node_info.write().await;
         *info = Some(node_info);
-        self.logger.info(&format!("Node info set for peer {}", self.peer_id));
+        self.logger
+            .info(&format!("Node info set for peer {}", self.peer_id));
     }
     /// Set the connection for this peer
     ///
@@ -73,7 +79,10 @@ impl PeerState {
         let mut last = self.last_activity.lock().await;
         *last = std::time::Instant::now();
         let _ = self.status_tx.send(true).await;
-        self.logger.info(&format!("Connection established with peer {}", self.peer_id));
+        self.logger.info(&format!(
+            "Connection established with peer {}",
+            self.peer_id
+        ));
     }
 
     /// Check if peer is connected
@@ -95,16 +104,25 @@ impl PeerState {
         if let Some(conn) = conn_guard.as_mut() {
             match conn.open_uni().await {
                 Ok(stream) => {
-                    self.logger.debug(&format!("Opened new stream to peer {}", self.peer_id));
+                    self.logger
+                        .debug(&format!("Opened new stream to peer {}", self.peer_id));
                     Ok(stream)
-                },
+                }
                 Err(e) => {
-                    self.logger.error(&format!("Failed to open stream to peer {}: {}", self.peer_id, e));
-                    Err(NetworkError::ConnectionError(format!("Failed to open stream: {}", e)))
+                    self.logger.error(&format!(
+                        "Failed to open stream to peer {}: {}",
+                        self.peer_id, e
+                    ));
+                    Err(NetworkError::ConnectionError(format!(
+                        "Failed to open stream: {}",
+                        e
+                    )))
                 }
             }
         } else {
-            Err(NetworkError::ConnectionError("Not connected to peer".to_string()))
+            Err(NetworkError::ConnectionError(
+                "Not connected to peer".to_string(),
+            ))
         }
     }
 
@@ -131,13 +149,13 @@ impl PeerState {
         if let Some(conn) = conn_guard.take() {
             conn.close(0u32.into(), b"Connection closed by peer");
             let _ = self.status_tx.send(false).await;
-            self.logger.info(&format!("Connection closed with peer {}", self.peer_id));
+            self.logger
+                .info(&format!("Connection closed with peer {}", self.peer_id));
         }
         let _ = self.stream_pool.clear().await;
         Ok(())
     }
 }
-
 
 impl fmt::Debug for PeerState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

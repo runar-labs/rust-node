@@ -1,13 +1,13 @@
 use anyhow::Result;
-use runar_common::logging::Logger;
-use runar_common::Component;
-use runar_common::types::{ArcValueType};
 use runar_common::hmap;
+use runar_common::logging::Logger;
+use runar_common::types::ArcValueType;
+use runar_common::Component;
 use runar_node::config::{LogLevel, LoggingConfig};
 use runar_node::network::network_config::NetworkConfig;
 use runar_node::network::transport::QuicTransportOptions;
 use runar_node::node::{Node, NodeConfig};
-use std::collections::HashMap; 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -27,19 +27,16 @@ use crate::network::quic_transport_test::generate_test_certificates;
 #[tokio::test]
 async fn test_remote_action_call() -> Result<()> {
     // Configure logging to ensure test logs are displayed
-    let logging_config = LoggingConfig::new()
-        .with_default_level(LogLevel::Debug);
+    let logging_config = LoggingConfig::new().with_default_level(LogLevel::Debug);
     logging_config.apply();
-    
+
     // Set up logger
     let logger = Logger::new_root(Component::Network, "remote_action_test");
     logger.info("Starting remote action call test");
 
-
     // Create math services with different paths using the fixture
     let math_service1 = MathService::new("math1", "math1");
     let math_service2 = MathService::new("math2", "math2");
-
 
     let (certs_a, key_a) = generate_test_certificates();
     let options_a = QuicTransportOptions::new()
@@ -54,17 +51,15 @@ async fn test_remote_action_call() -> Result<()> {
 
     // Create node configurations with network enabled
     let node1_config = NodeConfig::new("node1", "test")
-        .with_network_config(NetworkConfig::with_quic(options_a)
-        .with_multicast_discovery());
+        .with_network_config(NetworkConfig::with_quic(options_a).with_multicast_discovery());
 
     logger.info(format!("Node1 config: {}", node1_config));
-    
+
     let mut node1 = Node::new(node1_config).await?;
     node1.add_service(math_service1).await?;
 
     node1.start().await?;
     //after node 1 starts and use the port .. next node will use the next available port
-
 
     let (certs_b, key_b) = generate_test_certificates();
     let options_b = QuicTransportOptions::new()
@@ -77,14 +72,12 @@ async fn test_remote_action_call() -> Result<()> {
         .with_stream_idle_timeout(Duration::from_secs(30))
         .with_quinn_log_level(log::LevelFilter::Warn); // Reduce noisy Quinn connection logs
 
-
     let node2_config = NodeConfig::new("node2", "test")
         .with_network_config(NetworkConfig::with_quic(options_b).with_multicast_discovery());
 
     logger.info(format!("Node2 config: {}", node2_config));
-        
-    let mut node2 = Node::new(node2_config).await?;
 
+    let mut node2 = Node::new(node2_config).await?;
 
     node2.add_service(math_service2).await?;
 
@@ -99,7 +92,6 @@ async fn test_remote_action_call() -> Result<()> {
         serializer.register::<HashMap<String, f64>>()?;
         // The lock is automatically released here when `serializer` goes out of scope
     }
-
 
     node2.start().await?;
 
@@ -130,8 +122,10 @@ async fn test_remote_action_call() -> Result<()> {
         "a" => 4.0,
         "b" => 7.0
     });
-    
-    let response = node1.request("math2/multiply", Some(multiply_params)).await?;
+
+    let response = node1
+        .request("math2/multiply", Some(multiply_params))
+        .await?;
     if let Some(mut result_value) = response {
         let result: f64 = result_value.as_type()?;
         assert_eq!(result, 28.0);
